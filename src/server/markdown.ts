@@ -32,6 +32,9 @@ const GOAL_FIELDS = [
   "priority",
   "progress",
   "color",
+  "map_x",
+  "map_y",
+  "map_positions",
   "supports",
   "depends_on",
   "conflicts_with",
@@ -87,6 +90,45 @@ export function asWikilink(value: string) {
 function numberValue(value: unknown, fallback: number) {
   const next = Number(value);
   return Number.isFinite(next) ? next : fallback;
+}
+
+function optionalNumberValue(value: unknown) {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : undefined;
+}
+
+function mapPositionValue(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const x = optionalNumberValue((value as Record<string, unknown>).x);
+  const y = optionalNumberValue((value as Record<string, unknown>).y);
+  return x === undefined || y === undefined ? undefined : { x, y };
+}
+
+function mapPositionsValue(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([key, position]) => [key, mapPositionValue(position)] as const)
+    .filter((entry): entry is readonly [string, { x: number; y: number }] => Boolean(entry[0] && entry[1]));
+  return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
+function mergeMapPositions(
+  current: unknown,
+  patch: NonNullable<GoalPatchInput["map_positions"]>
+) {
+  const next = { ...(mapPositionsValue(current) ?? {}) };
+  for (const [contextId, position] of Object.entries(patch)) {
+    if (!contextId) continue;
+    if (position === null) {
+      delete next[contextId];
+      continue;
+    }
+    next[contextId] = {
+      x: Number(position.x),
+      y: Number(position.y)
+    };
+  }
+  return Object.keys(next).length ? next : undefined;
 }
 
 function cleanLines(lines?: string[]) {
@@ -551,6 +593,9 @@ export class VaultService {
         clarity: numberValue(data.clarity, 1),
         progress: primaryRootGoal ? undefined : numberValue(data.progress, numberValue(data.clarity, 1) * 20),
         color: String(data.color ?? ""),
+        map_x: optionalNumberValue(data.map_x),
+        map_y: optionalNumberValue(data.map_y),
+        map_positions: mapPositionsValue(data.map_positions),
         supports: asArray(data.supports),
         depends_on: asArray(data.depends_on),
         conflicts_with: asArray(data.conflicts_with),
@@ -723,6 +768,23 @@ export class VaultService {
     }
     if (input.priority !== undefined) nextData.priority = Number(input.priority);
     if (input.clarity !== undefined) nextData.clarity = Number(input.clarity);
+    if (input.map_x !== undefined) {
+      if (input.map_x === null) delete nextData.map_x;
+      else nextData.map_x = Number(input.map_x);
+    }
+    if (input.map_y !== undefined) {
+      if (input.map_y === null) delete nextData.map_y;
+      else nextData.map_y = Number(input.map_y);
+    }
+    if (input.map_positions !== undefined) {
+      const nextPositions = mergeMapPositions(nextData.map_positions, input.map_positions);
+      if (nextPositions) nextData.map_positions = nextPositions;
+      else delete nextData.map_positions;
+      if (input.map_positions.root === null) {
+        delete nextData.map_x;
+        delete nextData.map_y;
+      }
+    }
 
     const nextParent = input.parent !== undefined ? input.parent : goal.parent;
     const primaryRootGoal = isPrimaryRootGoal(nextTitle || goal.title, nextParent);

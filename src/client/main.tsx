@@ -79,6 +79,8 @@ type EditDraft = {
 
 type ImportanceOverrides = Record<string, number>;
 type ProgressOverrides = Record<string, number>;
+type MapPosition = { x: number; y: number };
+type MapPositionOverrides = Record<string, MapPosition>;
 type PendingEdit = {
   goal: GoalNode;
   draft: EditDraft;
@@ -354,6 +356,33 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function finitePosition(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+export function clampGoalscapePosition(position: MapPosition): MapPosition {
+  return {
+    x: clamp(Math.round(position.x), 80, goalscapeViewBox.width - 80),
+    y: clamp(Math.round(position.y), 70, goalscapeViewBox.height - 70)
+  };
+}
+
+function savedGoalMapPosition(goal: GoalNode, mapContextId: string): MapPosition | undefined {
+  const scoped = goal.map_positions?.[mapContextId];
+  if (scoped) return clampGoalscapePosition(scoped);
+  if (mapContextId !== "root") return undefined;
+  if (!finitePosition(goal.map_x) || !finitePosition(goal.map_y)) return undefined;
+  return clampGoalscapePosition({ x: goal.map_x, y: goal.map_y });
+}
+
+function goalMapPosition(goal: GoalNode, fallback: MapPosition, overrides: MapPositionOverrides, mapContextId: string) {
+  return overrides[goal.id] ? clampGoalscapePosition(overrides[goal.id]) : savedGoalMapPosition(goal, mapContextId) ?? fallback;
+}
+
+function hasCustomMapPosition(goal: GoalNode | undefined, mapContextId: string) {
+  return Boolean(goal && savedGoalMapPosition(goal, mapContextId));
+}
+
 function siblingGoals(goals: GoalNode[], selectedId: string) {
   const parents = buildParentMap(goals);
   const parentId = parents.get(selectedId) || "root";
@@ -428,6 +457,7 @@ function GoalApp() {
   const [error, setError] = useState("");
   const [importancePreview, setImportancePreview] = useState<ImportanceOverrides>({});
   const [progressPreview, setProgressPreview] = useState<ProgressOverrides>({});
+  const [mapPositionPreview, setMapPositionPreview] = useState<MapPositionOverrides>({});
   const [focusId, setFocusId] = useState("root");
   const [scopeListCollapsed, setScopeListCollapsed] = useState(true);
   const [deleteCandidate, setDeleteCandidate] = useState<GoalNode | null>(null);
@@ -484,6 +514,7 @@ function GoalApp() {
   const focusGoal = useMemo(() => (focusId === "root" ? undefined : findGoalById(visibleTree, focusId)), [focusId, visibleTree]);
   const focusParentId = useMemo(() => parentMapFocusId(visibleTree, focusId), [focusId, visibleTree]);
   const mapGoals = useMemo(() => (focusGoal ? focusGoal.children || [] : visibleTree), [focusGoal, visibleTree]);
+  const mapContextId = focusGoal?.id || "root";
   const domainTitles = useMemo(() => uniqueDomainTitles(goals.flatGoals), [goals.flatGoals]);
 
   useEffect(() => {
@@ -711,6 +742,46 @@ function GoalApp() {
     setProgressPreview({ [goalId]: clamp(Math.round(value), 0, 100) });
   }, []);
 
+  const previewMapPosition = useCallback((goalId: string, position: MapPosition) => {
+    setMapPositionPreview((current) => ({
+      ...current,
+      [goalId]: clampGoalscapePosition(position)
+    }));
+  }, []);
+
+  const saveMapPosition = useCallback((goalId: string, position: MapPosition) => {
+    const nextPosition = clampGoalscapePosition(position);
+    void runWrite(async () => {
+      await api(`/api/goals/${encodeURIComponent(goalId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ map_positions: { [mapContextId]: nextPosition } })
+      });
+      await loadGoals();
+      setMapPositionPreview((current) => {
+        const next = { ...current };
+        delete next[goalId];
+        return next;
+      });
+    }, "目标位置已保存");
+  }, [loadGoals, mapContextId, runWrite]);
+
+  const resetSelectedMapPosition = useCallback(() => {
+    if (!selectedGoalFull) return;
+    const goalId = selectedGoalFull.id;
+    void runWrite(async () => {
+      await api(`/api/goals/${encodeURIComponent(goalId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ map_positions: { [mapContextId]: null } })
+      });
+      await loadGoals();
+      setMapPositionPreview((current) => {
+        const next = { ...current };
+        delete next[goalId];
+        return next;
+      });
+    }, "目标位置已重置");
+  }, [loadGoals, mapContextId, runWrite, selectedGoalFull]);
+
   const createQuickGoal = async (mode: "subgoal" | "sibling") => {
     const parent = mode === "subgoal" ? selectedGoalFull : selectedParent;
     const source = selectedGoalFull || parent;
@@ -749,6 +820,7 @@ function GoalApp() {
     setSelectedId(id);
     setImportancePreview({});
     setProgressPreview({});
+    setMapPositionPreview({});
   }, [queuePendingEditSave]);
 
   const openParentMap = useCallback(() => {
@@ -815,9 +887,11 @@ function GoalApp() {
           <MapActions
             selectedGoal={selectedGoalFull}
             saving={saving}
+            canResetPosition={hasCustomMapPosition(selectedGoalFull, mapContextId)}
             onAddSubgoal={() => void createQuickGoal("subgoal")}
             onAddSibling={() => void createQuickGoal("sibling")}
             onRename={() => void renameSelectedGoal()}
+            onResetPosition={resetSelectedMapPosition}
             onDelete={() => selectedGoalFull && setDeleteCandidate(selectedGoalFull)}
           />
           {loading ? (
@@ -831,12 +905,16 @@ function GoalApp() {
               selectedId={selectedId}
               importanceOverrides={importancePreview}
               progressOverrides={progressPreview}
+              positionOverrides={mapPositionPreview}
+              mapContextId={mapContextId}
               centerId={focusGoal?.id || "root"}
               centerTitle={focusGoal?.title || "目标网络"}
               emptyLabel={focusGoal ? "这个目标还没有子目标" : "暂无可显示目标"}
               onSelect={selectGoal}
               onOpenMap={changeMapFocus}
               onOpenParentMap={focusGoal ? openParentMap : undefined}
+              onPreviewPosition={previewMapPosition}
+              onCommitPosition={saveMapPosition}
             />
           )}
         </section>
@@ -958,16 +1036,20 @@ function MapScopeList({
 function MapActions({
   selectedGoal,
   saving,
+  canResetPosition,
   onAddSubgoal,
   onAddSibling,
   onRename,
+  onResetPosition,
   onDelete
 }: {
   selectedGoal: GoalNode | undefined;
   saving: boolean;
+  canResetPosition: boolean;
   onAddSubgoal: () => void;
   onAddSibling: () => void;
   onRename: () => void;
+  onResetPosition: () => void;
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1005,6 +1087,18 @@ function MapActions({
             >
               <Pencil />
               重命名
+            </button>
+            <button
+              type="button"
+              className="menu-item"
+              disabled={disabled || !canResetPosition}
+              onClick={() => {
+                setOpen(false);
+                onResetPosition();
+              }}
+            >
+              <RefreshCw />
+              重置位置
             </button>
             <button
               type="button"
@@ -1288,10 +1382,12 @@ function goalscapeNodeColor(goal: GoalNode, fallback: string) {
   return normalizeHexColor(goal.color) || domainBaseColor(goal.domain || goal.title) || fallback;
 }
 
-function buildGoalscapeLayout(
+export function buildGoalscapeLayout(
   goals: GoalNode[],
   importanceOverrides: ImportanceOverrides,
-  progressOverrides: ProgressOverrides
+  progressOverrides: ProgressOverrides,
+  positionOverrides: MapPositionOverrides = {},
+  mapContextId = "root"
 ) {
   const topImportance = normalizedImportance(goals, importanceOverrides);
   const slots = assignGoalscapeSlots(goals);
@@ -1299,14 +1395,15 @@ function buildGoalscapeLayout(
 
   goals.forEach((goal, index) => {
     const slot = slots.get(goal.id) || fallbackGoalscapeSlot(index, goals.length);
+    const position = goalMapPosition(goal, { x: slot.x, y: slot.y }, positionOverrides, mapContextId);
     const color = goalscapeNodeColor(goal, slot.color);
     const importance = topImportance[goal.id] ?? 0;
     layouts.push({
       node: goal,
       parentId: "root",
       depth: 1,
-      x: slot.x,
-      y: slot.y,
+      x: position.x,
+      y: position.y,
       width: slot.width,
       height: slot.height,
       color,
@@ -1319,14 +1416,15 @@ function buildGoalscapeLayout(
     const children = goal.children.slice(0, 4);
     const childImportance = normalizedImportance(children, importanceOverrides);
     children.forEach((child, childIndex) => {
-      const offset = goalscapeChildOffset(slot, childIndex, children.length);
+      const offset = goalscapeChildOffset(position, childIndex, children.length);
+      const childPosition = goalMapPosition(child, { x: position.x + offset.x, y: position.y + offset.y }, positionOverrides, mapContextId);
       const childColor = goalscapeNodeColor(child, color);
       layouts.push({
         node: child,
         parentId: goal.id,
         depth: 2,
-        x: slot.x + offset.x,
-        y: slot.y + offset.y,
+        x: childPosition.x,
+        y: childPosition.y,
         width: childIndex === 0 && slot.key === "growth" ? 154 : 128,
         height: childIndex === 0 && slot.key === "growth" ? 98 : 82,
         color: childColor,
@@ -1441,33 +1539,129 @@ const GoalMap = React.memo(function GoalMap({
   selectedId,
   importanceOverrides,
   progressOverrides,
+  positionOverrides,
+  mapContextId,
   centerId,
   centerTitle,
   emptyLabel,
   onSelect,
   onOpenMap,
-  onOpenParentMap
+  onOpenParentMap,
+  onPreviewPosition,
+  onCommitPosition
 }: {
   goals: GoalNode[];
   selectedId: string;
   importanceOverrides: ImportanceOverrides;
   progressOverrides: ProgressOverrides;
+  positionOverrides: MapPositionOverrides;
+  mapContextId: string;
   centerId: string;
   centerTitle: string;
   emptyLabel: string;
   onSelect: (id: string) => void;
   onOpenMap: (id: string) => void;
   onOpenParentMap?: () => void;
+  onPreviewPosition: (id: string, position: MapPosition) => void;
+  onCommitPosition: (id: string, position: MapPosition) => void;
 }) {
   const layouts = useMemo(
-    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides),
-    [goals, importanceOverrides, progressOverrides]
+    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId),
+    [goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId]
   );
   const family = useMemo(() => selectedFamily(goals, selectedId), [goals, selectedId]);
   const topLayouts = useMemo(() => layouts.filter((item) => item.depth === 1), [layouts]);
   const childLayouts = useMemo(() => layouts.filter((item) => item.depth === 2), [layouts]);
   const topLayoutById = useMemo(() => new Map(topLayouts.map((item) => [item.node.id, item])), [topLayouts]);
   const visibleLayouts = useMemo(() => [...topLayouts, ...childLayouts], [topLayouts, childLayouts]);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const dragRef = useRef<{
+    id: string;
+    pointerId: number;
+    pointerStart: MapPosition;
+    nodeStart: MapPosition;
+    current: MapPosition;
+    moved: boolean;
+    frame: number | null;
+  } | null>(null);
+  const suppressClickRef = useRef<string | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  const pointFromPointer = useCallback((event: PointerEvent | React.PointerEvent<SVGGElement>) => {
+    const svg = svgRef.current;
+    const matrix = svg?.getScreenCTM();
+    if (!svg || !matrix) return null;
+    const point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    return clampGoalscapePosition(point.matrixTransform(matrix.inverse()));
+  }, []);
+
+  const moveDrag = useCallback((event: PointerEvent) => {
+    const drag = dragRef.current;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const point = pointFromPointer(event);
+    if (!point) return;
+    const next = clampGoalscapePosition({
+      x: drag.nodeStart.x + point.x - drag.pointerStart.x,
+      y: drag.nodeStart.y + point.y - drag.pointerStart.y
+    });
+    drag.current = next;
+    if (Math.hypot(next.x - drag.nodeStart.x, next.y - drag.nodeStart.y) > 3) drag.moved = true;
+    if (drag.frame === null) {
+      drag.frame = window.requestAnimationFrame(() => {
+        const currentDrag = dragRef.current;
+        if (!currentDrag) return;
+        currentDrag.frame = null;
+        onPreviewPosition(currentDrag.id, currentDrag.current);
+      });
+    }
+  }, [onPreviewPosition, pointFromPointer]);
+
+  function finishDrag(event?: PointerEvent) {
+    const drag = dragRef.current;
+    if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+    if (drag.frame !== null) window.cancelAnimationFrame(drag.frame);
+    dragRef.current = null;
+    setDraggingId(null);
+    window.removeEventListener("pointermove", moveDrag);
+    window.removeEventListener("pointerup", finishDrag);
+    window.removeEventListener("pointercancel", finishDrag);
+    if (drag.moved) {
+      suppressClickRef.current = drag.id;
+      onPreviewPosition(drag.id, drag.current);
+      onCommitPosition(drag.id, drag.current);
+    }
+  }
+
+  useEffect(() => () => {
+    const drag = dragRef.current;
+    if (drag && drag.frame !== null) window.cancelAnimationFrame(drag.frame);
+    window.removeEventListener("pointermove", moveDrag);
+    window.removeEventListener("pointerup", finishDrag);
+    window.removeEventListener("pointercancel", finishDrag);
+  }, []);
+
+  const startNodeDrag = useCallback((event: React.PointerEvent<SVGGElement>, layout: GoalscapeNodeLayout) => {
+    if (event.button !== 0) return;
+    const pointerStart = pointFromPointer(event);
+    if (!pointerStart) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current = {
+      id: layout.node.id,
+      pointerId: event.pointerId,
+      pointerStart,
+      nodeStart: { x: layout.x, y: layout.y },
+      current: { x: layout.x, y: layout.y },
+      moved: false,
+      frame: null
+    };
+    setDraggingId(layout.node.id);
+    window.addEventListener("pointermove", moveDrag);
+    window.addEventListener("pointerup", finishDrag);
+    window.addEventListener("pointercancel", finishDrag);
+  }, [finishDrag, moveDrag, pointFromPointer]);
 
   const selectOnKey = useCallback((event: React.KeyboardEvent<SVGGElement>, id: string) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -1477,7 +1671,7 @@ const GoalMap = React.memo(function GoalMap({
   }, [onSelect]);
 
   return (
-    <svg className="goal-map goalscape-map" viewBox="0 0 1200 760" role="img" aria-labelledby="map-title map-desc">
+    <svg ref={svgRef} className="goal-map goalscape-map" viewBox="0 0 1200 760" role="img" aria-labelledby="map-title map-desc">
       <title id="map-title">{centerTitle}目标地图</title>
       <desc id="map-desc">用发光岛屿节点展示目标层级，并用连接线表达目标关系。</desc>
       <defs>
@@ -1578,13 +1772,22 @@ const GoalMap = React.memo(function GoalMap({
         return (
           <g
             key={layout.node.id}
-            className={`goalscape-node depth-${layout.depth}${active ? " active" : ""}${related ? "" : " dim"}`}
+            className={`goalscape-node depth-${layout.depth}${active ? " active" : ""}${related ? "" : " dim"}${draggingId === layout.node.id ? " dragging" : ""}`}
             role="button"
             tabIndex={0}
             focusable="true"
             aria-label={`${layout.node.title}，进度 ${layout.progress}%${opensSubmap ? "，双击打开目标地图" : ""}`}
             style={{ "--node-color": layout.color } as React.CSSProperties & { "--node-color": string }}
-            onClick={() => onSelect(layout.node.id)}
+            onPointerDown={(event) => startNodeDrag(event, layout)}
+            onClick={(event) => {
+              if (suppressClickRef.current === layout.node.id) {
+                suppressClickRef.current = null;
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+              }
+              onSelect(layout.node.id);
+            }}
             onDoubleClick={(event) => {
               if (!opensSubmap) return;
               event.preventDefault();

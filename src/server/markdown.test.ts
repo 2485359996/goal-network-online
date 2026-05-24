@@ -283,6 +283,41 @@ describe("VaultService markdown operations", () => {
     ]);
   });
 
+  it("merges and clears scoped map positions", async () => {
+    const service = new VaultService(root);
+    const before = await service.readGoals();
+    const child = before.flatGoals.find((goal) => goal.title === "褰撳墠浜や粯");
+    const target = child ?? before.flatGoals.find((goal) => goal.parent);
+    expect(target).toBeDefined();
+
+    await service.patchGoal(target!.id, {
+      map_x: 12,
+      map_y: 34,
+      map_positions: {
+        root: { x: 100, y: 200 },
+        parent: { x: 300, y: 400 }
+      }
+    });
+
+    let after = await service.readGoals();
+    let patched = after.flatGoals.find((goal) => goal.id === target!.id);
+    expect(patched?.map_positions).toEqual({
+      root: { x: 100, y: 200 },
+      parent: { x: 300, y: 400 }
+    });
+
+    await service.patchGoal(target!.id, { map_positions: { parent: null } });
+    after = await service.readGoals();
+    patched = after.flatGoals.find((goal) => goal.id === target!.id);
+    expect(patched?.map_positions).toEqual({ root: { x: 100, y: 200 } });
+
+    await service.patchGoal(target!.id, { map_positions: { root: null } });
+    const content = await fs.readFile(path.join(root, target!.filePath), "utf8");
+    expect(content).not.toMatch(/^map_positions:/m);
+    expect(content).not.toMatch(/^map_x:/m);
+    expect(content).not.toMatch(/^map_y:/m);
+  });
+
   it("adds stable ids when patching legacy weekly actions", async () => {
     const service = new VaultService(root);
     const before = await service.readCurrentActions("2026-W21");

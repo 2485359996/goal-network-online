@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { GoalNode } from "../shared/types";
-import { assignGoalscapeSlots, goalscapeCenter, goalscapeChildOffset, goalscapeLiquidGeometry, parentMapFocusId } from "./main";
+import {
+  assignGoalscapeSlots,
+  buildGoalscapeLayout,
+  clampGoalscapePosition,
+  goalscapeCenter,
+  goalscapeChildOffset,
+  goalscapeLiquidGeometry,
+  parentMapFocusId
+} from "./main";
 
 function goal(id: string, title = id): GoalNode {
   return { id, title, domain: "", color: "", priority: 1, clarity: 1, children: [] } as unknown as GoalNode;
@@ -56,6 +64,27 @@ describe("goalscape layout", () => {
     expect(leftOffsets.every((offset) => offset.x < 0)).toBe(true);
     expect(topOffsets.every((offset) => offset.y < 0)).toBe(true);
     expect(bottomOffsets.every((offset) => offset.y > 0)).toBe(true);
+  });
+
+  it("uses saved or previewed map positions before generated slots", () => {
+    const saved = { ...goal("saved"), map_positions: { root: { x: 420, y: 260 } } };
+    const previewed = goal("previewed");
+    const layouts = buildGoalscapeLayout([saved, previewed], {}, {}, { previewed: { x: 900, y: 510 } });
+
+    expect(layouts.find((layout) => layout.node.id === "saved")).toMatchObject({ x: 420, y: 260 });
+    expect(layouts.find((layout) => layout.node.id === "previewed")).toMatchObject({ x: 900, y: 510 });
+  });
+
+  it("scopes saved map positions to the current focus context", () => {
+    const scoped = { ...goal("scoped"), map_positions: { root: { x: 420, y: 260 }, parent: { x: 880, y: 500 } } };
+
+    expect(buildGoalscapeLayout([scoped], {}, {}, {}, "root")[0]).toMatchObject({ x: 420, y: 260 });
+    expect(buildGoalscapeLayout([scoped], {}, {}, {}, "parent")[0]).toMatchObject({ x: 880, y: 500 });
+    expect(buildGoalscapeLayout([scoped], {}, {}, {}, "other")[0]).toMatchObject({ x: 310, y: 380 });
+  });
+
+  it("keeps custom positions inside the goalscape viewbox", () => {
+    expect(clampGoalscapePosition({ x: -100, y: 999 })).toEqual({ x: 80, y: 690 });
   });
 
   it("resolves the previous map focus for center-node double click", () => {

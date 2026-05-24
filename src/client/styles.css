@@ -1607,15 +1607,30 @@ textarea:focus {
   transform-origin: center;
 }
 
+.goalscape-node {
+  touch-action: none;
+}
+
+.goalscape-node.dragging {
+  cursor: grabbing;
+  transition: opacity 120ms ease;
+  transform: none;
+}
+
 .goalscape-node.dim {
   opacity: 0.24;
 }
 
 .goalscape-node:hover,
 .goalscape-node:focus-visible,
+.goalscape-node.dragging,
 .goalscape-center:hover,
 .goalscape-center:focus-visible {
   transform: translateY(-4px);
+}
+
+.goalscape-node.dragging {
+  transform: none;
 }
 
 .goalscape-node-halo {

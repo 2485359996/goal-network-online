@@ -7,6 +7,11 @@ export interface GoalActionCandidate {
   done: boolean;
 }
 
+export interface GoalMapPosition {
+  x: number;
+  y: number;
+}
+
 export type GoalActionCandidateInput = GoalActionCandidate | string;
 
 export interface GoalSections {
@@ -30,6 +35,9 @@ export interface GoalNode {
   clarity: number;
   progress?: number;
   color: string;
+  map_x?: number;
+  map_y?: number;
+  map_positions?: Record<string, GoalMapPosition>;
   supports: string[];
   depends_on: string[];
   conflicts_with: string[];
@@ -75,6 +83,9 @@ export interface GoalPatchInput {
   clarity?: number;
   progress?: number;
   color?: string;
+  map_x?: number | null;
+  map_y?: number | null;
+  map_positions?: Record<string, GoalMapPosition | null>;
   last_reviewed?: string;
   last_progress?: string;
   summary?: string;

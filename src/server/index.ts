@@ -39,6 +39,11 @@ watcher.on("all", (event, filePath) => {
   });
 });
 
+const goalMapPositionSchema = z.object({
+  x: z.number(),
+  y: z.number()
+});
+
 const goalPatchSchema = z.object({
   title: z.string().min(1).optional(),
   status: z.enum(["active", "paused", "done", "archived"]).optional(),
@@ -49,6 +54,9 @@ const goalPatchSchema = z.object({
   clarity: z.number().min(1).max(5).optional(),
   progress: z.number().min(0).max(100).optional(),
   color: z.string().optional(),
+  map_x: z.number().nullable().optional(),
+  map_y: z.number().nullable().optional(),
+  map_positions: z.record(z.string(), goalMapPositionSchema.nullable()).optional(),
   last_reviewed: z.string().optional(),
   last_progress: z.string().optional(),
   summary: z.string().optional(),
