@@ -87,6 +87,18 @@ export function asWikilink(value: string) {
   return title ? `[[${title}]]` : "";
 }
 
+function referenceTitle(value: string) {
+  return wikilinkTargetTitle(titleFromWikilink(value));
+}
+
+function referenceKey(value: string) {
+  return referenceTitle(value).replace(/\s+/g, "").toLocaleLowerCase();
+}
+
+function referencesSameGoal(left: string, right: string) {
+  return referenceKey(left) === referenceKey(right);
+}
+
 function numberValue(value: unknown, fallback: number) {
   const next = Number(value);
   return Number.isFinite(next) ? next : fallback;
@@ -133,10 +145,6 @@ function mergeMapPositions(
 
 function cleanLines(lines?: string[]) {
   return (lines ?? []).map((line) => line.trim()).filter(Boolean);
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function parseTitle(body: string, fallback: string) {
@@ -209,7 +217,7 @@ function taskListSection(body: string, heading: string): GoalActionCandidate[] {
 function stripGoalReference(value: string, expectedTitle?: string) {
   return value
     .replace(/\s*\bgoal::\s*\[\[([^\]\r\n]+)(?:\]\])?/g, (match, title) =>
-      !expectedTitle || titleFromWikilink(`[[${title}]]`) === expectedTitle ? "" : match
+      !expectedTitle || referencesSameGoal(`[[${title}]]`, expectedTitle) ? "" : match
     )
     .replace(/\s{2,}/g, " ")
     .trim();
@@ -308,15 +316,15 @@ function wikilinkTargetTitle(raw: string) {
   return raw.split("|")[0].split("#")[0].trim();
 }
 
-function lineReferencesDeletedGoal(line: string, deletedTitles: Set<string>) {
+function lineReferencesDeletedGoal(line: string, deletedKeys: Set<string>) {
   for (const match of line.matchAll(/\[\[([^\]]+)\]\]/g)) {
-    if (deletedTitles.has(wikilinkTargetTitle(match[1]))) return true;
+    if (deletedKeys.has(referenceKey(wikilinkTargetTitle(match[1])))) return true;
   }
   return false;
 }
 
-function removeDeletedGoalListItems(body: string, deletedTitles: Set<string>) {
-  if (!deletedTitles.size) return { body, changed: false };
+function removeDeletedGoalListItems(body: string, deletedKeys: Set<string>) {
+  if (!deletedKeys.size) return { body, changed: false };
 
   const lines = body.split(/\r?\n/);
   let changed = false;
@@ -328,7 +336,7 @@ function removeDeletedGoalListItems(body: string, deletedTitles: Set<string>) {
     let sectionChanged = false;
     for (let index = range.end - 1; index > range.start; index -= 1) {
       const line = lines[index];
-      if (line.trim().startsWith("- ") && lineReferencesDeletedGoal(line, deletedTitles)) {
+      if (line.trim().startsWith("- ") && lineReferencesDeletedGoal(line, deletedKeys)) {
         lines.splice(index, 1);
         changed = true;
         sectionChanged = true;
@@ -373,6 +381,50 @@ function removeGoalDateFields(data: Record<string, unknown>) {
 
 function isPrimaryRootGoal(title: string, parent: unknown) {
   return isPrimaryGoalTitle(title) && !titleFromWikilink(String(stripQuotes(parent) ?? ""));
+}
+
+function fileTitleFromRelativePath(filePath: string) {
+  return path.basename(filePath.split("/").pop() ?? filePath, ".md");
+}
+
+function referenceAliasesForGoal(goal: Pick<GoalNode, "title" | "filePath">) {
+  return [goal.title, fileTitleFromRelativePath(goal.filePath)];
+}
+
+function buildGoalReferenceResolver(goals: GoalNode[]) {
+  const exact = new Map(goals.map((goal) => [goal.title, goal]));
+  const aliases = new Map<string, GoalNode>();
+  const ambiguous = new Set<string>();
+
+  for (const goal of goals) {
+    for (const alias of referenceAliasesForGoal(goal)) {
+      const key = referenceKey(alias);
+      if (!key || ambiguous.has(key)) continue;
+      const current = aliases.get(key);
+      if (current && current.id !== goal.id) {
+        aliases.delete(key);
+        ambiguous.add(key);
+      } else {
+        aliases.set(key, goal);
+      }
+    }
+  }
+
+  return (value: string) => {
+    const title = referenceTitle(value);
+    return exact.get(title) ?? aliases.get(referenceKey(title));
+  };
+}
+
+function goalReferenceExists(goals: GoalNode[], title: string, exceptId?: string) {
+  const key = referenceKey(title);
+  return goals.some((goal) => goal.id !== exceptId && referenceAliasesForGoal(goal).some((alias) => referenceKey(alias) === key));
+}
+
+function replaceMatchingWikilinks(body: string, oldTitle: string, newTitle: string) {
+  return body.replace(/\[\[([^\]]+)\]\]/g, (match, target) =>
+    referencesSameGoal(wikilinkTargetTitle(target), oldTitle) ? asWikilink(newTitle) : match
+  );
 }
 
 async function readMarkdown(filePath: string) {
@@ -450,6 +502,32 @@ function goalFilePath(root: string, title: string, domain: unknown, parent: unkn
     ...(parentFolder ? [parentFolder] : []),
     `${safeFileName(title)}.md`
   );
+}
+
+function priorityWeight(value: number | undefined, fallback = 1) {
+  const next = Number(value);
+  return Number.isFinite(next) && next > 0 ? next : fallback;
+}
+
+function computeWeightedProgress(goal: GoalNode): number {
+  if (goal.children.length === 0) {
+    return numberValue(goal.progress, numberValue(goal.clarity, 0));
+  }
+
+  const weights = goal.children.map((child) => priorityWeight(child.priority));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  const weighted = goal.children.reduce((sum, child, index) => {
+    const share = totalWeight > 0 ? weights[index] / totalWeight : 1 / goal.children.length;
+    return sum + computeWeightedProgress(child) * share;
+  }, 0);
+  return Math.max(0, Math.min(100, Math.round(weighted)));
+}
+
+function applyWeightedProgress(goals: GoalNode[]) {
+  for (const goal of goals) {
+    if (goal.children.length > 0) goal.progress = computeWeightedProgress(goal);
+    applyWeightedProgress(goal.children);
+  }
 }
 
 function samePath(left: string, right: string) {
@@ -614,13 +692,13 @@ export class VaultService {
       });
     }
 
-    const byTitle = new Map(goals.map((goal) => [goal.title, goal]));
+    const resolveGoalReference = buildGoalReferenceResolver(goals);
     const byId = new Map(goals.map((goal) => [goal.id, goal]));
     const topLevel: GoalNode[] = [];
 
     for (const goal of goals) {
-      const parentTitle = titleFromWikilink(goal.parent);
-      const parent = parentTitle ? byTitle.get(parentTitle) : undefined;
+      const parentTitle = referenceTitle(goal.parent);
+      const parent = parentTitle ? resolveGoalReference(parentTitle) : undefined;
       if (parent) parent.children.push(goal);
       else topLevel.push(goal);
     }
@@ -636,13 +714,13 @@ export class VaultService {
 
     const edges: GoalGraphEdge[] = [];
     for (const goal of goals) {
-      const parent = byTitle.get(titleFromWikilink(goal.parent));
+      const parent = resolveGoalReference(goal.parent);
       if (parent) {
         edges.push({ id: `${parent.id}->${goal.id}:parent`, source: parent.id, target: goal.id, type: "parent" });
       }
       for (const type of ["supports", "depends_on", "conflicts_with"] as const) {
         for (const link of goal[type]) {
-          const target = byTitle.get(titleFromWikilink(link));
+          const target = resolveGoalReference(link);
           if (target && byId.has(target.id)) {
             edges.push({ id: `${goal.id}->${target.id}:${type}`, source: goal.id, target: target.id, type });
           }
@@ -655,6 +733,7 @@ export class VaultService {
       items.forEach((item) => sortGoals(item.children));
     };
     sortGoals(topLevel);
+    applyWeightedProgress(topLevel);
 
     return { goals: topLevel, flatGoals: goals, graph: { nodes: graphNodes, edges } };
   }
@@ -672,7 +751,7 @@ export class VaultService {
 
       for (const key of ["parent", "domain"] as const) {
         const current = String(stripQuotes(nextData[key]) ?? "");
-        if (titleFromWikilink(current) === oldTitle) {
+        if (referencesSameGoal(current, oldTitle)) {
           nextData[key] = asWikilink(newTitle);
           changed = true;
           if (key === "parent") parentChanged = true;
@@ -681,14 +760,14 @@ export class VaultService {
 
       for (const key of ["supports", "depends_on", "conflicts_with"] as const) {
         const current = asArray(nextData[key]);
-        const next = current.map((item) => (titleFromWikilink(item) === oldTitle ? asWikilink(newTitle) : item));
+        const next = current.map((item) => (referencesSameGoal(item, oldTitle) ? asWikilink(newTitle) : item));
         if (next.join("\n") !== current.join("\n")) {
           nextData[key] = next;
           changed = true;
         }
       }
 
-      const nextBody = body.replace(new RegExp(`\\[\\[${escapeRegExp(oldTitle)}\\]\\]`, "g"), asWikilink(newTitle));
+      const nextBody = replaceMatchingWikilinks(body, oldTitle, newTitle);
       if (nextBody !== body) changed = true;
       if (parentChanged) {
         const currentId = String(stripQuotes(nextData.id) ?? "");
@@ -713,23 +792,24 @@ export class VaultService {
   }
 
   private async removeGoalReferences(deletedTitles: Set<string>) {
+    const deletedKeys = new Set(Array.from(deletedTitles, referenceKey));
     const files = await markdownFiles(this.goalRoot());
     for (const filePath of files) {
       const { data, body } = await readMarkdown(filePath);
       let changed = false;
       const nextData = removeGoalDateFields(data);
-      const nextBody = removeDeletedGoalListItems(body, deletedTitles);
+      const nextBody = removeDeletedGoalListItems(body, deletedKeys);
       if (nextBody.changed) changed = true;
 
       const parent = titleFromWikilink(String(stripQuotes(nextData.parent) ?? ""));
-      if (deletedTitles.has(parent)) {
+      if (deletedKeys.has(referenceKey(parent))) {
         nextData.parent = "";
         changed = true;
       }
 
       for (const key of ["supports", "depends_on", "conflicts_with"] as const) {
         const current = asArray(nextData[key]);
-        const next = current.filter((item) => !deletedTitles.has(titleFromWikilink(item)));
+        const next = current.filter((item) => !deletedKeys.has(referenceKey(item)));
         if (next.join("\n") !== current.join("\n")) {
           nextData[key] = next;
           changed = true;
@@ -748,7 +828,7 @@ export class VaultService {
     const { data, body } = await readMarkdown(absolutePath);
     const nextData = removeGoalDateFields(data);
     const nextTitle = input.title?.trim();
-    if (nextTitle && nextTitle !== goal.title && flatGoals.some((item) => item.id !== id && item.title === nextTitle)) {
+    if (nextTitle && nextTitle !== goal.title && goalReferenceExists(flatGoals, nextTitle, id)) {
       throw new Error(`目标已存在：${nextTitle}`);
     }
 
@@ -788,7 +868,8 @@ export class VaultService {
 
     const nextParent = input.parent !== undefined ? input.parent : goal.parent;
     const primaryRootGoal = isPrimaryRootGoal(nextTitle || goal.title, nextParent);
-    if (primaryRootGoal) {
+    const childDerivedProgress = goal.children.length > 0;
+    if (primaryRootGoal || childDerivedProgress) {
       delete nextData.progress;
     } else if (input.progress !== undefined) {
       nextData.progress = Number(input.progress);
@@ -873,7 +954,7 @@ export class VaultService {
     const title = input.title.trim();
     if (!title) throw new Error("目标名称不能为空");
     const { flatGoals } = await this.readGoals();
-    if (flatGoals.some((goal) => goal.title === title)) throw new Error(`目标已存在：${title}`);
+    if (goalReferenceExists(flatGoals, title)) throw new Error(`目标已存在：${title}`);
 
     const domainTitle = titleFromWikilink(input.domain || title);
     const parentTitle = titleFromWikilink(input.parent || "");

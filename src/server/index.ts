@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import chokidar from "chokidar";
 import Fastify from "fastify";
 import { z } from "zod";
+import { registerAiRoutes } from "./ai";
 import { VaultService, resolveVaultRoot } from "./markdown";
 
 const host = "127.0.0.1";
@@ -14,6 +15,8 @@ const clients = new Set<NodeJS.WritableStream>();
 await app.register(cors, {
   origin: ["http://127.0.0.1:5173", "http://localhost:5173"]
 });
+
+registerAiRoutes(app);
 
 function sendEvent(payload: unknown) {
   const body = `data: ${JSON.stringify(payload)}\n\n`;
@@ -44,6 +47,14 @@ const goalMapPositionSchema = z.object({
   y: z.number()
 });
 
+const goalActionCandidateInputSchema = z.union([
+  z.string(),
+  z.object({
+    text: z.string(),
+    done: z.boolean()
+  })
+]);
+
 const goalPatchSchema = z.object({
   title: z.string().min(1).optional(),
   status: z.enum(["active", "paused", "done", "archived"]).optional(),
@@ -62,7 +73,7 @@ const goalPatchSchema = z.object({
   summary: z.string().optional(),
   directions: z.array(z.string()).optional(),
   successSignals: z.array(z.string()).optional(),
-  actionCandidates: z.array(z.string()).optional(),
+  actionCandidates: z.array(goalActionCandidateInputSchema).optional(),
   reviewQuestions: z.array(z.string()).optional()
 });
 
@@ -78,7 +89,7 @@ const goalCreateSchema = z.object({
   summary: z.string().optional(),
   directions: z.array(z.string()).optional(),
   successSignals: z.array(z.string()).optional(),
-  actionCandidates: z.array(z.string()).optional(),
+  actionCandidates: z.array(goalActionCandidateInputSchema).optional(),
   reviewQuestions: z.array(z.string()).optional()
 });
 

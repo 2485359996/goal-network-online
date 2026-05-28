@@ -1,6 +1,6 @@
 import type { GoalNode } from "./types";
 
-export const PRIMARY_GOAL_TITLES = ["职业发展", "个人成长", "幸福的生活"] as const;
+export const PRIMARY_GOAL_TITLES = ["职业发展", "个人成长", "幸福生活"] as const;
 
 const primaryGoalTitleSet = new Set<string>(PRIMARY_GOAL_TITLES);
 

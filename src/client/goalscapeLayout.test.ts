@@ -3,11 +3,15 @@ import type { GoalNode } from "../shared/types";
 import {
   assignGoalscapeSlots,
   buildGoalscapeLayout,
+  canOpenGoalSubmap,
   clampGoalscapePosition,
   goalscapeCenter,
   goalscapeChildOffset,
-  goalscapeLiquidGeometry,
-  parentMapFocusId
+  goalscapeNodeDensity,
+  goalscapeProgressFillGeometry,
+  goalscapeStarlightCoreRadius,
+  parentMapFocusId,
+  weightedGoalProgress
 } from "./main";
 
 function goal(id: string, title = id): GoalNode {
@@ -96,16 +100,48 @@ describe("goalscape layout", () => {
     expect(parentMapFocusId([parent], "root")).toBe("root");
   });
 
-  it("maps progress to liquid amount instead of color depth", () => {
-    const empty = goalscapeLiquidGeometry(100, 100, 120, 80, 0);
-    const half = goalscapeLiquidGeometry(100, 100, 120, 80, 50);
-    const full = goalscapeLiquidGeometry(100, 100, 120, 80, 100);
+  it("allows descendant goals with children to open their own map focus", () => {
+    const leaf = goal("leaf");
+    const branch = { ...goal("branch"), children: [leaf] };
 
-    expect(empty.fillRatio).toBe(0);
-    expect(full.fillRatio).toBe(1);
-    expect(empty.surfaceY).toBeCloseTo(empty.bottomY);
-    expect(half.surfaceY).toBeLessThan(empty.surfaceY);
-    expect(full.surfaceY).toBeLessThan(half.surfaceY);
-    expect(Math.abs(half.surfaceY - 100)).toBeLessThan(3);
+    expect(canOpenGoalSubmap({ node: goal("top"), depth: 1 })).toBe(true);
+    expect(canOpenGoalSubmap({ node: branch, depth: 2 })).toBe(true);
+    expect(canOpenGoalSubmap({ node: leaf, depth: 2 })).toBe(false);
+  });
+
+  it("interpolates crystal node density and starlight core radius correctly", () => {
+    // Check node density scale from 0 to 100
+    expect(goalscapeNodeDensity(0)).toBe(0.12);
+    expect(goalscapeNodeDensity(50)).toBeCloseTo(0.46);
+    expect(goalscapeNodeDensity(100)).toBe(0.8);
+
+    // Out of bounds safety clamp
+    expect(goalscapeNodeDensity(-20)).toBe(0.12);
+    expect(goalscapeNodeDensity(150)).toBe(0.8);
+
+    // Check core radius scale from 0 to 100
+    expect(goalscapeStarlightCoreRadius(10, 0)).toBeCloseTo(2);
+    expect(goalscapeStarlightCoreRadius(10, 50)).toBeCloseTo(6);
+    expect(goalscapeStarlightCoreRadius(10, 100)).toBeCloseTo(10);
+  });
+
+  it("maps live progress previews to layout and fill geometry", () => {
+    const previewed = { ...goal("previewed"), progress: 20 };
+    const layout = buildGoalscapeLayout([previewed], {}, { previewed: 75 })[0];
+    const fill = goalscapeProgressFillGeometry(layout.y, layout.height, layout.progress);
+
+    expect(layout.progress).toBe(75);
+    expect(fill.height).toBeCloseTo(layout.height * 0.75);
+    expect(fill.y).toBeCloseTo(layout.y + layout.height / 2 - layout.height * 0.75);
+  });
+
+  it("derives parent progress from immediate child progress weighted by importance", () => {
+    const light = { ...goal("light"), priority: 1, progress: 20 };
+    const heavy = { ...goal("heavy"), priority: 3, progress: 80 };
+    const parent = { ...goal("parent"), progress: 0, children: [light, heavy] };
+
+    expect(weightedGoalProgress(parent)).toBe(65);
+    expect(weightedGoalProgress(parent, { light: 75, heavy: 25 }, { heavy: 100 })).toBe(40);
+    expect(buildGoalscapeLayout([parent], {}, {})[0].progress).toBe(65);
   });
 });

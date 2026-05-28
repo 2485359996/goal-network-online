@@ -128,7 +128,7 @@ describe("VaultService markdown operations", () => {
 
     expect(response.flatGoals).toHaveLength(2);
     expect(response.goals[0].title).toBe("职业发展");
-    expect(response.goals[0].progress).toBeUndefined();
+    expect(response.goals[0].progress).toBe(20);
     expect(response.goals[0].sections.actionCandidates).toEqual([]);
     expect(response.goals[0].children[0].title).toBe("当前交付");
     expect(response.flatGoals.map((goal) => goal.filePath).sort()).toEqual([
@@ -140,6 +140,76 @@ describe("VaultService markdown operations", () => {
       done: false
     });
     expect(response.graph.edges.some((edge) => edge.type === "parent")).toBe(true);
+  });
+
+  it("resolves wikilinks through file-name aliases when headings contain spaces", async () => {
+    await write(
+      "目标/职业发展/能力建设/AI产品认知.md",
+      `---
+type: goal
+id: goal-能力建设-ai产品认知
+status: active
+horizon: short
+domain: "[[职业发展]]"
+parent: "[[当前交付]]"
+clarity: 1
+priority: 3
+supports:
+  - "[[当前交付]]"
+depends_on: []
+conflicts_with: []
+last_reviewed: ""
+last_progress: ""
+tags:
+  - goal-network
+---
+# AI 产品认知
+
+> [!summary] 目标定义
+> 建立 AI 产品判断。
+`
+    );
+    await write(
+      "目标/职业发展/博客文章.md",
+      `---
+type: goal
+id: goal-职业发展-博客文章
+status: active
+horizon: short
+domain: "[[职业发展]]"
+parent: "[[职业发展]]"
+clarity: 1
+priority: 2
+supports: []
+depends_on:
+  - "[[AI产品认知]]"
+conflicts_with: []
+last_reviewed: ""
+last_progress: ""
+tags:
+  - goal-network
+---
+# 博客文章
+
+> [!summary] 目标定义
+> 输出文章。
+`
+    );
+
+    const service = new VaultService(root);
+    const response = await service.readGoals();
+    const aiGoal = response.flatGoals.find((goal) => goal.title === "AI 产品认知");
+    const blogGoal = response.flatGoals.find((goal) => goal.title === "博客文章");
+
+    expect(aiGoal).toBeDefined();
+    expect(blogGoal).toBeDefined();
+    expect(response.flatGoals.find((goal) => goal.title === "当前交付")?.children.map((goal) => goal.title)).toContain("AI 产品认知");
+    expect(response.graph.edges).toContainEqual({
+      id: `${blogGoal!.id}->${aiGoal!.id}:depends_on`,
+      source: blogGoal!.id,
+      target: aiGoal!.id,
+      type: "depends_on"
+    });
   });
 
   it("does not persist progress or action candidates on primary root goals", async () => {
@@ -158,6 +228,59 @@ describe("VaultService markdown operations", () => {
     expect(content).not.toMatch(/^progress:/m);
     expect(content).not.toContain("## 行动候选");
     expect(content).not.toContain("不应写入一级目标");
+  });
+
+  it("derives parent progress from children and does not persist manual parent progress", async () => {
+    await write(
+      "目标/职业发展/当前交付/AI产品认知.md",
+      `---
+type: goal
+id: goal-当前交付-ai产品认知
+status: active
+horizon: short
+domain: "[[职业发展]]"
+parent: "[[当前交付]]"
+clarity: 1
+priority: 3
+progress: 80
+supports: []
+depends_on: []
+conflicts_with: []
+last_reviewed: ""
+last_progress: ""
+tags:
+  - goal-network
+---
+# AI产品认知
+
+> [!summary] 目标定义
+> 提升 AI 产品判断。
+
+## 子方向
+- 竞品拆解
+
+## 成功信号
+- 输出分析。
+
+## 行动候选
+- [ ] 拆解一个产品
+
+## 复盘问题
+- 有没有形成判断？
+`
+    );
+    const service = new VaultService(root);
+    const before = await service.readGoals();
+    const parent = before.flatGoals.find((goal) => goal.title === "当前交付");
+    expect(parent?.progress).toBe(80);
+
+    await service.patchGoal(parent!.id, { progress: 10, summary: "完成当前实习交付。" });
+
+    const patchedContent = await fs.readFile(path.join(root, parent!.filePath), "utf8");
+    expect(patchedContent).not.toMatch(/^progress:/m);
+
+    const after = await service.readGoals();
+    expect(after.flatGoals.find((goal) => goal.title === "当前交付")?.progress).toBe(80);
   });
 
   it("does not persist goal date fields when writing goals", async () => {

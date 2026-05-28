@@ -20,12 +20,15 @@ import {
   ListPlus,
   Loader2,
   Monitor,
+  Moon,
   Network,
   Pencil,
   Plus,
   RefreshCw,
   Save,
+  Sparkles,
   Star,
+  Sun,
   Trash2,
   User,
   Users,
@@ -34,6 +37,7 @@ import {
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type {
+  ActionCreateInput,
   GoalActionCandidate,
   GoalCreateInput,
   GoalNode,
@@ -42,7 +46,16 @@ import type {
   GoalStatus
 } from "../shared/types";
 import { isPrimaryGoalNode, isPrimaryGoalTitle, normalizedGoalTitle } from "../shared/goalRules";
+import { AiAssistantDialog } from "./AiAssistantDialog";
 import "./styles.css";
+import {
+  applyThemePreference,
+  nextThemePreference,
+  readStoredTheme,
+  resolvedTheme,
+  writeStoredTheme,
+  type ThemePreference
+} from "./theme";
 
 const emptyGoals: GoalsResponse = {
   goals: [],
@@ -58,6 +71,12 @@ const statusLabels: Record<GoalStatus, string> = {
 };
 
 const center = { x: 450, y: 450 };
+
+const themeLabels: Record<ThemePreference, string> = {
+  system: "系统设定",
+  light: "浅色",
+  dark: "深色"
+};
 
 type SectorLayout = {
   node: GoalNode;
@@ -154,9 +173,32 @@ function progressValue(goal: GoalNode) {
   return percentValue(goal.progress, percentValue(goal.clarity, 0));
 }
 
+export function weightedGoalProgress(
+  goal: GoalNode,
+  importanceOverrides: ImportanceOverrides = {},
+  progressOverrides: ProgressOverrides = {}
+): number {
+  if ((goal.children || []).length === 0) {
+    return goal.id in progressOverrides ? clamp(Math.round(Number(progressOverrides[goal.id])), 0, 100) : progressValue(goal);
+  }
+
+  const childImportance = normalizedImportance(goal.children, importanceOverrides);
+  const weighted = goal.children.reduce((sum, child) => {
+    return sum + weightedGoalProgress(child, importanceOverrides, progressOverrides) * ((childImportance[child.id] ?? 0) / 100);
+  }, 0);
+  return clamp(Math.round(weighted), 0, 100);
+}
+
 function normalizeHexColor(value: string | undefined) {
   const raw = String(value ?? "").trim();
-  return /^#[0-9a-fA-F]{6}$/.test(raw) ? raw : "";
+  if (!/^#[0-9a-fA-F]{6}$/.test(raw)) return "";
+  const lower = raw.toLowerCase();
+  if (lower === "#1187a2") return "#0284c7";
+  if (lower === "#7958c8") return "#6366f1";
+  if (lower === "#45945c") return "#10b981";
+  if (lower === "#4fbf83") return "#10b981";
+  if (lower === "#687385") return "#64748b";
+  return raw;
 }
 
 function filterGoalTree(goals: GoalNode[], showArchived: boolean): GoalNode[] {
@@ -239,13 +281,17 @@ function uniqueDomainTitles(goals: GoalNode[]) {
     const domain = titleFromLink(goal.domain);
     if (domain) domains.add(domain);
   }
-  return Array.from(domains);
+  return Array.from(domains).sort((a, b) => a.localeCompare(b, "zh-CN"));
 }
 
-function averageProgress(goals: GoalNode[]) {
+function averageProgress(
+  goals: GoalNode[],
+  importanceOverrides: ImportanceOverrides = {},
+  progressOverrides: ProgressOverrides = {}
+) {
   const measurable = goals.filter((goal) => !isPrimaryGoalNode(goal));
   if (measurable.length === 0) return 0;
-  const total = measurable.reduce((sum, goal) => sum + progressValue(goal), 0);
+  const total = measurable.reduce((sum, goal) => sum + weightedGoalProgress(goal, importanceOverrides, progressOverrides), 0);
   return Math.round(total / measurable.length);
 }
 
@@ -292,10 +338,10 @@ function blend(hex: string, target: string, amount: number) {
 
 function domainBaseColor(domain: string) {
   const normalized = titleFromLink(domain);
-  if (normalized.includes("职业")) return "#1187a2";
-  if (normalized.includes("个人") || normalized.includes("成长")) return "#7958c8";
-  if (normalized.includes("幸福") || normalized.includes("生活")) return "#45945c";
-  return "#687385";
+  if (normalized.includes("职业")) return "#0284c7";
+  if (normalized.includes("个人") || normalized.includes("成长")) return "#6366f1";
+  if (normalized.includes("幸福") || normalized.includes("生活")) return "#10b981";
+  return "#64748b";
 }
 
 function getRings(depth: number) {
@@ -429,25 +475,6 @@ function uniqueTitle(base: string, goals: GoalNode[]) {
   return `${base} ${index}`;
 }
 
-function labelLines(title: string, depth: number, angleSpan: number, radius: number) {
-  const fontSize = depth === 1 ? 17 : depth === 2 ? 12 : 10;
-  const arcLength = (Math.max(1, angleSpan) * Math.PI * radius) / 180;
-  const maxChars = clamp(Math.floor(arcLength / (fontSize * 0.92)), depth === 1 ? 3 : 2, depth === 1 ? 7 : 6);
-  const maxLines = depth === 1 ? 2 : 2;
-  const chars = Array.from(title.replace(/\s+/g, ""));
-  if (chars.length <= maxChars) return [title];
-
-  const result: string[] = [];
-  for (let index = 0; index < chars.length && result.length < maxLines; index += maxChars) {
-    result.push(chars.slice(index, index + maxChars).join(""));
-  }
-  if (chars.length > maxChars * maxLines) {
-    const last = result[result.length - 1] || "";
-    result[result.length - 1] = `${Array.from(last).slice(0, Math.max(1, maxChars - 1)).join("")}…`;
-  }
-  return result;
-}
-
 function GoalApp() {
   const [goals, setGoals] = useState<GoalsResponse>(emptyGoals);
   const [selectedId, setSelectedId] = useState("root");
@@ -461,15 +488,32 @@ function GoalApp() {
   const [focusId, setFocusId] = useState("root");
   const [scopeListCollapsed, setScopeListCollapsed] = useState(true);
   const [deleteCandidate, setDeleteCandidate] = useState<GoalNode | null>(null);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiGoal, setAiGoal] = useState<GoalNode | null>(null);
   const [detailWidth, setDetailWidth] = useState(500);
   const [mapPaneHeight, setMapPaneHeight] = useState(520);
   const [stackedLayout, setStackedLayout] = useState(() => window.matchMedia("(max-width: 1120px)").matches);
   const [resizingPanelAxis, setResizingPanelAxis] = useState<"width" | "height" | null>(null);
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => readStoredTheme());
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const mapPaneRef = useRef<HTMLElement | null>(null);
   const pendingEditRef = useRef<PendingEdit | null>(null);
   const pendingSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const draftCacheRef = useRef<DraftCache>({});
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const syncTheme = () => {
+      setSystemPrefersDark(mediaQuery.matches);
+      applyThemePreference(themePreference, { systemPrefersDark: mediaQuery.matches });
+    };
+
+    writeStoredTheme(themePreference);
+    syncTheme();
+    mediaQuery.addEventListener("change", syncTheme);
+    return () => mediaQuery.removeEventListener("change", syncTheme);
+  }, [themePreference]);
 
   const loadGoals = useCallback(async () => {
     const next = await api<GoalsResponse>("/api/goals");
@@ -494,6 +538,9 @@ function GoalApp() {
     void reload().catch(() => undefined);
 
     const events = new EventSource("/api/events");
+    events.onopen = () => {
+      setError((current) => (current === "实时同步连接中断，仍可手动刷新。" ? "" : current));
+    };
     events.onmessage = () => {
       void reload().catch(() => undefined);
     };
@@ -510,6 +557,7 @@ function GoalApp() {
     [selectedId, visibleFlatGoals]
   );
   const selectedGoalFull = useMemo(() => goals.flatGoals.find((goal) => goal.id === selectedId), [goals.flatGoals, selectedId]);
+  const activeAiGoal = useMemo(() => (aiGoal ? goals.flatGoals.find((goal) => goal.id === aiGoal.id) ?? aiGoal : null), [aiGoal, goals.flatGoals]);
   const selectedParent = useMemo(() => parentGoal(goals.goals, selectedId), [goals.goals, selectedId]);
   const focusGoal = useMemo(() => (focusId === "root" ? undefined : findGoalById(visibleTree, focusId)), [focusId, visibleTree]);
   const focusParentId = useMemo(() => parentMapFocusId(visibleTree, focusId), [focusId, visibleTree]);
@@ -635,9 +683,11 @@ function GoalApp() {
         priority: Number(nextImportance[goal.id] ?? draft.importance),
         summary: draft.notes
       };
-      if (!primaryGoal) {
+      if (!primaryGoal && goal.children.length === 0) {
         patch.clarity = Math.max(1, Math.ceil(Number(draft.progress) / 20));
         patch.progress = Number(draft.progress);
+      }
+      if (!primaryGoal) {
         patch.actionCandidates = draft.actions;
       }
       await api(`/api/goals/${encodeURIComponent(goal.id)}`, {
@@ -680,7 +730,7 @@ function GoalApp() {
 
   const queuePendingEditSave = useCallback(() => {
     const pending = pendingEditRef.current;
-    if (!pending) return;
+    if (!pending) return pendingSaveQueueRef.current;
 
     pendingEditRef.current = null;
     pendingSaveQueueRef.current = pendingSaveQueueRef.current
@@ -691,6 +741,7 @@ function GoalApp() {
           pendingEditRef.current = pending;
         }
       });
+    return pendingSaveQueueRef.current;
   }, [saveGoal]);
 
   const selectGoal = useCallback((id: string) => {
@@ -699,8 +750,8 @@ function GoalApp() {
     setSelectedId(id);
   }, [queuePendingEditSave, selectedId]);
 
-  const createGoal = async (input: GoalCreateInput) => {
-    await runWrite(async () => {
+  const createGoal = async (input: GoalCreateInput): Promise<boolean> => {
+    return runWrite(async () => {
       const primaryGoal = isPrimaryGoalTitle(input.title) && !normalizedGoalTitle(input.parent);
       const payload: GoalCreateInput = {
         ...input,
@@ -713,11 +764,47 @@ function GoalApp() {
         body: JSON.stringify(payload)
       });
       const next = await loadGoals();
-      const created = next.flatGoals.find((goal) => goal.title === input.title.trim());
-      setSelectedId(created?.id || "root");
+      const createdGoal = next.flatGoals.find((goal) => goal.title === input.title.trim());
+      if (createdGoal) {
+        pendingEditRef.current = null;
+        delete draftCacheRef.current[createdGoal.id];
+        setSelectedId(createdGoal.id);
+        const parentTitle = normalizedGoalTitle(input.parent);
+        if (parentTitle) {
+          const parentNode = next.flatGoals.find((goal) => goal.title === parentTitle);
+          if (parentNode) setFocusId(parentNode.id);
+        }
+      } else {
+        setSelectedId("root");
+      }
       return next;
     }, "目标已创建");
   };
+
+  const patchGoalFromAi = useCallback(async (goalId: string, patch: GoalPatchInput): Promise<boolean> => {
+    return runWrite(async () => {
+      await api(`/api/goals/${encodeURIComponent(goalId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch)
+      });
+      await loadGoals();
+    }, "AI 建议已应用");
+  }, [loadGoals, runWrite]);
+
+  const createWeeklyActionFromAi = useCallback(async (input: ActionCreateInput): Promise<boolean> => {
+    return runWrite(async () => {
+      await api("/api/actions/current", {
+        method: "POST",
+        body: JSON.stringify(input)
+      });
+      await loadGoals();
+    }, "本周行动已创建");
+  }, [loadGoals, runWrite]);
+
+  const openAiAssistant = useCallback((goal: GoalNode) => {
+    setAiGoal(goal);
+    setAiOpen(true);
+  }, []);
 
   const deleteGoal = async (goal: GoalNode) => {
     const deletedIds = collectDescendants(goal, new Set([goal.id]));
@@ -782,8 +869,11 @@ function GoalApp() {
     }, "目标位置已重置");
   }, [loadGoals, mapContextId, runWrite, selectedGoalFull]);
 
-  const createQuickGoal = async (mode: "subgoal" | "sibling") => {
+  const createQuickGoal = useCallback(async (mode: "subgoal" | "sibling") => {
+    if (!selectedGoalFull) return;
+    await queuePendingEditSave();
     const parent = mode === "subgoal" ? selectedGoalFull : selectedParent;
+    if (mode === "sibling" && !parent) return;
     const source = selectedGoalFull || parent;
     const title = uniqueTitle("新目标", goals.flatGoals);
     await createGoal({
@@ -795,7 +885,7 @@ function GoalApp() {
       clarity: 1,
       progress: 0
     });
-  };
+  }, [createGoal, domainTitles, goals.flatGoals, queuePendingEditSave, selectedGoalFull, selectedParent]);
 
   const renameSelectedGoal = async () => {
     if (!selectedGoalFull) return;
@@ -839,6 +929,10 @@ function GoalApp() {
     [detailWidth, mapPaneHeight]
   );
   const resizingClass = resizingPanelAxis ? ` is-resizing is-resizing-${resizingPanelAxis}` : "";
+  const appliedTheme = resolvedTheme(themePreference, systemPrefersDark);
+  const nextThemeLabel = themeLabels[nextThemePreference(themePreference)];
+  const themeButtonLabel = `主题：${themeLabels[themePreference]}，当前${themeLabels[appliedTheme]}，点击切换为${nextThemeLabel}`;
+  const ThemeIcon = themePreference === "system" ? Monitor : themePreference === "light" ? Sun : Moon;
 
   return (
     <div className="app-shell">
@@ -869,9 +963,20 @@ function GoalApp() {
             {syncStatus}
           </span>
         </div>
-        <button type="button" className="icon-button header-refresh" title="刷新目标" aria-label="刷新目标" onClick={() => void reload()} disabled={loading || saving}>
-          <RefreshCw />
-        </button>
+        <div className="header-actions" aria-label="页面操作">
+          <button
+            type="button"
+            className="icon-button theme-toggle"
+            title={themeButtonLabel}
+            aria-label={themeButtonLabel}
+            onClick={() => setThemePreference((current) => nextThemePreference(current))}
+          >
+            <ThemeIcon />
+          </button>
+          <button type="button" className="icon-button header-refresh" title="刷新目标" aria-label="刷新目标" onClick={() => void reload()} disabled={loading || saving}>
+            <RefreshCw />
+          </button>
+        </div>
       </header>
       {(notice || error) && <div className={error ? "banner error" : "banner"}>{error || notice}</div>}
 
@@ -887,6 +992,7 @@ function GoalApp() {
           <MapActions
             selectedGoal={selectedGoalFull}
             saving={saving}
+            canAddSibling={Boolean(selectedParent)}
             canResetPosition={hasCustomMapPosition(selectedGoalFull, mapContextId)}
             onAddSubgoal={() => void createQuickGoal("subgoal")}
             onAddSibling={() => void createQuickGoal("sibling")}
@@ -962,13 +1068,28 @@ function GoalApp() {
           flatGoals={visibleFlatGoals}
           domains={domainTitles}
           saving={saving}
+          importanceOverrides={importancePreview}
+          progressOverrides={progressPreview}
           onSelect={selectGoal}
           onSave={saveGoal}
           onPreviewImportance={previewImportance}
           onPreviewProgress={previewProgress}
           onDraftChange={registerPendingEdit}
+          onOpenAi={openAiAssistant}
         />
       </main>
+      {aiOpen && activeAiGoal && (
+        <AiAssistantDialog
+          goal={activeAiGoal}
+          flatGoals={goals.flatGoals}
+          saving={saving}
+          onClose={() => setAiOpen(false)}
+          onBeforeGenerate={queuePendingEditSave}
+          onPatchGoal={patchGoalFromAi}
+          onCreateGoal={createGoal}
+          onCreateWeeklyAction={createWeeklyActionFromAi}
+        />
+      )}
       <DeleteGoalDialog
         goal={deleteCandidate}
         saving={saving}
@@ -1036,6 +1157,7 @@ function MapScopeList({
 function MapActions({
   selectedGoal,
   saving,
+  canAddSibling,
   canResetPosition,
   onAddSubgoal,
   onAddSibling,
@@ -1045,6 +1167,7 @@ function MapActions({
 }: {
   selectedGoal: GoalNode | undefined;
   saving: boolean;
+  canAddSibling: boolean;
   canResetPosition: boolean;
   onAddSubgoal: () => void;
   onAddSibling: () => void;
@@ -1057,10 +1180,10 @@ function MapActions({
 
   return (
     <div className="map-actions">
-      <button type="button" className="icon-button" title="添加子目标" aria-label="添加子目标" disabled={saving} onClick={onAddSubgoal}>
+      <button type="button" className="icon-button" title="添加子目标" aria-label="添加子目标" disabled={disabled} onClick={onAddSubgoal}>
         <ListPlus />
       </button>
-      <button type="button" className="icon-button" title="添加同级目标" aria-label="添加同级目标" disabled={saving} onClick={onAddSibling}>
+      <button type="button" className="icon-button" title="添加同级目标" aria-label="添加同级目标" disabled={disabled || !canAddSibling} onClick={onAddSibling}>
         <CirclePlus />
       </button>
       <div className="menu-wrap">
@@ -1189,15 +1312,19 @@ type GoalscapeNodeLayout = {
   variant: number;
 };
 
+export function canOpenGoalSubmap(layout: Pick<GoalscapeNodeLayout, "node" | "depth">) {
+  return layout.depth === 1 || (layout.node.children || []).length > 0;
+}
+
 export const goalscapeCenter = { x: 560, y: 410, width: 142, height: 120 };
 
 const goalscapeViewBox = { width: 1200, height: 760 };
 
 const goalscapeSlotStyles: Record<GoalscapeSlotKey, Pick<GoalscapeSlot, "width" | "height" | "color">> = {
-  life: { width: 210, height: 150, color: "#4fbf83" },
-  growth: { width: 236, height: 166, color: "#7958c8" },
-  career: { width: 216, height: 130, color: "#1187a2" },
-  extra: { width: 184, height: 122, color: "#687385" }
+  life: { width: 210, height: 150, color: "#10b981" },
+  growth: { width: 236, height: 166, color: "#6366f1" },
+  career: { width: 216, height: 130, color: "#0284c7" },
+  extra: { width: 184, height: 122, color: "#64748b" }
 };
 
 export const goalscapePrimarySlots: GoalscapeSlot[] = [
@@ -1360,12 +1487,19 @@ export function assignGoalscapeSlots(goals: GoalNode[]) {
 }
 
 export function goalscapeChildOffset(slot: Pick<GoalscapeSlot, "x" | "y">, childIndex: number, totalChildren: number) {
-  const visibleChildren = Math.max(1, Math.min(4, totalChildren));
-  const index = clamp(childIndex, 0, visibleChildren - 1);
-  const spread = visibleChildren === 1 ? 0 : visibleChildren === 2 ? 72 : visibleChildren === 3 ? 116 : 138;
-  const step = visibleChildren <= 1 ? 0 : spread / (visibleChildren - 1);
+  const count = Math.max(1, totalChildren);
+  const index = clamp(childIndex, 0, count - 1);
+  const spread =
+    count === 1 ? 0 :
+    count === 2 ? 72 :
+    count === 3 ? 116 :
+    count === 4 ? 138 :
+    count === 5 ? 154 :
+    count === 6 ? 168 :
+    Math.min(220, 138 + (count - 4) * 18);
+  const step = count <= 1 ? 0 : spread / (count - 1);
   const angle = goalscapeSlotAngle(slot) - spread / 2 + step * index;
-  const radius = visibleChildren >= 4 ? 190 : visibleChildren === 3 ? 184 : 176;
+  const radius = count >= 5 ? 198 : count >= 4 ? 190 : count === 3 ? 184 : 176;
   const radians = (angle * Math.PI) / 180;
   const x = slot.x + Math.cos(radians) * radius;
   const y = slot.y + Math.sin(radians) * radius;
@@ -1374,8 +1508,138 @@ export function goalscapeChildOffset(slot: Pick<GoalscapeSlot, "x" | "y">, child
   return { x: safeX - slot.x, y: safeY - slot.y };
 }
 
-function goalProgress(goal: GoalNode, progressOverrides: ProgressOverrides) {
-  return goal.id in progressOverrides ? clamp(Number(progressOverrides[goal.id]), 0, 100) : progressValue(goal);
+export function goalscapeNodeDensity(progress: number) {
+  return 0.12 + 0.68 * (clamp(progress, 0, 100) / 100);
+}
+
+export function goalscapeStarlightCoreRadius(baseRadius: number, progress: number) {
+  return baseRadius * (0.2 + 0.8 * (clamp(progress, 0, 100) / 100));
+}
+
+export function goalscapeProgressFillGeometry(centerY: number, height: number, progress: number) {
+  const safeProgress = clamp(progress, 0, 100);
+  const fillHeight = height * (safeProgress / 100);
+  const bottom = centerY + height / 2;
+  return {
+    y: bottom - fillHeight,
+    height: fillHeight,
+    surfaceY: bottom - fillHeight
+  };
+}
+
+export type GoalscapeCenterPearlTint = {
+  primary: string;
+  secondary: string;
+  tertiary: string;
+  iridescent: string;
+  energy: string;
+  glow: string;
+  isRoot: boolean;
+};
+
+export function goalscapeCenterPearlTint(centerId: string, goal?: GoalNode | null): GoalscapeCenterPearlTint {
+  if (centerId === "root" || !goal) {
+    return {
+      primary: "#e0e7ff",
+      secondary: "#a7f3d0",
+      tertiary: "#bae6fd",
+      iridescent: "#ddd6fe",
+      energy: "#fbbf24",
+      glow: "#fff7ed",
+      isRoot: true
+    };
+  }
+
+  const base = goalscapeNodeColor(goal, domainBaseColor(goal.domain || goal.title));
+  return {
+    primary: blend(base, "#ffffff", 0.72),
+    secondary: blend(base, "#ffffff", 0.88),
+    tertiary: blend(base, "#12233e", 0.12),
+    iridescent: blend(base, "#fbbf24", 0.22),
+    energy: blend(base, "#fbbf24", 0.45),
+    glow: blend(base, "#fff7ed", 0.55),
+    isRoot: false
+  };
+}
+
+const goalscapeCenterPearlSize = { width: 128, height: 108, variant: 0 };
+const goalscapeAstrolabeOuterRadius = 86;
+const goalscapeAstrolabeInnerRadius = 72;
+
+function GoalscapeCenterAstrolabe({ cx, cy }: { cx: number; cy: number }) {
+  const ticks = Array.from({ length: 72 }, (_, index) => {
+    const angle = (index * 360) / 72 - 90;
+    const radians = (angle * Math.PI) / 180;
+    const major = index % 6 === 0;
+    const outerRadius = goalscapeAstrolabeOuterRadius;
+    const innerRadius = major ? goalscapeAstrolabeInnerRadius : goalscapeAstrolabeOuterRadius - 5;
+
+    return {
+      x1: cx + Math.cos(radians) * innerRadius,
+      y1: cy + Math.sin(radians) * innerRadius,
+      x2: cx + Math.cos(radians) * outerRadius,
+      y2: cy + Math.sin(radians) * outerRadius,
+      major
+    };
+  });
+
+  const runes = Array.from({ length: 8 }, (_, index) => {
+    const angle = (index * 360) / 8 - 90;
+    const radians = (angle * Math.PI) / 180;
+    const radius = goalscapeAstrolabeOuterRadius + 4;
+
+    return {
+      x: cx + Math.cos(radians) * radius,
+      y: cy + Math.sin(radians) * radius,
+      rotation: angle + 90
+    };
+  });
+
+  return (
+    <g className="goalscape-center-astrolabe" style={{ transformOrigin: `${cx}px ${cy}px` }}>
+      <circle
+        cx={cx}
+        cy={cy}
+        r={goalscapeAstrolabeOuterRadius}
+        fill="none"
+        stroke="url(#goalscape-hub-gold-rim)"
+        strokeWidth="1.4"
+        opacity="0.48"
+      />
+      <circle
+        cx={cx}
+        cy={cy}
+        r={goalscapeAstrolabeInnerRadius - 6}
+        fill="none"
+        stroke="rgba(255, 255, 255, 0.35)"
+        strokeWidth="0.7"
+        strokeDasharray="1.5 5"
+      />
+      {ticks.map((tick, index) => (
+        <line
+          key={`tick-${index}`}
+          x1={tick.x1}
+          y1={tick.y1}
+          x2={tick.x2}
+          y2={tick.y2}
+          stroke={tick.major ? "rgba(251, 191, 36, 0.72)" : "rgba(251, 191, 36, 0.35)"}
+          strokeWidth={tick.major ? 1.3 : 0.7}
+          strokeLinecap="round"
+        />
+      ))}
+      {runes.map((rune, index) => (
+        <g key={`rune-${index}`} transform={`translate(${rune.x} ${rune.y}) rotate(${rune.rotation})`}>
+          <path
+            d="M0 -5 L2.5 0 L0 5 L-2.5 0 Z M0 -5 V5"
+            fill="none"
+            stroke="rgba(251, 191, 36, 0.58)"
+            strokeWidth="0.9"
+            strokeLinecap="round"
+          />
+        </g>
+      ))}
+    </g>
+  );
 }
 
 function goalscapeNodeColor(goal: GoalNode, fallback: string) {
@@ -1407,13 +1671,13 @@ export function buildGoalscapeLayout(
       width: slot.width,
       height: slot.height,
       color,
-      progress: goalProgress(goal, progressOverrides),
+      progress: weightedGoalProgress(goal, importanceOverrides, progressOverrides),
       importance,
       slotKey: slot.key,
       variant: index
     });
 
-    const children = goal.children.slice(0, 4);
+    const children = goal.children;
     const childImportance = normalizedImportance(children, importanceOverrides);
     children.forEach((child, childIndex) => {
       const offset = goalscapeChildOffset(position, childIndex, children.length);
@@ -1428,7 +1692,7 @@ export function buildGoalscapeLayout(
         width: childIndex === 0 && slot.key === "growth" ? 154 : 128,
         height: childIndex === 0 && slot.key === "growth" ? 98 : 82,
         color: childColor,
-        progress: goalProgress(child, progressOverrides),
+        progress: weightedGoalProgress(child, importanceOverrides, progressOverrides),
         importance: childImportance[child.id] ?? 0,
         slotKey: slot.key,
         variant: childIndex + index + 1
@@ -1449,49 +1713,6 @@ function goalscapeBlobPath(x: number, y: number, width: number, height: number, 
     `C ${(x + rx * 0.9).toFixed(1)} ${(y + ry * 0.72).toFixed(1)} ${(x + rx * 0.28).toFixed(1)} ${(y + ry * 1.04).toFixed(1)} ${(x - rx * 0.18).toFixed(1)} ${(y + ry * 0.92).toFixed(1)}`,
     `C ${(x - rx * 0.82).toFixed(1)} ${(y + ry * 0.82).toFixed(1)} ${(x - rx * 1.06).toFixed(1)} ${(y + ry * 0.22).toFixed(1)} ${(x - rx * 0.9).toFixed(1)} ${(y - ry * 0.36).toFixed(1)}`,
     `C ${(x - rx * 0.72).toFixed(1)} ${(y - ry * 0.86).toFixed(1)} ${(x - rx * 0.42).toFixed(1)} ${(y - ry * 1.02).toFixed(1)} ${(x - rx * 0.12).toFixed(1)} ${(y - ry).toFixed(1)}`,
-    "Z"
-  ].join(" ");
-}
-
-export function goalscapeLiquidGeometry(x: number, y: number, width: number, height: number, progress: number) {
-  const fillRatio = clamp(progress, 0, 100) / 100;
-  const overfill = Math.max(8, height * 0.08);
-  const bottomY = y + height * 0.58;
-  const fullHeight = height + overfill * 2;
-  return {
-    fillRatio,
-    leftX: x - width * 0.58,
-    rightX: x + width * 0.58,
-    surfaceY: bottomY - fullHeight * fillRatio,
-    bottomY
-  };
-}
-
-function goalscapeLiquidWavePath(x: number, y: number, width: number, height: number, progress: number, variant: number) {
-  const geometry = goalscapeLiquidGeometry(x, y, width, height, progress);
-  if (geometry.fillRatio <= 0) return "";
-
-  const liquidHeight = geometry.bottomY - geometry.surfaceY;
-  const amplitude = Math.min(clamp(height * 0.05, 3, 7), Math.max(1.2, liquidHeight * 0.22));
-  const phase = ((variant % 4) - 1.5) * 0.75;
-  const span = geometry.rightX - geometry.leftX;
-
-  return [
-    `M ${geometry.leftX.toFixed(1)} ${(geometry.surfaceY + phase).toFixed(1)}`,
-    `C ${(geometry.leftX + span * 0.22).toFixed(1)} ${(geometry.surfaceY - amplitude).toFixed(1)} ${(geometry.leftX + span * 0.36).toFixed(1)} ${(geometry.surfaceY + amplitude).toFixed(1)} ${(geometry.leftX + span * 0.52).toFixed(1)} ${(geometry.surfaceY + phase * 0.2).toFixed(1)}`,
-    `C ${(geometry.leftX + span * 0.68).toFixed(1)} ${(geometry.surfaceY - amplitude * 0.75).toFixed(1)} ${(geometry.leftX + span * 0.84).toFixed(1)} ${(geometry.surfaceY + amplitude * 0.55).toFixed(1)} ${geometry.rightX.toFixed(1)} ${geometry.surfaceY.toFixed(1)}`
-  ].join(" ");
-}
-
-function goalscapeLiquidPath(x: number, y: number, width: number, height: number, progress: number, variant: number) {
-  const geometry = goalscapeLiquidGeometry(x, y, width, height, progress);
-  const wave = goalscapeLiquidWavePath(x, y, width, height, progress, variant);
-  if (!wave) return "";
-
-  return [
-    wave,
-    `L ${geometry.rightX.toFixed(1)} ${geometry.bottomY.toFixed(1)}`,
-    `L ${geometry.leftX.toFixed(1)} ${geometry.bottomY.toFixed(1)}`,
     "Z"
   ].join(" ");
 }
@@ -1534,6 +1755,32 @@ function goalIconComponent(goal: GoalNode) {
   return Network;
 }
 
+function GoalscapeBridge({
+  from,
+  to,
+  id,
+  color
+}: {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  id: string;
+  color: string;
+}) {
+  const d = goalscapeConnectionPath(from, to);
+  const midX = (from.x + to.x) / 2;
+  const midY = (from.y + to.y) / 2;
+  const dArch = `M ${from.x} ${from.y} C ${midX} ${from.y - 18}, ${midX} ${midY - 18}, ${to.x} ${to.y}`;
+
+  return (
+    <g key={id} className="goalscape-bridge-group" style={{ "--node-color": color } as React.CSSProperties & { "--node-color": string }}>
+      <path d={d} className="goalscape-bridge-glow" stroke={color} strokeWidth="5.5" />
+      <path d={dArch} className="goalscape-bridge-glow" stroke={color} strokeWidth="1.2" opacity="0.6" />
+      <path d={d} className="goalscape-bridge-cables" strokeWidth="0.8" />
+      <path d={d} className="goalscape-bridge-laser" strokeWidth="1.5" />
+    </g>
+  );
+}
+
 const GoalMap = React.memo(function GoalMap({
   goals,
   selectedId,
@@ -1574,6 +1821,20 @@ const GoalMap = React.memo(function GoalMap({
   const childLayouts = useMemo(() => layouts.filter((item) => item.depth === 2), [layouts]);
   const topLayoutById = useMemo(() => new Map(topLayouts.map((item) => [item.node.id, item])), [topLayouts]);
   const visibleLayouts = useMemo(() => [...topLayouts, ...childLayouts], [topLayouts, childLayouts]);
+  const centerGoal = useMemo(() => goals.find((item) => item.id === centerId) ?? null, [goals, centerId]);
+  const centerPearlTint = useMemo(() => goalscapeCenterPearlTint(centerId, centerGoal), [centerId, centerGoal]);
+  const centerPearlPath = useMemo(
+    () =>
+      goalscapeBlobPath(
+        goalscapeCenter.x,
+        goalscapeCenter.y,
+        goalscapeCenterPearlSize.width,
+        goalscapeCenterPearlSize.height,
+        goalscapeCenterPearlSize.variant
+      ),
+    []
+  );
+  const centerLabel = useMemo(() => goalscapeLabelLines(centerTitle, 5, 2), [centerTitle]);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{
     id: string;
@@ -1675,6 +1936,33 @@ const GoalMap = React.memo(function GoalMap({
       <title id="map-title">{centerTitle}目标地图</title>
       <desc id="map-desc">用发光岛屿节点展示目标层级，并用连接线表达目标关系。</desc>
       <defs>
+        {/* Glow level filters for starlight cores */}
+        <filter id="goalscape-glow-level-0" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="1.5" result="blur" />
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="goalscape-glow-level-1" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="3.2" result="blur" />
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="goalscape-glow-level-2" x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="5.5" result="blur" />
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="goalscape-glow-level-3" x="-70%" y="-70%" width="240%" height="240%">
+          <feGaussianBlur stdDeviation="8" result="blur" />
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="goalscape-glow-level-4" x="-80%" y="-80%" width="260%" height="260%">
+          <feGaussianBlur stdDeviation="11" result="blur" />
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="goalscape-glow-level-5" x="-100%" y="-100%" width="300%" height="300%">
+          <feGaussianBlur stdDeviation="15" result="blurOuter" />
+          <feGaussianBlur stdDeviation="6" result="blurInner" />
+          <feMerge><feMergeNode in="blurOuter"/><feMergeNode in="blurInner"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+
         <filter id="goalscape-soft-glow" x="-60%" y="-60%" width="220%" height="220%">
           <feGaussianBlur stdDeviation="8" result="blur" />
           <feColorMatrix
@@ -1688,6 +1976,62 @@ const GoalMap = React.memo(function GoalMap({
             <feMergeNode in="SourceGraphic" />
           </feMerge>
         </filter>
+        <filter id="goalscape-hub-glow" x="-80%" y="-80%" width="260%" height="260%">
+          <feGaussianBlur stdDeviation="16" result="blurOuter" />
+          <feGaussianBlur stdDeviation="6" result="blurInner" />
+          <feColorMatrix
+            in="blurOuter"
+            type="matrix"
+            values="0 0 0 0 0.96  0 0 0 0 0.62  0 0 0 0 0.15  0 0 0 0.36 0"
+            result="glowDeep"
+          />
+          <feColorMatrix
+            in="blurInner"
+            type="matrix"
+            values="0 0 0 0 0.98  0 0 0 0 0.68  0 0 0 0 0.12  0 0 0 0.72 0"
+            result="glowIntense"
+          />
+          <feMerge>
+            <feMergeNode in="glowDeep" />
+            <feMergeNode in="glowIntense" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+        <linearGradient id="goalscape-hub-glass" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="rgba(250, 250, 249, 0.94)" />
+          <stop offset="35%" stopColor="rgba(241, 245, 249, 0.90)" />
+          <stop offset="70%" stopColor="rgba(224, 242, 254, 0.85)" />
+          <stop offset="100%" stopColor="rgba(255, 255, 255, 0.78)" />
+        </linearGradient>
+        <linearGradient id="goalscape-hub-gold-rim" x1="0%" y1="100%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="#d97706" />
+          <stop offset="30%" stopColor="#f59e0b" />
+          <stop offset="70%" stopColor="#fbbf24" />
+          <stop offset="100%" stopColor="#fef08a" />
+        </linearGradient>
+        <radialGradient id="goalscape-pearl-metallic" cx="32%" cy="30%" r="68%">
+          <stop offset="0%" stopColor="#ffffff" />
+          <stop offset="22%" stopColor="#f4f4f5" />
+          <stop offset="55%" stopColor="#e4e4e7" />
+          <stop offset="85%" stopColor="#a1a1aa" />
+          <stop offset="100%" stopColor="#52525b" />
+        </radialGradient>
+        <radialGradient id="goalscape-hub-energy" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="rgba(251, 191, 36, 0.85)" />
+          <stop offset="50%" stopColor="rgba(245, 158, 11, 0.45)" />
+          <stop offset="100%" stopColor="rgba(217, 119, 6, 0)" />
+        </radialGradient>
+        <radialGradient id="goalscape-center-pearl-fill" cx="34%" cy="28%" r="72%">
+          <stop offset="0%" stopColor="#fffef9" />
+          <stop offset="28%" stopColor={centerPearlTint.primary} />
+          <stop offset="55%" stopColor={centerPearlTint.secondary} />
+          <stop offset="78%" stopColor={centerPearlTint.tertiary} />
+          <stop offset="100%" stopColor="rgba(255, 255, 255, 0.16)" />
+        </radialGradient>
+        <radialGradient id="goalscape-center-pearl-iridescent" cx="68%" cy="72%" r="48%">
+          <stop offset="0%" stopColor={centerPearlTint.iridescent} stopOpacity="0.42" />
+          <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
+        </radialGradient>
         {layouts.map((layout, index) => {
           const nodePath = goalscapeBlobPath(layout.x, layout.y, layout.width, layout.height, layout.variant);
           return (
@@ -1718,18 +2062,26 @@ const GoalMap = React.memo(function GoalMap({
 
       <g className="goalscape-connections" aria-hidden="true">
         {topLayouts.map((layout) => (
-          <path key={`center-${layout.node.id}`} d={goalscapeConnectionPath(goalscapeCenter, layout)} />
+          <GoalscapeBridge
+            key={`center-${layout.node.id}`}
+            from={goalscapeCenter}
+            to={layout}
+            id={`center-${layout.node.id}`}
+            color={layout.color}
+          />
         ))}
         {childLayouts.map((layout) => {
           const parent = topLayoutById.get(layout.parentId);
-          return parent ? <path key={`child-${layout.node.id}`} d={goalscapeConnectionPath(parent, layout)} /> : null;
+          return parent ? (
+            <GoalscapeBridge
+              key={`child-${layout.node.id}`}
+              from={parent}
+              to={layout}
+              id={`child-${layout.node.id}`}
+              color={layout.color}
+            />
+          ) : null;
         })}
-      </g>
-
-      <g className="goalscape-connection-points" aria-hidden="true">
-        {visibleLayouts.map((layout) => (
-          <circle key={`point-${layout.node.id}`} cx={layout.x} cy={layout.y} r={layout.depth === 1 ? 5.5 : 4.2} />
-        ))}
       </g>
 
       <g
@@ -1737,6 +2089,7 @@ const GoalMap = React.memo(function GoalMap({
         role="button"
         tabIndex={0}
         focusable="true"
+        style={{ "--center-glow": centerPearlTint.glow } as React.CSSProperties & { "--center-glow": string }}
         onClick={() => onSelect(centerId)}
         onDoubleClick={(event) => {
           if (!onOpenParentMap) return;
@@ -1747,28 +2100,108 @@ const GoalMap = React.memo(function GoalMap({
         onKeyDown={(event) => selectOnKey(event, centerId)}
         aria-label={centerTitle}
       >
-        <circle className="goalscape-center-halo" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r="92" />
-        <path
-          className="goalscape-center-core"
-          d={goalscapeBlobPath(goalscapeCenter.x, goalscapeCenter.y, goalscapeCenter.width, goalscapeCenter.height, 2)}
-        />
-        <text className="goalscape-center-title" x={goalscapeCenter.x} y={goalscapeCenter.y + 6}>
-          {centerTitle}
-        </text>
+        <GoalscapeCenterAstrolabe cx={goalscapeCenter.x} cy={goalscapeCenter.y} />
+
+        <g className="goalscape-center-visual">
+          <path
+            className="goalscape-center-glow"
+            d={goalscapeBlobPath(
+              goalscapeCenter.x,
+              goalscapeCenter.y,
+              goalscapeCenterPearlSize.width + 18,
+              goalscapeCenterPearlSize.height + 14,
+              goalscapeCenterPearlSize.variant
+            )}
+            fill="none"
+            stroke="var(--center-glow, #fff7ed)"
+            strokeWidth="5"
+            filter="url(#goalscape-hub-glow)"
+            opacity="0.82"
+          />
+
+          <path
+            className="goalscape-center-glass"
+            d={centerPearlPath}
+            fill="url(#goalscape-center-pearl-fill)"
+            stroke="rgba(255, 255, 255, 0.58)"
+            strokeWidth="1.6"
+          />
+
+          <path
+            className="goalscape-center-iridescent"
+            d={centerPearlPath}
+            fill="url(#goalscape-center-pearl-iridescent)"
+            pointerEvents="none"
+          />
+
+          <ellipse
+            className="goalscape-center-shine-primary"
+            cx={goalscapeCenter.x - 22}
+            cy={goalscapeCenter.y - 28}
+            rx="34"
+            ry="18"
+            fill="rgba(255, 255, 255, 0.52)"
+            transform={`rotate(-18 ${goalscapeCenter.x - 22} ${goalscapeCenter.y - 28})`}
+            pointerEvents="none"
+          />
+          <path
+            className="goalscape-center-shine-edge"
+            d={`M ${goalscapeCenter.x - 48} ${goalscapeCenter.y + 34} A 52 52 0 0 0 ${goalscapeCenter.x + 48} ${goalscapeCenter.y + 34} A 44 44 0 0 1 ${goalscapeCenter.x - 48} ${goalscapeCenter.y + 34} Z`}
+            fill="rgba(255, 255, 255, 0.12)"
+            pointerEvents="none"
+          />
+          <ellipse
+            className="goalscape-center-shine-env"
+            cx={goalscapeCenter.x + 24}
+            cy={goalscapeCenter.y + 18}
+            rx="16"
+            ry="10"
+            fill={centerPearlTint.tertiary}
+            opacity="0.22"
+            transform={`rotate(24 ${goalscapeCenter.x + 24} ${goalscapeCenter.y + 18})`}
+            pointerEvents="none"
+          />
+
+          <path
+            className="goalscape-center-rim"
+            d={goalscapeBlobPath(
+              goalscapeCenter.x,
+              goalscapeCenter.y,
+              goalscapeCenterPearlSize.width - 14,
+              goalscapeCenterPearlSize.height - 12,
+              goalscapeCenterPearlSize.variant + 2
+            )}
+            fill="none"
+            stroke="rgba(255, 255, 255, 0.52)"
+            strokeWidth="1.2"
+            pointerEvents="none"
+          />
+
+          <text
+            className="goalscape-center-title"
+            x={goalscapeCenter.x}
+            y={goalscapeCenter.y + (centerLabel.length > 1 ? -6 : 6)}
+          >
+            {centerLabel.map((line, lineIndex) => (
+              <tspan key={`${line}-${lineIndex}`} x={goalscapeCenter.x} dy={lineIndex === 0 ? 0 : 20}>
+                {line}
+              </tspan>
+            ))}
+          </text>
+        </g>
       </g>
 
       {layouts.map((layout, index) => {
         const active = selectedId === layout.node.id;
         const related = !family || family.has(layout.node.id);
-        const opensSubmap = layout.depth === 1;
+        const opensSubmap = canOpenGoalSubmap(layout);
         const Icon = goalIconComponent(layout.node);
         const label = goalscapeLabelLines(layout.node.title, layout.depth === 1 ? 6 : 7, layout.depth === 1 ? 2 : 2);
-        const clipId = `goalscape-node-clip-${index}`;
         const bottleGradientId = `goalscape-bottle-gradient-${index}`;
         const liquidGradientId = `goalscape-liquid-gradient-${index}`;
+        const clipPathId = `goalscape-node-clip-${index}`;
         const nodePath = goalscapeBlobPath(layout.x, layout.y, layout.width, layout.height, layout.variant);
-        const liquidPath = goalscapeLiquidPath(layout.x, layout.y, layout.width, layout.height, layout.progress, layout.variant);
-        const surfacePath = goalscapeLiquidWavePath(layout.x, layout.y, layout.width, layout.height, layout.progress, layout.variant);
+        const progressFill = goalscapeProgressFillGeometry(layout.y, layout.height, layout.progress);
         return (
           <g
             key={layout.node.id}
@@ -1796,57 +2229,100 @@ const GoalMap = React.memo(function GoalMap({
             }}
             onKeyDown={(event) => selectOnKey(event, layout.node.id)}
           >
-            <path className="goalscape-node-halo" d={goalscapeBlobPath(layout.x, layout.y, layout.width + 20, layout.height + 18, layout.variant)} />
-            <path
-              className="goalscape-node-shape"
-              d={nodePath}
-              fill={`url(#${bottleGradientId})`}
-            />
-            {liquidPath && (
+            {/* Inner group with isolated floating animation delay */}
+            <g className="goalscape-node-visual" style={{ animationDelay: `${-index * 0.7}s` }}>
+              <path className="goalscape-node-halo" d={goalscapeBlobPath(layout.x, layout.y, layout.width + 20, layout.height + 18, layout.variant)} />
+              
+              {/* Dynamic translucency shell */}
               <path
-                className="goalscape-node-liquid"
-                d={liquidPath}
+                className="goalscape-node-shape"
+                d={nodePath}
+                fill={`url(#${bottleGradientId})`}
+                fillOpacity={goalscapeNodeDensity(layout.progress)}
+                strokeOpacity={0.4 + 0.6 * (layout.progress / 100)}
+              />
+
+              <rect
+                className="goalscape-node-progress-fill"
+                x={layout.x - layout.width / 2 - 4}
+                y={progressFill.y}
+                width={layout.width + 8}
+                height={progressFill.height}
+                clipPath={`url(#${clipPathId})`}
                 fill={`url(#${liquidGradientId})`}
-                clipPath={`url(#${clipId})`}
+                opacity={0.26 + 0.5 * (layout.progress / 100)}
               />
-            )}
-            {surfacePath && (
+              {layout.progress > 0 && layout.progress < 100 && (
+                <line
+                  className="goalscape-node-progress-surface"
+                  x1={layout.x - layout.width * 0.34}
+                  x2={layout.x + layout.width * 0.34}
+                  y1={progressFill.surfaceY}
+                  y2={progressFill.surfaceY}
+                  clipPath={`url(#${clipPathId})`}
+                />
+              )}
+
+              {/* Glowing Starlight Core */}
+              <circle
+                cx={layout.x}
+                cy={layout.y}
+                r={goalscapeStarlightCoreRadius(layout.depth === 1 ? 16 : 10, layout.progress)}
+                className="goal-starlight-core"
+                fill={layout.color}
+                filter={`url(#goalscape-glow-level-${Math.min(5, Math.floor(layout.progress / 20))})`}
+              />
+
+              {/* Saturn gold achievements ring & cross star shimmer if progress is 100% */}
+              {layout.progress === 100 && (
+                <>
+                  <ellipse
+                    cx={layout.x}
+                    cy={layout.y}
+                    rx={layout.width * 0.72}
+                    ry={layout.height * 0.28}
+                    transform={`rotate(-15 ${layout.x} ${layout.y})`}
+                    className="goal-saturn-ring"
+                  />
+                  <path
+                    d={`M ${layout.x} ${layout.y - 12} Q ${layout.x} ${layout.y} ${layout.x + 12} ${layout.y} Q ${layout.x} ${layout.y} ${layout.x} ${layout.y + 12} Q ${layout.x} ${layout.y} ${layout.x - 12} ${layout.y} Q ${layout.x} ${layout.y} ${layout.x} ${layout.y - 12} Z`}
+                    className="goal-supernova-sparkle"
+                  />
+                </>
+              )}
+
+              <path className="goalscape-node-glass" d={nodePath} />
               <path
-                className="goalscape-node-liquid-surface"
-                d={surfacePath}
-                clipPath={`url(#${clipId})`}
+                className="goalscape-node-rim"
+                d={goalscapeBlobPath(layout.x, layout.y, layout.width - 12, layout.height - 10, layout.variant + 2)}
+                strokeOpacity={0.4 + 0.5 * (layout.progress / 100)}
               />
-            )}
-            <path className="goalscape-node-glass" d={nodePath} />
-            <path
-              className="goalscape-node-rim"
-              d={goalscapeBlobPath(layout.x, layout.y, layout.width - 12, layout.height - 10, layout.variant + 2)}
-            />
-            <foreignObject
-              x={layout.x - 20}
-              y={layout.y - (layout.depth === 1 ? 54 : 42)}
-              width="40"
-              height="40"
-              className="goalscape-icon-object"
-            >
-              <div className="goalscape-icon-wrap">
-                <Icon className="goalscape-node-icon" aria-hidden="true" />
-              </div>
-            </foreignObject>
-            <text
-              className={layout.depth === 1 ? "goalscape-node-title domain" : "goalscape-node-title child"}
-              x={layout.x}
-              y={layout.y + (layout.depth === 1 ? 7 : 9)}
-            >
-              {label.map((line, lineIndex) => (
-                <tspan key={line + lineIndex} x={layout.x} dy={lineIndex === 0 ? 0 : layout.depth === 1 ? 24 : 18}>
-                  {line}
-                </tspan>
-              ))}
-            </text>
-            <text className="goalscape-node-progress" x={layout.x} y={layout.y + layout.height * (layout.depth === 1 ? 0.31 : 0.43)}>
-              {layout.progress}%
-            </text>
+              <foreignObject
+                x={layout.x - 20}
+                y={layout.y - (layout.depth === 1 ? 54 : 42)}
+                width="40"
+                height="40"
+                className="goalscape-icon-object"
+              >
+                <div className="goalscape-icon-wrap">
+                  <Icon className="goalscape-node-icon" aria-hidden="true" />
+                </div>
+              </foreignObject>
+              <text
+                className={layout.depth === 1 ? "goalscape-node-title domain" : "goalscape-node-title child"}
+                x={layout.x}
+                y={layout.y + (layout.depth === 1 ? 7 : 9)}
+              >
+                {label.map((line, lineIndex) => (
+                  <tspan key={line + lineIndex} x={layout.x} dy={lineIndex === 0 ? 0 : layout.depth === 1 ? 24 : 18}>
+                    {line}
+                  </tspan>
+                ))}
+              </text>
+              <text className="goalscape-node-progress" x={layout.x} y={layout.y + layout.height * (layout.depth === 1 ? 0.31 : 0.43)}>
+                {layout.progress}%
+              </text>
+            </g>
           </g>
         );
       })}
@@ -1867,11 +2343,14 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   flatGoals,
   domains,
   saving,
+  importanceOverrides,
+  progressOverrides,
   onSelect,
   onSave,
   onPreviewImportance,
   onPreviewProgress,
-  onDraftChange
+  onDraftChange,
+  onOpenAi
 }: {
   selectedGoal: GoalNode | undefined;
   cachedDraft?: EditDraft;
@@ -1879,14 +2358,20 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   flatGoals: GoalNode[];
   domains: string[];
   saving: boolean;
+  importanceOverrides: ImportanceOverrides;
+  progressOverrides: ProgressOverrides;
   onSelect: (id: string) => void;
   onSave: (goal: GoalNode, draft: EditDraft) => Promise<boolean>;
   onPreviewImportance: (goalId: string, value: number) => void;
   onPreviewProgress: (goalId: string, value: number) => void;
   onDraftChange: (goal: GoalNode, draft: EditDraft, dirty: boolean) => void;
+  onOpenAi: (goal: GoalNode) => void;
 }) {
   const rootImportance = useMemo(() => normalizedImportance(topGoals), [topGoals]);
-  const rootProgressAverage = useMemo(() => averageProgress(flatGoals), [flatGoals]);
+  const rootProgressAverage = useMemo(
+    () => averageProgress(flatGoals, importanceOverrides, progressOverrides),
+    [flatGoals, importanceOverrides, progressOverrides]
+  );
   const selectedPath = useMemo(() => (selectedGoal ? goalPath(topGoals, selectedGoal.id) : []), [selectedGoal, topGoals]);
   const breadcrumbGoals = selectedGoal ? (selectedPath.length ? selectedPath : [selectedGoal]) : [];
   const selectedSiblingImportance = useMemo(
@@ -1913,6 +2398,14 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
           </div>
           <span className="status-badge active">地图</span>
         </div>
+
+        <section className="root-intro" aria-label="目标网络介绍">
+          <h3>把人生方向变成清晰可推进的地图</h3>
+          <p>
+            目标网络帮你把长期愿景、阶段目标和下一步行动连接在一起。你可以一眼看清重心在哪里、哪些目标正在推进，
+            也能随时调整优先级，让每天的选择都更靠近真正重要的结果。
+          </p>
+        </section>
 
         <div className="metric-grid">
           <div className="metric">
@@ -1979,7 +2472,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         </span>
         <span>
           <Gauge />
-          {progressValue(selectedGoal)}%
+          {weightedGoalProgress(selectedGoal, importanceOverrides, progressOverrides)}%
         </span>
       </div>
 
@@ -2005,6 +2498,11 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
             </button>
           ))}
           {selectedGoal.children.length === 0 && <p className="muted-text">还没有子目标。</p>}
+        </div>
+        <div className="ai-entry-row">
+          <button type="button" className="icon-button" title="AI 助手" aria-label="AI 助手" disabled={saving} onClick={() => onOpenAi(selectedGoal)}>
+            <Sparkles />
+          </button>
         </div>
       </section>
     </aside>
@@ -2050,6 +2548,7 @@ const GoalEditForm = React.memo(function GoalEditForm({
   const [draft, setDraft] = useState<EditDraft>(() => initialDraft);
   const [notesOpen, setNotesOpen] = useState(true);
   const primaryGoal = isPrimaryGoalNode(goal);
+  const progressEditable = !primaryGoal && goal.children.length === 0;
 
   useEffect(() => {
     setDraft(initialDraft);
@@ -2091,7 +2590,7 @@ const GoalEditForm = React.memo(function GoalEditForm({
             onPreviewImportance(goal.id, value);
           }}
         />
-        {!primaryGoal && (
+        {progressEditable && (
           <RangeField
             label="进度"
             value={draft.progress}
@@ -2132,7 +2631,7 @@ const GoalEditForm = React.memo(function GoalEditForm({
 function draftFromGoal(goal: GoalNode, importance: number): EditDraft {
   return {
     importance,
-    progress: progressValue(goal),
+    progress: weightedGoalProgress(goal),
     notes: goal.sections.summary,
     actions: goal.sections.actionCandidates.map((action) => ({ ...action }))
   };
@@ -2264,98 +2763,6 @@ function TextAreaBlock({
       {!hideLabel && label}
       <textarea rows={4} value={value} aria-label={hideLabel ? label : undefined} onChange={(event) => onChange(event.target.value)} />
     </label>
-  );
-}
-
-function CreateGoalForm({
-  parent,
-  domains,
-  saving,
-  onCreate,
-  onDone
-}: {
-  parent: GoalNode | undefined;
-  domains: string[];
-  saving: boolean;
-  onCreate: (input: GoalCreateInput) => Promise<void>;
-  onDone: () => void;
-}) {
-  const parentTitle = parent?.title || "";
-  const inheritedDomain = titleFromLink(parent?.domain) || domains[0] || "";
-  const [draft, setDraft] = useState<GoalCreateInput>({
-    title: "",
-    domain: inheritedDomain,
-    parent: parentTitle,
-    horizon: "medium",
-    priority: 3,
-    clarity: 1,
-    summary: ""
-  });
-
-  useEffect(() => {
-    setDraft({
-      title: "",
-      domain: inheritedDomain,
-      parent: parentTitle,
-      horizon: "medium",
-      priority: 3,
-      clarity: 1,
-      summary: ""
-    });
-  }, [inheritedDomain, parentTitle]);
-
-  return (
-    <form
-      className="create-form"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void onCreate({
-          ...draft,
-          title: draft.title.trim(),
-          priority: Number(draft.priority),
-          clarity: Number(draft.clarity)
-        }).then(onDone);
-      }}
-    >
-      <div className="form-grid two">
-        <label>
-          名称
-          <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
-        </label>
-        <label>
-          周期
-          <input value={draft.horizon} onChange={(event) => setDraft({ ...draft, horizon: event.target.value })} />
-        </label>
-      </div>
-      <div className="form-grid two">
-        <label>
-          目标域
-          <select value={draft.domain} onChange={(event) => setDraft({ ...draft, domain: event.target.value })}>
-            {(domains.includes(draft.domain) ? domains : [draft.domain, ...domains].filter(Boolean)).map((domain) => (
-              <option key={domain} value={domain}>
-                {domain}
-              </option>
-            ))}
-          </select>
-        </label>
-        <RangeField label="优先级" value={Number(draft.priority) || 3} onChange={(value) => setDraft({ ...draft, priority: value })} />
-      </div>
-      <RangeField label="清晰度" value={Number(draft.clarity) || 1} onChange={(value) => setDraft({ ...draft, clarity: value })} />
-      <label>
-        目标定义
-        <textarea rows={3} value={draft.summary} onChange={(event) => setDraft({ ...draft, summary: event.target.value })} />
-      </label>
-      <div className="form-actions">
-        <button type="button" className="secondary-button" onClick={onDone}>
-          <X />
-          取消
-        </button>
-        <button type="submit" className="primary-button" disabled={saving || !draft.title?.trim() || !draft.domain}>
-          {saving ? <Loader2 className="spin" /> : <Plus />}
-          创建
-        </button>
-      </div>
-    </form>
   );
 }
 
