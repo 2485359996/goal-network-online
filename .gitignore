@@ -2,6 +2,9 @@ node_modules/
 dist/
 coverage/
 .vite/
+.next/
+.cache-pack/
+*.tsbuildinfo
 .env
 .env.*
 !.env.example

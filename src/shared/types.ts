@@ -17,7 +17,7 @@ export type GoalActionCandidateInput = GoalActionCandidate | string;
 export interface GoalSections {
   summary: string;
   directions: string[];
-  directionHeading: "子方向" | "中期目标";
+  directionHeading: "子方向" | "中期目标" | "瀛愭柟鍚?" | "涓湡鐩爣";
   successSignals: string[];
   actionCandidates: GoalActionCandidate[];
   reviewQuestions: string[];
@@ -65,6 +65,7 @@ export interface GoalGraphEdge {
 }
 
 export interface GoalsResponse {
+  workspaceId?: string;
   goals: GoalNode[];
   flatGoals: GoalNode[];
   graph: {

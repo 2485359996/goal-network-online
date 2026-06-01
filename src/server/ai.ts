@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { aiRouteContracts, type AiEndpoint } from "../shared/aiContracts";
 
@@ -59,7 +58,12 @@ export async function runAiProvider(endpoint: AiEndpoint, request: unknown, opti
   return parseJsonObject(content);
 }
 
-export function registerAiRoutes(app: FastifyInstance, options: AiProviderOptions = {}) {
+type AiRouteReply = { code: (status: number) => { send: (payload: unknown) => unknown } };
+type AiRouteApp = {
+  post: (path: string, handler: (request: { body: unknown }, reply: AiRouteReply) => Promise<unknown>) => unknown;
+};
+
+export function registerAiRoutes(app: AiRouteApp, options: AiProviderOptions = {}) {
   const entries = Object.entries(aiRouteContracts) as Array<[AiEndpoint, (typeof aiRouteContracts)[AiEndpoint]]>;
 
   for (const [endpoint, contract] of entries) {
@@ -75,7 +79,7 @@ export function registerAiRoutes(app: FastifyInstance, options: AiProviderOption
   }
 }
 
-function handleAiError(error: unknown, reply: FastifyReply) {
+function handleAiError(error: unknown, reply: AiRouteReply) {
   if (error instanceof z.ZodError) {
     return reply.code(400).send({
       error: "Invalid AI request",

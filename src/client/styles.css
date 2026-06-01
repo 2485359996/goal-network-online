@@ -2441,3 +2441,51 @@ textarea:focus {
     gap: 8px;
   }
 }
+body {
+  margin: 0;
+}
+
+.login-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #0f172a;
+  color: #e5e7eb;
+  padding: 24px;
+}
+
+.login-panel {
+  width: min(420px, 100%);
+  display: grid;
+  gap: 18px;
+  padding: 28px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: #111827;
+  border-radius: 8px;
+}
+
+.login-panel h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.login-panel label {
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.login-panel input {
+  min-height: 42px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 6px;
+  background: #020617;
+  color: #e5e7eb;
+  padding: 0 12px;
+}
+
+.login-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}

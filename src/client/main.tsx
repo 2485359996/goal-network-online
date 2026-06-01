@@ -1,3 +1,5 @@
+"use client";
+
 import {
   BookOpen,
   Briefcase,
@@ -35,7 +37,6 @@ import {
   X
 } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
 import type {
   ActionCreateInput,
   GoalActionCandidate,
@@ -45,9 +46,9 @@ import type {
   GoalsResponse,
   GoalStatus
 } from "../shared/types";
+import { createBrowserSupabaseClient } from "../lib/supabase/client";
 import { isPrimaryGoalNode, isPrimaryGoalTitle, normalizedGoalTitle } from "../shared/goalRules";
 import { AiAssistantDialog } from "./AiAssistantDialog";
-import "./styles.css";
 import {
   applyThemePreference,
   nextThemePreference,
@@ -475,7 +476,7 @@ function uniqueTitle(base: string, goals: GoalNode[]) {
   return `${base} ${index}`;
 }
 
-function GoalApp() {
+export function GoalApp() {
   const [goals, setGoals] = useState<GoalsResponse>(emptyGoals);
   const [selectedId, setSelectedId] = useState("root");
   const [loading, setLoading] = useState(true);
@@ -536,19 +537,37 @@ function GoalApp() {
 
   useEffect(() => {
     void reload().catch(() => undefined);
-
-    const events = new EventSource("/api/events");
-    events.onopen = () => {
-      setError((current) => (current === "实时同步连接中断，仍可手动刷新。" ? "" : current));
-    };
-    events.onmessage = () => {
-      void reload().catch(() => undefined);
-    };
-    events.onerror = () => {
-      setError("实时同步连接中断，仍可手动刷新。");
-    };
-    return () => events.close();
   }, [reload]);
+
+  useEffect(() => {
+    const workspaceId = goals.workspaceId;
+    if (!workspaceId) return;
+    const supabase = createBrowserSupabaseClient();
+    if (!supabase) return;
+
+    const channel = supabase
+      .channel(`goal-network:${workspaceId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "goals", filter: `workspace_id=eq.${workspaceId}` }, () => {
+        void reload().catch(() => undefined);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "goal_relations", filter: `workspace_id=eq.${workspaceId}` }, () => {
+        void reload().catch(() => undefined);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "weekly_actions", filter: `workspace_id=eq.${workspaceId}` }, () => {
+        void reload().catch(() => undefined);
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "records", filter: `workspace_id=eq.${workspaceId}` }, () => {
+        void reload().catch(() => undefined);
+      })
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") setError((current) => (current === "Realtime disconnected" ? "" : current));
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setError("Realtime disconnected");
+      });
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [goals.workspaceId, reload]);
 
   const visibleTree = useMemo(() => filterGoalTree(goals.goals, false), [goals.goals]);
   const visibleFlatGoals = useMemo(() => flattenGoals(visibleTree), [visibleTree]);
@@ -2764,9 +2783,4 @@ function TextAreaBlock({
       <textarea rows={4} value={value} aria-label={hideLabel ? label : undefined} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
-}
-
-if (typeof document !== "undefined") {
-  const root = document.getElementById("root");
-  if (root) createRoot(root).render(<GoalApp />);
 }

@@ -1,4 +1,3 @@
-import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import { registerAiRoutes, runAiProvider } from "./ai";
 
@@ -20,49 +19,74 @@ const validGoalContext = {
   reviewQuestions: ["What blocked delivery?"]
 };
 
-async function buildApp() {
-  const app = Fastify();
-  registerAiRoutes(app, { readLocalEnv: () => ({}) });
-  await app.ready();
-  return app;
+type AiHandler = (
+  request: { body: unknown },
+  reply: { code: (status: number) => { send: (payload: unknown) => unknown } }
+) => Promise<unknown>;
+
+function buildRoutes() {
+  const routes = new Map<string, AiHandler>();
+  registerAiRoutes({
+    post: (path, handler) => {
+      routes.set(path, handler);
+    }
+  }, { readLocalEnv: () => ({}) });
+  return routes;
+}
+
+async function inject(routes: Map<string, AiHandler>, url: string, payload: unknown) {
+  const handler = routes.get(url);
+  if (!handler) throw new Error(`Missing route: ${url}`);
+
+  let statusCode = 200;
+  let body: unknown;
+  const result = await handler(
+    { body: payload },
+    {
+      code: (status) => {
+        statusCode = status;
+        return {
+          send: (payload) => {
+            body = payload;
+            return payload;
+          }
+        };
+      }
+    }
+  );
+  if (body === undefined) body = result;
+  return {
+    statusCode,
+    json: () => body
+  };
 }
 
 describe("AI routes", () => {
   it("returns 501 for valid improve-goal requests until a provider is configured", async () => {
-    const app = await buildApp();
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/ai/improve-goal",
-      payload: {
-        goalId: "goal-delivery",
-        goal: validGoalContext,
-        parentChain: [],
-        children: [],
-        siblings: []
-      }
+    const routes = buildRoutes();
+    const response = await inject(routes, "/api/ai/improve-goal", {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: []
     });
 
     expect(response.statusCode).toBe(501);
     expect(response.json()).toEqual({ error: "AI provider not configured" });
-    await app.close();
   });
 
   it("returns 400 for malformed requests", async () => {
-    const app = await buildApp();
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/ai/improve-goal",
-      payload: {
-        goal: validGoalContext,
-        parentChain: [],
-        children: [],
-        siblings: []
-      }
+    const routes = buildRoutes();
+    const response = await inject(routes, "/api/ai/improve-goal", {
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: []
     });
 
     expect(response.statusCode).toBe(400);
-    expect(response.json().error).toBe("Invalid AI request");
-    await app.close();
+    expect((response.json() as { error: string }).error).toBe("Invalid AI request");
   });
 
   it("calls a configured OpenAI-compatible provider and parses JSON content", async () => {
