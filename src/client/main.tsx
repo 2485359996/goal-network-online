@@ -64,6 +64,10 @@ const emptyGoals: GoalsResponse = {
   graph: { nodes: [], edges: [] }
 };
 
+function mediaQueryMatches(query: string, fallback = false) {
+  return typeof window === "undefined" ? fallback : window.matchMedia(query).matches;
+}
+
 const statusLabels: Record<GoalStatus, string> = {
   active: "推进中",
   paused: "暂停",
@@ -493,10 +497,10 @@ export function GoalApp() {
   const [aiGoal, setAiGoal] = useState<GoalNode | null>(null);
   const [detailWidth, setDetailWidth] = useState(500);
   const [mapPaneHeight, setMapPaneHeight] = useState(520);
-  const [stackedLayout, setStackedLayout] = useState(() => window.matchMedia("(max-width: 1120px)").matches);
+  const [stackedLayout, setStackedLayout] = useState(() => mediaQueryMatches("(max-width: 1120px)"));
   const [resizingPanelAxis, setResizingPanelAxis] = useState<"width" | "height" | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => readStoredTheme());
-  const [systemPrefersDark, setSystemPrefersDark] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() => mediaQueryMatches("(prefers-color-scheme: dark)"));
   const workspaceRef = useRef<HTMLElement | null>(null);
   const mapPaneRef = useRef<HTMLElement | null>(null);
   const pendingEditRef = useRef<PendingEdit | null>(null);
