@@ -27,18 +27,35 @@ async function main() {
   const vault = new VaultService(vaultRoot);
   const sourceGoals = await vault.readGoals();
 
-  const workspace = await admin
-    .from("workspaces")
-    .insert({
-      name: workspaceName,
-      owner_user_id: ownerUserId || null
-    })
-    .select("id")
-    .single();
-  if (workspace.error) throw workspace.error;
-  const workspaceId = workspace.data.id as string;
-
+  let workspaceId = "";
+  let hasOwnerMembership = false;
   if (ownerUserId) {
+    const existing = await admin
+      .from("memberships")
+      .select("workspace_id")
+      .eq("user_id", ownerUserId)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (existing.error) throw existing.error;
+    workspaceId = String(existing.data?.workspace_id ?? "");
+    hasOwnerMembership = Boolean(workspaceId);
+  }
+
+  if (!workspaceId) {
+    const workspace = await admin
+      .from("workspaces")
+      .insert({
+        name: workspaceName,
+        owner_user_id: ownerUserId || null
+      })
+      .select("id")
+      .single();
+    if (workspace.error) throw workspace.error;
+    workspaceId = workspace.data.id as string;
+  }
+
+  if (ownerUserId && !hasOwnerMembership) {
     const membership = await admin.from("memberships").insert({
       workspace_id: workspaceId,
       user_id: ownerUserId,
