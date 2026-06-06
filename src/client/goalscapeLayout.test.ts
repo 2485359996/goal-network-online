@@ -5,9 +5,12 @@ import {
   buildGoalscapeLayout,
   canOpenGoalSubmap,
   clampGoalscapePosition,
+  constrainGoalscapePositionToOrbit,
   goalscapeCenter,
+  goalscapeCenterPearlSize,
   goalscapeChildOffset,
   goalscapeNodeDensity,
+  goalscapeOrbitForDepth,
   goalscapeProgressFillGeometry,
   goalscapeStarlightCoreRadius,
   parentMapFocusId,
@@ -22,13 +25,33 @@ function distance(a: { x: number; y: number }, b: { x: number; y: number }) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+function ellipseValue(point: { x: number; y: number }, orbit: { cx: number; cy: number; rx: number; ry: number }) {
+  return ((point.x - orbit.cx) ** 2) / orbit.rx ** 2 + ((point.y - orbit.cy) ** 2) / orbit.ry ** 2;
+}
+
+function angleFromCenter(point: { x: number; y: number }) {
+  return Math.atan2(point.y - goalscapeCenter.y, point.x - goalscapeCenter.x);
+}
+
 describe("goalscape layout", () => {
+  it("centers the goalscape composition in the svg viewbox", () => {
+    const layouts = buildGoalscapeLayout([goal("life"), goal("growth"), goal("career")], {}, {});
+    const compositionCenter = {
+      x: (goalscapeCenter.x + layouts.reduce((sum, layout) => sum + layout.x, 0)) / (layouts.length + 1),
+      y: (goalscapeCenter.y + layouts.reduce((sum, layout) => sum + layout.y, 0)) / (layouts.length + 1)
+    };
+
+    expect(goalscapeCenter).toMatchObject({ x: 600, y: 380 });
+    expect(compositionCenter.x).toBeCloseTo(600, -1);
+    expect(compositionCenter.y).toBeCloseTo(380, -1);
+  });
+
   it("keeps the three primary goal slots stable", () => {
     const slots = assignGoalscapeSlots([goal("a"), goal("b"), goal("c")]);
 
-    expect(slots.get("a")).toMatchObject({ key: "life", x: 310, y: 380 });
-    expect(slots.get("b")).toMatchObject({ key: "growth", x: 705, y: 255 });
-    expect(slots.get("c")).toMatchObject({ key: "career", x: 622, y: 585 });
+    expect(slots.get("a")).toMatchObject({ key: "life", x: 382, y: 354 });
+    expect(slots.get("b")).toMatchObject({ key: "growth", x: 777, y: 229 });
+    expect(slots.get("c")).toMatchObject({ key: "career", x: 694, y: 559 });
   });
 
   it("places four primary goals in four quadrants", () => {
@@ -70,25 +93,109 @@ describe("goalscape layout", () => {
     expect(bottomOffsets.every((offset) => offset.y > 0)).toBe(true);
   });
 
-  it("uses saved or previewed map positions before generated slots", () => {
+  it("projects saved or previewed map positions onto the matching orbit while preserving direction", () => {
     const saved = { ...goal("saved"), map_positions: { root: { x: 420, y: 260 } } };
     const previewed = goal("previewed");
     const layouts = buildGoalscapeLayout([saved, previewed], {}, {}, { previewed: { x: 900, y: 510 } });
+    const orbit = goalscapeOrbitForDepth(1);
+    const savedLayout = layouts.find((layout) => layout.node.id === "saved");
+    const previewedLayout = layouts.find((layout) => layout.node.id === "previewed");
 
-    expect(layouts.find((layout) => layout.node.id === "saved")).toMatchObject({ x: 420, y: 260 });
-    expect(layouts.find((layout) => layout.node.id === "previewed")).toMatchObject({ x: 900, y: 510 });
+    expect(savedLayout).toBeDefined();
+    expect(previewedLayout).toBeDefined();
+    expect(ellipseValue(savedLayout!, orbit)).toBeCloseTo(1, 2);
+    expect(ellipseValue(previewedLayout!, orbit)).toBeCloseTo(1, 2);
+    expect(angleFromCenter(savedLayout!)).toBeCloseTo(angleFromCenter({ x: 420, y: 260 }), 2);
+    expect(angleFromCenter(previewedLayout!)).toBeCloseTo(angleFromCenter({ x: 900, y: 510 }), 2);
+  });
+
+  it("keeps child goal positions stable while previewing a parent drag", () => {
+    const child = goal("child");
+    const parent = { ...goal("parent"), children: [child] };
+    const baselineChild = buildGoalscapeLayout([parent], {}, {}).find((layout) => layout.node.id === "child");
+    const draggedChild = buildGoalscapeLayout([parent], {}, {}, { parent: { x: 900, y: 510 } }).find((layout) => layout.node.id === "child");
+
+    expect(baselineChild).toBeDefined();
+    expect(draggedChild).toBeDefined();
+    expect(draggedChild!.x).toBeCloseTo(baselineChild!.x, 5);
+    expect(draggedChild!.y).toBeCloseTo(baselineChild!.y, 5);
   });
 
   it("scopes saved map positions to the current focus context", () => {
     const scoped = { ...goal("scoped"), map_positions: { root: { x: 420, y: 260 }, parent: { x: 880, y: 500 } } };
 
-    expect(buildGoalscapeLayout([scoped], {}, {}, {}, "root")[0]).toMatchObject({ x: 420, y: 260 });
-    expect(buildGoalscapeLayout([scoped], {}, {}, {}, "parent")[0]).toMatchObject({ x: 880, y: 500 });
-    expect(buildGoalscapeLayout([scoped], {}, {}, {}, "other")[0]).toMatchObject({ x: 310, y: 380 });
+    expect(angleFromCenter(buildGoalscapeLayout([scoped], {}, {}, {}, "root")[0])).toBeCloseTo(angleFromCenter({ x: 420, y: 260 }), 2);
+    expect(angleFromCenter(buildGoalscapeLayout([scoped], {}, {}, {}, "parent")[0])).toBeCloseTo(angleFromCenter({ x: 880, y: 500 }), 2);
+    expect(angleFromCenter(buildGoalscapeLayout([scoped], {}, {}, {}, "other")[0])).toBeCloseTo(angleFromCenter({ x: 382, y: 354 }), 2);
   });
 
   it("keeps custom positions inside the goalscape viewbox", () => {
     expect(clampGoalscapePosition({ x: -100, y: 999 })).toEqual({ x: 80, y: 690 });
+  });
+
+  it("constrains arbitrary positions to an ellipse orbit", () => {
+    const orbit = goalscapeOrbitForDepth(1);
+    const constrained = constrainGoalscapePositionToOrbit({ x: 420, y: 260 }, orbit);
+    const centered = constrainGoalscapePositionToOrbit(goalscapeCenter, orbit);
+
+    expect(ellipseValue(constrained, orbit)).toBeCloseTo(1, 2);
+    expect(angleFromCenter(constrained)).toBeCloseTo(angleFromCenter({ x: 420, y: 260 }), 2);
+    expect(centered).toEqual({ x: orbit.cx, y: orbit.cy - orbit.ry });
+  });
+
+  it("places each visible depth on its own orbit", () => {
+    const child = goal("child");
+    const parent = { ...goal("parent"), children: [child] };
+    const layouts = buildGoalscapeLayout([parent], {}, {});
+    const parentLayout = layouts.find((layout) => layout.node.id === "parent");
+    const childLayout = layouts.find((layout) => layout.node.id === "child");
+
+    expect(parentLayout).toBeDefined();
+    expect(childLayout).toBeDefined();
+    expect(ellipseValue(parentLayout!, goalscapeOrbitForDepth(1))).toBeCloseTo(1, 2);
+    expect(ellipseValue(childLayout!, goalscapeOrbitForDepth(2))).toBeCloseTo(1, 2);
+  });
+
+  it("keeps higher-level goals closer to the center than child goals", () => {
+    const child = goal("child");
+    const parent = { ...goal("parent"), children: [child] };
+    const layouts = buildGoalscapeLayout([parent], {}, {});
+    const parentLayout = layouts.find((layout) => layout.node.id === "parent");
+    const childLayout = layouts.find((layout) => layout.node.id === "child");
+
+    expect(parentLayout).toBeDefined();
+    expect(childLayout).toBeDefined();
+    expect(distance(parentLayout!, goalscapeCenter)).toBeLessThan(distance(childLayout!, goalscapeCenter));
+  });
+
+  it("scales goal spheres down harmoniously from the center outward", () => {
+    const firstChild = goal("first-child");
+    const secondChild = goal("second-child");
+    const parent = { ...goal("parent"), children: [firstChild, secondChild] };
+    const siblingLayouts = buildGoalscapeLayout([goal("life"), goal("growth"), goal("career")], {}, {});
+    const layouts = buildGoalscapeLayout([parent], {}, {});
+    const parentLayout = layouts.find((layout) => layout.node.id === "parent");
+    const childLayouts = layouts.filter((layout) => layout.parentId === "parent");
+    const siblingWidths = siblingLayouts.map((layout) => layout.width);
+    const siblingHeights = siblingLayouts.map((layout) => layout.height);
+
+    expect(parentLayout).toBeDefined();
+    expect(parentLayout!.width).toBeLessThan(goalscapeCenterPearlSize.width);
+    expect(parentLayout!.height).toBeLessThan(goalscapeCenterPearlSize.height);
+    expect(Math.max(...siblingWidths) - Math.min(...siblingWidths)).toBeLessThanOrEqual(12);
+    expect(Math.max(...siblingHeights) - Math.min(...siblingHeights)).toBeLessThanOrEqual(12);
+    childLayouts.forEach((layout) => {
+      expect(layout.width).toBeLessThan(parentLayout!.width);
+      expect(layout.height).toBeLessThan(parentLayout!.height);
+    });
+  });
+
+  it("keeps adjacent level orbits visibly separated", () => {
+    const innerOrbit = goalscapeOrbitForDepth(1);
+    const outerOrbit = goalscapeOrbitForDepth(2);
+
+    expect(outerOrbit.rx - innerOrbit.rx).toBeGreaterThanOrEqual(180);
+    expect(outerOrbit.ry - innerOrbit.ry).toBeGreaterThanOrEqual(110);
   });
 
   it("resolves the previous map focus for center-node double click", () => {

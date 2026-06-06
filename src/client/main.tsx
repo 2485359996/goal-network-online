@@ -49,6 +49,7 @@ import type {
 import { createBrowserSupabaseClient } from "../lib/supabase/client";
 import { isPrimaryGoalNode, isPrimaryGoalTitle, normalizedGoalTitle } from "../shared/goalRules";
 import { AiAssistantDialog } from "./AiAssistantDialog";
+import { useModalDialog } from "./useModalDialog";
 import {
   applyThemePreference,
   nextThemePreference,
@@ -68,6 +69,8 @@ function mediaQueryMatches(query: string, fallback = false) {
   return typeof window === "undefined" ? fallback : window.matchMedia(query).matches;
 }
 
+const STACKED_LAYOUT_QUERY = "(max-width: 1120px)";
+
 const statusLabels: Record<GoalStatus, string> = {
   active: "推进中",
   paused: "暂停",
@@ -75,23 +78,10 @@ const statusLabels: Record<GoalStatus, string> = {
   archived: "归档"
 };
 
-const center = { x: 450, y: 450 };
-
 const themeLabels: Record<ThemePreference, string> = {
   system: "系统设定",
   light: "浅色",
   dark: "深色"
-};
-
-type SectorLayout = {
-  node: GoalNode;
-  depth: number;
-  startAngle: number;
-  endAngle: number;
-  innerRadius: number;
-  outerRadius: number;
-  parentId: string;
-  importance: number;
 };
 
 type EditDraft = {
@@ -225,11 +215,6 @@ function flattenGoals(goals: GoalNode[]) {
   return result;
 }
 
-function maxTreeDepth(goals: GoalNode[]): number {
-  if (goals.length === 0) return 0;
-  return Math.max(...goals.map((goal) => 1 + maxTreeDepth(goal.children || [])));
-}
-
 function findGoalById(goals: GoalNode[], id: string): GoalNode | undefined {
   for (const goal of goals) {
     if (goal.id === id) return goal;
@@ -300,30 +285,6 @@ function averageProgress(
   return Math.round(total / measurable.length);
 }
 
-function polarToCartesian(angle: number, radius: number) {
-  const radians = ((angle - 90) * Math.PI) / 180;
-  return {
-    x: center.x + radius * Math.cos(radians),
-    y: center.y + radius * Math.sin(radians)
-  };
-}
-
-function arcPath(startAngle: number, endAngle: number, innerRadius: number, outerRadius: number) {
-  const safeEnd = endAngle - startAngle >= 359.99 ? startAngle + 359.99 : endAngle;
-  const largeArc = safeEnd - startAngle > 180 ? 1 : 0;
-  const outerStart = polarToCartesian(startAngle, outerRadius);
-  const outerEnd = polarToCartesian(safeEnd, outerRadius);
-  const innerEnd = polarToCartesian(safeEnd, innerRadius);
-  const innerStart = polarToCartesian(startAngle, innerRadius);
-  return [
-    `M ${outerStart.x.toFixed(3)} ${outerStart.y.toFixed(3)}`,
-    `A ${outerRadius} ${outerRadius} 0 ${largeArc} 1 ${outerEnd.x.toFixed(3)} ${outerEnd.y.toFixed(3)}`,
-    `L ${innerEnd.x.toFixed(3)} ${innerEnd.y.toFixed(3)}`,
-    `A ${innerRadius} ${innerRadius} 0 ${largeArc} 0 ${innerStart.x.toFixed(3)} ${innerStart.y.toFixed(3)}`,
-    "Z"
-  ].join(" ");
-}
-
 function hexToRgb(hex: string) {
   const raw = hex.replace("#", "");
   const num = parseInt(raw, 16);
@@ -349,58 +310,14 @@ function domainBaseColor(domain: string) {
   return "#64748b";
 }
 
-function getRings(depth: number) {
-  if (depth <= 0) return [];
-  if (depth <= 3) {
-    return [
-      { innerRadius: 104, outerRadius: 244 },
-      { innerRadius: 252, outerRadius: 360 },
-      { innerRadius: 368, outerRadius: 430 }
-    ].slice(0, depth);
-  }
-
-  const innerStart = 100;
-  const maxOuter = 432;
-  const gap = 7;
-  const thickness = Math.max(42, (maxOuter - innerStart - gap * (depth - 1)) / depth);
-  return Array.from({ length: depth }, (_, index) => {
-    const innerRadius = innerStart + index * (thickness + gap);
-    return { innerRadius, outerRadius: innerRadius + thickness };
-  });
-}
-
-function buildSectors(goals: GoalNode[], importanceOverrides: ImportanceOverrides = {}) {
-  const rings = getRings(maxTreeDepth(goals));
-  const sectors: SectorLayout[] = [];
-
-  const visit = (children: GoalNode[], depth: number, startAngle: number, endAngle: number, parentId: string) => {
-    const ring = rings[depth - 1];
-    if (!ring || children.length === 0) return;
-
-    const childImportance = normalizedImportance(children, importanceOverrides);
-    let cursor = startAngle;
-    children.forEach((child, index) => {
-      const isLast = index === children.length - 1;
-      const importance = childImportance[child.id] ?? 0;
-      const share = ((endAngle - startAngle) * importance) / 100;
-      const childEnd = isLast ? endAngle : cursor + share;
-      sectors.push({
-        node: child,
-        depth,
-        startAngle: cursor,
-        endAngle: childEnd,
-        innerRadius: ring.innerRadius,
-        outerRadius: ring.outerRadius,
-        parentId,
-        importance
-      });
-      visit(child.children || [], depth + 1, cursor, childEnd, child.id);
-      cursor = childEnd;
-    });
-  };
-
-  visit(goals, 1, 0, 360, "root");
-  return sectors;
+// UI 克罗姆用：返回主题感知的领域色 token 引用，让明暗主题自动切换为对应明度的领域色。
+// SVG 星图仍使用 domainBaseColor 的原色 hex（节点取色需要具体数值做液面/星核渐变）。
+function domainAccentToken(domain: string) {
+  const normalized = titleFromLink(domain);
+  if (normalized.includes("职业")) return "var(--career)";
+  if (normalized.includes("个人") || normalized.includes("成长")) return "var(--growth)";
+  if (normalized.includes("幸福") || normalized.includes("生活")) return "var(--life)";
+  return "var(--other)";
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -493,14 +410,17 @@ export function GoalApp() {
   const [focusId, setFocusId] = useState("root");
   const [scopeListCollapsed, setScopeListCollapsed] = useState(true);
   const [deleteCandidate, setDeleteCandidate] = useState<GoalNode | null>(null);
+  const [renameOpen, setRenameOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiGoal, setAiGoal] = useState<GoalNode | null>(null);
   const [detailWidth, setDetailWidth] = useState(500);
   const [mapPaneHeight, setMapPaneHeight] = useState(520);
-  const [stackedLayout, setStackedLayout] = useState(() => mediaQueryMatches("(max-width: 1120px)"));
+  // 这三个初值必须与服务端 SSR 输出一致（确定值），否则水合那一帧渲染的图标/aria/布局会和服务端不符 → hydration mismatch。
+  // 客户端真实值在挂载后由各自的 effect 纠正（stacked→layout effect、systemPrefersDark/themePreference→theme effect）。
+  const [stackedLayout, setStackedLayout] = useState(false);
   const [resizingPanelAxis, setResizingPanelAxis] = useState<"width" | "height" | null>(null);
-  const [themePreference, setThemePreference] = useState<ThemePreference>(() => readStoredTheme());
-  const [systemPrefersDark, setSystemPrefersDark] = useState(() => mediaQueryMatches("(prefers-color-scheme: dark)"));
+  const [themePreference, setThemePreference] = useState<ThemePreference>("system");
+  const [systemPrefersDark, setSystemPrefersDark] = useState(false);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const mapPaneRef = useRef<HTMLElement | null>(null);
   const pendingEditRef = useRef<PendingEdit | null>(null);
@@ -514,11 +434,17 @@ export function GoalApp() {
       applyThemePreference(themePreference, { systemPrefersDark: mediaQuery.matches });
     };
 
-    writeStoredTheme(themePreference);
     syncTheme();
     mediaQuery.addEventListener("change", syncTheme);
     return () => mediaQuery.removeEventListener("change", syncTheme);
   }, [themePreference]);
+
+  // 挂载后从 localStorage 读取真实主题偏好（初值用 "system" 以匹配服务端），并立即应用，避免比"system→存储值"多一帧中间态。
+  useEffect(() => {
+    const stored = readStoredTheme();
+    setThemePreference(stored);
+    applyThemePreference(stored, { systemPrefersDark: mediaQueryMatches("(prefers-color-scheme: dark)") });
+  }, []);
 
   const loadGoals = useCallback(async () => {
     const next = await api<GoalsResponse>("/api/goals");
@@ -613,7 +539,7 @@ export function GoalApp() {
   }, []);
 
   useEffect(() => {
-    const mediaQuery = window.matchMedia("(max-width: 1120px)");
+    const mediaQuery = window.matchMedia(STACKED_LAYOUT_QUERY);
     const syncLayout = () => {
       setStackedLayout(mediaQuery.matches);
       if (mediaQuery.matches) {
@@ -635,7 +561,7 @@ export function GoalApp() {
     if (!workspace) return;
 
     event.preventDefault();
-    const resizingHeight = window.matchMedia("(max-width: 1120px)").matches;
+    const resizingHeight = window.matchMedia(STACKED_LAYOUT_QUERY).matches;
     const mapPaneRect = mapPaneRef.current?.getBoundingClientRect();
     if (resizingHeight && !mapPaneRect) return;
 
@@ -910,21 +836,39 @@ export function GoalApp() {
     });
   }, [createGoal, domainTitles, goals.flatGoals, queuePendingEditSave, selectedGoalFull, selectedParent]);
 
-  const renameSelectedGoal = async () => {
+  const createTopGoal = useCallback(async () => {
+    await queuePendingEditSave();
+    const title = uniqueTitle("新目标", goals.flatGoals);
+    await createGoal({
+      title,
+      parent: "",
+      domain: domainTitles[0] || title,
+      horizon: "medium",
+      priority: 50,
+      clarity: 1,
+      progress: 0
+    });
+  }, [createGoal, domainTitles, goals.flatGoals, queuePendingEditSave]);
+
+  const submitRename = async (nextTitle: string) => {
     if (!selectedGoalFull) return;
-    const nextTitle = window.prompt("重命名目标", selectedGoalFull.title)?.trim();
-    if (!nextTitle || nextTitle === selectedGoalFull.title) return;
+    const trimmed = nextTitle.trim();
+    if (!trimmed || trimmed === selectedGoalFull.title) {
+      setRenameOpen(false);
+      return;
+    }
     await runWrite(async () => {
       await api(`/api/goals/${encodeURIComponent(selectedGoalFull.id)}`, {
         method: "PATCH",
-        body: JSON.stringify({ title: nextTitle })
+        body: JSON.stringify({ title: trimmed })
       });
       const next = await loadGoals();
-      const renamedGoal = next.flatGoals.find((item) => item.title === nextTitle);
+      const renamedGoal = next.flatGoals.find((item) => item.title === trimmed);
       const nextId = renamedGoal?.id || (next.flatGoals.some((item) => item.id === selectedGoalFull.id) ? selectedGoalFull.id : "root");
       setSelectedId(nextId);
       if (focusId === selectedGoalFull.id) setFocusId(nextId);
     }, "目标已重命名");
+    setRenameOpen(false);
   };
 
   const changeMapFocus = useCallback((id: string) => {
@@ -992,7 +936,11 @@ export function GoalApp() {
             className="icon-button theme-toggle"
             title={themeButtonLabel}
             aria-label={themeButtonLabel}
-            onClick={() => setThemePreference((current) => nextThemePreference(current))}
+            onClick={() => {
+              const next = nextThemePreference(themePreference);
+              setThemePreference(next);
+              writeStoredTheme(next);
+            }}
           >
             <ThemeIcon />
           </button>
@@ -1019,7 +967,7 @@ export function GoalApp() {
             canResetPosition={hasCustomMapPosition(selectedGoalFull, mapContextId)}
             onAddSubgoal={() => void createQuickGoal("subgoal")}
             onAddSibling={() => void createQuickGoal("sibling")}
-            onRename={() => void renameSelectedGoal()}
+            onRename={() => selectedGoalFull && setRenameOpen(true)}
             onResetPosition={resetSelectedMapPosition}
             onDelete={() => selectedGoalFull && setDeleteCandidate(selectedGoalFull)}
           />
@@ -1038,13 +986,24 @@ export function GoalApp() {
               mapContextId={mapContextId}
               centerId={focusGoal?.id || "root"}
               centerTitle={focusGoal?.title || "目标网络"}
-              emptyLabel={focusGoal ? "这个目标还没有子目标" : "暂无可显示目标"}
+              emptyLabel={focusGoal ? "这个目标还没有子目标" : ""}
               onSelect={selectGoal}
               onOpenMap={changeMapFocus}
               onOpenParentMap={focusGoal ? openParentMap : undefined}
               onPreviewPosition={previewMapPosition}
               onCommitPosition={saveMapPosition}
             />
+          )}
+          {!loading && !focusGoal && visibleTree.length === 0 && (
+            <div className="empty-scape" role="status">
+              <p className="empty-scape-eyebrow">星图待点亮</p>
+              <h2 className="empty-scape-title">还没有任何目标星</h2>
+              <p className="empty-scape-hint">从一颗顶层目标开始，让能量从中心流向你的各个生命领域。</p>
+              <button type="button" className="empty-scape-cta" onClick={() => void createTopGoal()} disabled={saving}>
+                <Sparkles />
+                点亮第一颗目标
+              </button>
+            </div>
           )}
         </section>
 
@@ -1088,8 +1047,6 @@ export function GoalApp() {
           selectedGoal={selectedGoal}
           cachedDraft={selectedGoal ? draftCacheRef.current[selectedGoal.id] : undefined}
           topGoals={visibleTree}
-          flatGoals={visibleFlatGoals}
-          domains={domainTitles}
           saving={saving}
           importanceOverrides={importancePreview}
           progressOverrides={progressPreview}
@@ -1113,6 +1070,12 @@ export function GoalApp() {
           onCreateWeeklyAction={createWeeklyActionFromAi}
         />
       )}
+      <RenameGoalDialog
+        goal={renameOpen ? selectedGoalFull ?? null : null}
+        saving={saving}
+        onCancel={() => setRenameOpen(false)}
+        onConfirm={(title) => void submitRename(title)}
+      />
       <DeleteGoalDialog
         goal={deleteCandidate}
         saving={saving}
@@ -1153,6 +1116,7 @@ function MapScopeList({
           <button
             type="button"
             className={focusId === "root" ? "scope-item active" : "scope-item"}
+            style={{ "--scope-accent": "var(--accent)" } as React.CSSProperties}
             onClick={() => onFocus("root")}
           >
             <span>整体目标</span>
@@ -1164,6 +1128,7 @@ function MapScopeList({
               key={goal.id}
               type="button"
               className={focusId === goal.id ? "scope-item active" : "scope-item"}
+              style={{ "--scope-accent": domainAccentToken(goal.domain || goal.title) } as React.CSSProperties}
               onClick={() => onFocus(goal.id)}
             >
               <span>{goal.title}</span>
@@ -1199,7 +1164,30 @@ function MapActions({
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const menuWrapRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
   const disabled = saving || !selectedGoal;
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!menuWrapRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    menuWrapRef.current?.querySelector<HTMLElement>(".menu-item:not([disabled])")?.focus();
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [open]);
 
   return (
     <div className="map-actions">
@@ -1209,12 +1197,14 @@ function MapActions({
       <button type="button" className="icon-button" title="添加同级目标" aria-label="添加同级目标" disabled={disabled || !canAddSibling} onClick={onAddSibling}>
         <CirclePlus />
       </button>
-      <div className="menu-wrap">
+      <div className="menu-wrap" ref={menuWrapRef}>
         <button
           type="button"
+          ref={triggerRef}
           className="icon-button"
           title="菜单与快捷操作"
           aria-label="菜单与快捷操作"
+          aria-haspopup="menu"
           aria-expanded={open}
           onClick={() => setOpen((current) => !current)}
         >
@@ -1277,12 +1267,29 @@ function DeleteGoalDialog({
   onConfirm: () => void;
 }) {
   if (!goal) return null;
+  return <DeleteGoalDialogBody goal={goal} saving={saving} onCancel={onCancel} onConfirm={onConfirm} />;
+}
 
+function DeleteGoalDialogBody({
+  goal,
+  saving,
+  onCancel,
+  onConfirm
+}: {
+  goal: GoalNode;
+  saving: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { dialogRef, onBackdropPointerDown, onBackdropClick } = useModalDialog<HTMLElement>({
+    onDismiss: onCancel,
+    canDismiss: !saving
+  });
   const childCount = collectDescendants(goal).size;
 
   return (
-    <div className="dialog-backdrop" role="presentation">
-      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
+      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
         <div className="dialog-head">
           <div>
             <p className="eyebrow">删除目标</p>
@@ -1304,6 +1311,94 @@ function DeleteGoalDialog({
             彻底删除
           </button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function RenameGoalDialog({
+  goal,
+  saving,
+  onCancel,
+  onConfirm
+}: {
+  goal: GoalNode | null;
+  saving: boolean;
+  onCancel: () => void;
+  onConfirm: (title: string) => void;
+}) {
+  if (!goal) return null;
+  return <RenameGoalDialogBody goal={goal} saving={saving} onCancel={onCancel} onConfirm={onConfirm} />;
+}
+
+function RenameGoalDialogBody({
+  goal,
+  saving,
+  onCancel,
+  onConfirm
+}: {
+  goal: GoalNode;
+  saving: boolean;
+  onCancel: () => void;
+  onConfirm: (title: string) => void;
+}) {
+  const { dialogRef, onBackdropPointerDown, onBackdropClick } = useModalDialog<HTMLElement>({
+    onDismiss: onCancel,
+    canDismiss: !saving
+  });
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [title, setTitle] = useState(goal.title);
+
+  // useModalDialog 会先把焦点收进弹窗（首个可聚焦元素是关闭按钮），随后这里再把焦点移到输入框并选中全文，
+  // 让用户直接改写——还原 prompt() 的「打开即可编辑」手感，但保留焦点环与归还。
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const trimmed = title.trim();
+  const canSubmit = !saving && trimmed.length > 0 && trimmed !== goal.title;
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
+      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title">
+        <div className="dialog-head">
+          <div>
+            <p className="eyebrow">重命名目标</p>
+            <h2 id="rename-dialog-title">重命名「{goal.title}」</h2>
+          </div>
+          <button type="button" className="icon-button compact" aria-label="取消重命名" disabled={saving} onClick={onCancel}>
+            <X />
+          </button>
+        </div>
+        <form
+          className="rename-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (canSubmit) onConfirm(trimmed);
+          }}
+        >
+          <label className="rename-field">
+            <span className="field-label">目标名称</span>
+            <input
+              ref={inputRef}
+              type="text"
+              value={title}
+              maxLength={120}
+              placeholder="输入新的目标名称"
+              onChange={(event) => setTitle(event.target.value)}
+            />
+          </label>
+          <div className="dialog-actions">
+            <button type="button" className="secondary-button" disabled={saving} onClick={onCancel}>
+              取消
+            </button>
+            <button type="submit" className="primary-button" disabled={!canSubmit}>
+              {saving ? <Loader2 className="spin" /> : <Pencil />}
+              重命名
+            </button>
+          </div>
+        </form>
       </section>
     </div>
   );
@@ -1335,25 +1430,64 @@ type GoalscapeNodeLayout = {
   variant: number;
 };
 
+export type GoalscapeOrbit = {
+  depth: number;
+  cx: number;
+  cy: number;
+  rx: number;
+  ry: number;
+};
+
 export function canOpenGoalSubmap(layout: Pick<GoalscapeNodeLayout, "node" | "depth">) {
   return layout.depth === 1 || (layout.node.children || []).length > 0;
 }
 
-export const goalscapeCenter = { x: 560, y: 410, width: 142, height: 120 };
+export const goalscapeCenter = { x: 600, y: 380, width: 142, height: 120 };
 
 const goalscapeViewBox = { width: 1200, height: 760 };
 
+export function goalscapeOrbitForDepth(depth: number): GoalscapeOrbit {
+  const safeDepth = Math.max(1, Math.round(depth));
+  const scale = Math.min(1, 0.55 + (safeDepth - 1) * 0.45);
+  const radiusX = Math.min(goalscapeCenter.x - 120, goalscapeViewBox.width - goalscapeCenter.x - 120);
+  const radiusY = Math.min(goalscapeCenter.y - 70, goalscapeViewBox.height - goalscapeCenter.y - 70);
+
+  return {
+    depth: safeDepth,
+    cx: goalscapeCenter.x,
+    cy: goalscapeCenter.y,
+    rx: radiusX * scale,
+    ry: radiusY * scale
+  };
+}
+
+export function constrainGoalscapePositionToOrbit(position: MapPosition, orbit: GoalscapeOrbit): MapPosition {
+  const clamped = clampGoalscapePosition(position);
+  const deltaX = clamped.x - orbit.cx;
+  const deltaY = clamped.y - orbit.cy;
+
+  if (Math.hypot(deltaX, deltaY) < 0.001) {
+    return { x: orbit.cx, y: orbit.cy - orbit.ry };
+  }
+
+  const scale = 1 / Math.sqrt(deltaX ** 2 / orbit.rx ** 2 + deltaY ** 2 / orbit.ry ** 2);
+  return {
+    x: orbit.cx + deltaX * scale,
+    y: orbit.cy + deltaY * scale
+  };
+}
+
 const goalscapeSlotStyles: Record<GoalscapeSlotKey, Pick<GoalscapeSlot, "width" | "height" | "color">> = {
-  life: { width: 210, height: 150, color: "#10b981" },
-  growth: { width: 236, height: 166, color: "#6366f1" },
-  career: { width: 216, height: 130, color: "#0284c7" },
-  extra: { width: 184, height: 122, color: "#64748b" }
+  life: { width: 114, height: 92, color: "#10b981" },
+  growth: { width: 124, height: 98, color: "#6366f1" },
+  career: { width: 118, height: 88, color: "#0284c7" },
+  extra: { width: 106, height: 78, color: "#64748b" }
 };
 
 export const goalscapePrimarySlots: GoalscapeSlot[] = [
-  { key: "life", x: 310, y: 380, ...goalscapeSlotStyles.life },
-  { key: "growth", x: 705, y: 255, ...goalscapeSlotStyles.growth },
-  { key: "career", x: 622, y: 585, ...goalscapeSlotStyles.career }
+  { key: "life", x: 382, y: 354, ...goalscapeSlotStyles.life },
+  { key: "growth", x: 777, y: 229, ...goalscapeSlotStyles.growth },
+  { key: "career", x: 694, y: 559, ...goalscapeSlotStyles.career }
 ];
 
 type GoalscapeSlotPosition = {
@@ -1363,10 +1497,10 @@ type GoalscapeSlotPosition = {
 };
 
 const goalscapeFourGoalPositions: GoalscapeSlotPosition[] = [
-  { key: "life", x: 300, y: 210 },
-  { key: "growth", x: 835, y: 225 },
-  { key: "career", x: 845, y: 585 },
-  { key: "extra", x: 300, y: 585 }
+  { key: "life", x: 372, y: 184 },
+  { key: "growth", x: 907, y: 199 },
+  { key: "career", x: 917, y: 559 },
+  { key: "extra", x: 372, y: 559 }
 ];
 
 const goalscapePreferenceAngles: Record<Exclude<GoalscapeSlotKey, "extra">, number> = {
@@ -1539,6 +1673,32 @@ export function goalscapeStarlightCoreRadius(baseRadius: number, progress: numbe
   return baseRadius * (0.2 + 0.8 * (clamp(progress, 0, 100) / 100));
 }
 
+function goalscapeChildNodeSize(parentSize: Pick<GoalscapeSlot, "width" | "height">, childIndex: number) {
+  const scale = Math.max(0.72, 0.78 - Math.min(childIndex, 3) * 0.015);
+  return {
+    width: Math.round(parentSize.width * scale),
+    height: Math.round(parentSize.height * scale)
+  };
+}
+
+function goalscapeNodeVisualMetrics(layout: Pick<GoalscapeNodeLayout, "width" | "height" | "depth">) {
+  const depthScale = layout.depth === 1 ? 1 : 0.9;
+  const iconSize = Math.round(clamp(layout.width * 0.27 * depthScale, layout.depth === 1 ? 28 : 23, layout.depth === 1 ? 32 : 26));
+  const titleSize = Math.round(clamp(layout.width * (layout.depth === 1 ? 0.145 : 0.14), layout.depth === 1 ? 16 : 12, layout.depth === 1 ? 18 : 13));
+  const progressSize = Math.round(clamp(layout.width * 0.095, 10, 12));
+  return {
+    iconSize,
+    iconGlyphSize: Math.round(iconSize * 0.58),
+    iconY: layout.depth === 1 ? layout.height * 0.48 : layout.height * 0.46,
+    titleY: layout.depth === 1 ? layout.height * 0.03 : layout.height * 0.06,
+    titleLineGap: layout.depth === 1 ? Math.round(titleSize * 1.18) : Math.round(titleSize * 1.16),
+    titleSize,
+    progressSize,
+    progressY: layout.height * (layout.depth === 1 ? 0.42 : 0.44),
+    coreRadius: clamp(layout.width * 0.095, layout.depth === 1 ? 10 : 7, layout.depth === 1 ? 12 : 9)
+  };
+}
+
 export function goalscapeProgressFillGeometry(centerY: number, height: number, progress: number) {
   const safeProgress = clamp(progress, 0, 100);
   const fillHeight = height * (safeProgress / 100);
@@ -1585,7 +1745,7 @@ export function goalscapeCenterPearlTint(centerId: string, goal?: GoalNode | nul
   };
 }
 
-const goalscapeCenterPearlSize = { width: 128, height: 108, variant: 0 };
+export const goalscapeCenterPearlSize = { width: 128, height: 108, variant: 0 };
 const goalscapeAstrolabeOuterRadius = 86;
 const goalscapeAstrolabeInnerRadius = 72;
 
@@ -1682,7 +1842,12 @@ export function buildGoalscapeLayout(
 
   goals.forEach((goal, index) => {
     const slot = slots.get(goal.id) || fallbackGoalscapeSlot(index, goals.length);
-    const position = goalMapPosition(goal, { x: slot.x, y: slot.y }, positionOverrides, mapContextId);
+    const orbit = goalscapeOrbitForDepth(1);
+    const stableChildAnchor = constrainGoalscapePositionToOrbit({ x: slot.x, y: slot.y }, orbit);
+    const position = constrainGoalscapePositionToOrbit(
+      goalMapPosition(goal, { x: slot.x, y: slot.y }, positionOverrides, mapContextId),
+      orbit
+    );
     const color = goalscapeNodeColor(goal, slot.color);
     const importance = topImportance[goal.id] ?? 0;
     layouts.push({
@@ -1703,8 +1868,13 @@ export function buildGoalscapeLayout(
     const children = goal.children;
     const childImportance = normalizedImportance(children, importanceOverrides);
     children.forEach((child, childIndex) => {
-      const offset = goalscapeChildOffset(position, childIndex, children.length);
-      const childPosition = goalMapPosition(child, { x: position.x + offset.x, y: position.y + offset.y }, positionOverrides, mapContextId);
+      const childSize = goalscapeChildNodeSize(slot, childIndex);
+      const offset = goalscapeChildOffset(stableChildAnchor, childIndex, children.length);
+      const childOrbit = goalscapeOrbitForDepth(2);
+      const childPosition = constrainGoalscapePositionToOrbit(
+        goalMapPosition(child, { x: stableChildAnchor.x + offset.x, y: stableChildAnchor.y + offset.y }, positionOverrides, mapContextId),
+        childOrbit
+      );
       const childColor = goalscapeNodeColor(child, color);
       layouts.push({
         node: child,
@@ -1712,8 +1882,8 @@ export function buildGoalscapeLayout(
         depth: 2,
         x: childPosition.x,
         y: childPosition.y,
-        width: childIndex === 0 && slot.key === "growth" ? 154 : 128,
-        height: childIndex === 0 && slot.key === "growth" ? 98 : 82,
+        width: childSize.width,
+        height: childSize.height,
         color: childColor,
         progress: weightedGoalProgress(child, importanceOverrides, progressOverrides),
         importance: childImportance[child.id] ?? 0,
@@ -1782,24 +1952,26 @@ function GoalscapeBridge({
   from,
   to,
   id,
-  color
+  color,
+  width = 7
 }: {
   from: { x: number; y: number };
   to: { x: number; y: number };
   id: string;
   color: string;
+  width?: number;
 }) {
   const d = goalscapeConnectionPath(from, to);
-  const midX = (from.x + to.x) / 2;
-  const midY = (from.y + to.y) / 2;
-  const dArch = `M ${from.x} ${from.y} C ${midX} ${from.y - 18}, ${midX} ${midY - 18}, ${to.x} ${to.y}`;
 
   return (
-    <g key={id} className="goalscape-bridge-group" style={{ "--node-color": color } as React.CSSProperties & { "--node-color": string }}>
-      <path d={d} className="goalscape-bridge-glow" stroke={color} strokeWidth="5.5" />
-      <path d={dArch} className="goalscape-bridge-glow" stroke={color} strokeWidth="1.2" opacity="0.6" />
-      <path d={d} className="goalscape-bridge-cables" strokeWidth="0.8" />
-      <path d={d} className="goalscape-bridge-laser" strokeWidth="1.5" />
+    <g
+      key={id}
+      className="goalscape-bridge-group"
+      style={{ "--node-color": color, "--deck-width": width } as React.CSSProperties & { "--node-color": string; "--deck-width": number }}
+    >
+      <path d={d} className="goalscape-bridge-glow" stroke={color} />
+      <path d={d} className="goalscape-bridge-cables" />
+      <path d={d} className="goalscape-bridge-laser" />
     </g>
   );
 }
@@ -1844,6 +2016,10 @@ const GoalMap = React.memo(function GoalMap({
   const childLayouts = useMemo(() => layouts.filter((item) => item.depth === 2), [layouts]);
   const topLayoutById = useMemo(() => new Map(topLayouts.map((item) => [item.node.id, item])), [topLayouts]);
   const visibleLayouts = useMemo(() => [...topLayouts, ...childLayouts], [topLayouts, childLayouts]);
+  const visibleOrbitDepths = useMemo(
+    () => Array.from(new Set(visibleLayouts.map((layout) => layout.depth))).sort((a, b) => a - b),
+    [visibleLayouts]
+  );
   const centerGoal = useMemo(() => goals.find((item) => item.id === centerId) ?? null, [goals, centerId]);
   const centerPearlTint = useMemo(() => goalscapeCenterPearlTint(centerId, centerGoal), [centerId, centerGoal]);
   const centerPearlPath = useMemo(
@@ -1865,6 +2041,7 @@ const GoalMap = React.memo(function GoalMap({
     pointerStart: MapPosition;
     nodeStart: MapPosition;
     current: MapPosition;
+    orbit: GoalscapeOrbit;
     moved: boolean;
     frame: number | null;
   } | null>(null);
@@ -1886,10 +2063,10 @@ const GoalMap = React.memo(function GoalMap({
     if (!drag || event.pointerId !== drag.pointerId) return;
     const point = pointFromPointer(event);
     if (!point) return;
-    const next = clampGoalscapePosition({
+    const next = constrainGoalscapePositionToOrbit({
       x: drag.nodeStart.x + point.x - drag.pointerStart.x,
       y: drag.nodeStart.y + point.y - drag.pointerStart.y
-    });
+    }, drag.orbit);
     drag.current = next;
     if (Math.hypot(next.x - drag.nodeStart.x, next.y - drag.nodeStart.y) > 3) drag.moved = true;
     if (drag.frame === null) {
@@ -1938,6 +2115,7 @@ const GoalMap = React.memo(function GoalMap({
       pointerStart,
       nodeStart: { x: layout.x, y: layout.y },
       current: { x: layout.x, y: layout.y },
+      orbit: goalscapeOrbitForDepth(layout.depth),
       moved: false,
       frame: null
     };
@@ -1955,7 +2133,7 @@ const GoalMap = React.memo(function GoalMap({
   }, [onSelect]);
 
   return (
-    <svg ref={svgRef} className="goal-map goalscape-map" viewBox="0 0 1200 760" role="img" aria-labelledby="map-title map-desc">
+    <svg ref={svgRef} className={`goal-map goalscape-map${layouts.length > 20 ? " dense" : ""}`} viewBox="0 0 1200 760" role="img" aria-labelledby="map-title map-desc">
       <title id="map-title">{centerTitle}目标地图</title>
       <desc id="map-desc">用发光岛屿节点展示目标层级，并用连接线表达目标关系。</desc>
       <defs>
@@ -2078,9 +2256,10 @@ const GoalMap = React.memo(function GoalMap({
       </defs>
 
       <g className="goalscape-orbits" aria-hidden="true">
-        <ellipse cx={goalscapeCenter.x} cy={goalscapeCenter.y} rx="440" ry="290" />
-        <ellipse cx={goalscapeCenter.x} cy={goalscapeCenter.y} rx="348" ry="228" />
-        <ellipse cx={goalscapeCenter.x} cy={goalscapeCenter.y} rx="256" ry="170" />
+        {visibleOrbitDepths.map((depth) => {
+          const orbit = goalscapeOrbitForDepth(depth);
+          return <ellipse key={depth} data-depth={depth} cx={orbit.cx} cy={orbit.cy} rx={orbit.rx} ry={orbit.ry} />;
+        })}
       </g>
 
       <g className="goalscape-connections" aria-hidden="true">
@@ -2102,6 +2281,7 @@ const GoalMap = React.memo(function GoalMap({
               to={layout}
               id={`child-${layout.node.id}`}
               color={layout.color}
+              width={4}
             />
           ) : null;
         })}
@@ -2219,7 +2399,8 @@ const GoalMap = React.memo(function GoalMap({
         const related = !family || family.has(layout.node.id);
         const opensSubmap = canOpenGoalSubmap(layout);
         const Icon = goalIconComponent(layout.node);
-        const label = goalscapeLabelLines(layout.node.title, layout.depth === 1 ? 6 : 7, layout.depth === 1 ? 2 : 2);
+        const visualMetrics = goalscapeNodeVisualMetrics(layout);
+        const label = goalscapeLabelLines(layout.node.title, layout.depth === 1 ? 5 : 6, 2);
         const bottleGradientId = `goalscape-bottle-gradient-${index}`;
         const liquidGradientId = `goalscape-liquid-gradient-${index}`;
         const clipPathId = `goalscape-node-clip-${index}`;
@@ -2233,7 +2414,21 @@ const GoalMap = React.memo(function GoalMap({
             tabIndex={0}
             focusable="true"
             aria-label={`${layout.node.title}，进度 ${layout.progress}%${opensSubmap ? "，双击打开目标地图" : ""}`}
-            style={{ "--node-color": layout.color } as React.CSSProperties & { "--node-color": string }}
+            style={
+              {
+                "--node-color": layout.color,
+                "--node-icon-size": `${visualMetrics.iconSize}px`,
+                "--node-icon-glyph-size": `${visualMetrics.iconGlyphSize}px`,
+                "--node-title-size": `${visualMetrics.titleSize}px`,
+                "--node-progress-size": `${visualMetrics.progressSize}px`
+              } as React.CSSProperties & {
+                "--node-color": string;
+                "--node-icon-size": string;
+                "--node-icon-glyph-size": string;
+                "--node-title-size": string;
+                "--node-progress-size": string;
+              }
+            }
             onPointerDown={(event) => startNodeDrag(event, layout)}
             onClick={(event) => {
               if (suppressClickRef.current === layout.node.id) {
@@ -2290,7 +2485,7 @@ const GoalMap = React.memo(function GoalMap({
               <circle
                 cx={layout.x}
                 cy={layout.y}
-                r={goalscapeStarlightCoreRadius(layout.depth === 1 ? 16 : 10, layout.progress)}
+                r={goalscapeStarlightCoreRadius(visualMetrics.coreRadius, layout.progress)}
                 className="goal-starlight-core"
                 fill={layout.color}
                 filter={`url(#goalscape-glow-level-${Math.min(5, Math.floor(layout.progress / 20))})`}
@@ -2321,10 +2516,10 @@ const GoalMap = React.memo(function GoalMap({
                 strokeOpacity={0.4 + 0.5 * (layout.progress / 100)}
               />
               <foreignObject
-                x={layout.x - 20}
-                y={layout.y - (layout.depth === 1 ? 54 : 42)}
-                width="40"
-                height="40"
+                x={layout.x - visualMetrics.iconSize / 2}
+                y={layout.y - visualMetrics.iconY}
+                width={visualMetrics.iconSize}
+                height={visualMetrics.iconSize}
                 className="goalscape-icon-object"
               >
                 <div className="goalscape-icon-wrap">
@@ -2334,15 +2529,15 @@ const GoalMap = React.memo(function GoalMap({
               <text
                 className={layout.depth === 1 ? "goalscape-node-title domain" : "goalscape-node-title child"}
                 x={layout.x}
-                y={layout.y + (layout.depth === 1 ? 7 : 9)}
+                y={layout.y + visualMetrics.titleY}
               >
                 {label.map((line, lineIndex) => (
-                  <tspan key={line + lineIndex} x={layout.x} dy={lineIndex === 0 ? 0 : layout.depth === 1 ? 24 : 18}>
+                  <tspan key={line + lineIndex} x={layout.x} dy={lineIndex === 0 ? 0 : visualMetrics.titleLineGap}>
                     {line}
                   </tspan>
                 ))}
               </text>
-              <text className="goalscape-node-progress" x={layout.x} y={layout.y + layout.height * (layout.depth === 1 ? 0.31 : 0.43)}>
+              <text className="goalscape-node-progress" x={layout.x} y={layout.y + visualMetrics.progressY}>
                 {layout.progress}%
               </text>
             </g>
@@ -2350,7 +2545,7 @@ const GoalMap = React.memo(function GoalMap({
         );
       })}
 
-      {goals.length === 0 && (
+      {goals.length === 0 && emptyLabel && (
         <text className="empty-map-text" x={goalscapeCenter.x} y={goalscapeCenter.y + 138}>
           {emptyLabel}
         </text>
@@ -2363,8 +2558,6 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   selectedGoal,
   cachedDraft,
   topGoals,
-  flatGoals,
-  domains,
   saving,
   importanceOverrides,
   progressOverrides,
@@ -2378,8 +2571,6 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   selectedGoal: GoalNode | undefined;
   cachedDraft?: EditDraft;
   topGoals: GoalNode[];
-  flatGoals: GoalNode[];
-  domains: string[];
   saving: boolean;
   importanceOverrides: ImportanceOverrides;
   progressOverrides: ProgressOverrides;
@@ -2391,14 +2582,15 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   onOpenAi: (goal: GoalNode) => void;
 }) {
   const rootImportance = useMemo(() => normalizedImportance(topGoals), [topGoals]);
-  const rootProgressAverage = useMemo(
-    () => averageProgress(flatGoals, importanceOverrides, progressOverrides),
-    [flatGoals, importanceOverrides, progressOverrides]
-  );
   const selectedPath = useMemo(() => (selectedGoal ? goalPath(topGoals, selectedGoal.id) : []), [selectedGoal, topGoals]);
   const breadcrumbGoals = selectedGoal ? (selectedPath.length ? selectedPath : [selectedGoal]) : [];
+  const domainAccent = selectedGoal ? domainAccentToken(selectedGoal.domain || selectedGoal.title) : undefined;
   const selectedSiblingImportance = useMemo(
     () => (selectedGoal ? normalizedImportance(siblingGoals(topGoals, selectedGoal.id))[selectedGoal.id] ?? 100 : 100),
+    [selectedGoal, topGoals]
+  );
+  const hasSiblings = useMemo(
+    () => (selectedGoal ? siblingGoals(topGoals, selectedGoal.id).length > 1 : false),
     [selectedGoal, topGoals]
   );
   const childImportance = useMemo<ImportanceOverrides>(
@@ -2430,30 +2622,17 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
           </p>
         </section>
 
-        <div className="metric-grid">
-          <div className="metric">
-            <span>顶层目标</span>
-            <strong>{topGoals.length}</strong>
-          </div>
-          <div className="metric">
-            <span>全部节点</span>
-            <strong>{flatGoals.length}</strong>
-          </div>
-          <div className="metric">
-            <span>平均进度</span>
-            <strong>{rootProgressAverage}%</strong>
-          </div>
-          <div className="metric">
-            <span>目标域</span>
-            <strong>{domains.length || "未设置"}</strong>
-          </div>
-        </div>
-
         <section>
           <h3>顶层目标</h3>
           <div className="child-list">
             {topGoals.map((goal) => (
-              <button key={goal.id} type="button" className="child-pill" onClick={() => onSelect(goal.id)}>
+              <button
+                key={goal.id}
+                type="button"
+                className="child-pill"
+                style={{ "--pill-accent": domainAccentToken(goal.domain || goal.title) } as React.CSSProperties}
+                onClick={() => onSelect(goal.id)}
+              >
                 <span>{goal.title}</span>
                 <small>{rootImportance[goal.id] ?? 0}%</small>
               </button>
@@ -2466,7 +2645,11 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   }
 
   return (
-    <aside className="detail-panel" aria-live="polite">
+    <aside
+      className="detail-panel"
+      aria-live="polite"
+      style={domainAccent ? ({ "--domain-accent": domainAccent } as React.CSSProperties) : undefined}
+    >
       <div className="detail-head">
         <div className="goal-heading">
           <div className="goal-path" aria-label="目标路径">
@@ -2489,7 +2672,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
       </div>
 
       <div className="insight-row" aria-label="目标摘要">
-        <span>
+        <span className="insight-domain">
           <GitBranch />
           {formatEmpty(titleFromLink(selectedGoal.domain))}
         </span>
@@ -2504,6 +2687,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         goal={selectedGoal}
         cachedDraft={cachedDraft}
         importance={selectedSiblingImportance}
+        hasSiblings={hasSiblings}
         saving={saving}
         onPreviewImportance={onPreviewImportance}
         onPreviewProgress={onPreviewProgress}
@@ -2515,7 +2699,13 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         <h3>子目标</h3>
         <div className="child-list">
           {selectedGoal.children.map((child) => (
-            <button key={child.id} type="button" className="child-pill" onClick={() => onSelect(child.id)}>
+            <button
+              key={child.id}
+              type="button"
+              className="child-pill"
+              style={{ "--pill-accent": domainAccentToken(child.domain || child.title) } as React.CSSProperties}
+              onClick={() => onSelect(child.id)}
+            >
               <span>{child.title}</span>
               <small>{childImportance[child.id] ?? 0}%</small>
             </button>
@@ -2550,6 +2740,7 @@ const GoalEditForm = React.memo(function GoalEditForm({
   goal,
   cachedDraft,
   importance,
+  hasSiblings,
   saving,
   onPreviewImportance,
   onPreviewProgress,
@@ -2560,6 +2751,7 @@ const GoalEditForm = React.memo(function GoalEditForm({
   goal: GoalNode;
   cachedDraft?: EditDraft;
   importance: number;
+  hasSiblings: boolean;
   saving: boolean;
   onPreviewImportance: (goalId: string, value: number) => void;
   onPreviewProgress: (goalId: string, value: number) => void;
@@ -2613,6 +2805,9 @@ const GoalEditForm = React.memo(function GoalEditForm({
             onPreviewImportance(goal.id, value);
           }}
         />
+        {hasSiblings && (
+          <p className="field-hint">调整后会在同级目标间按 100% 自动重新分配占比。</p>
+        )}
         {progressEditable && (
           <RangeField
             label="进度"

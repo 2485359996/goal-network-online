@@ -2,6 +2,7 @@ import { AlertCircle, CheckCircle2, Loader2, Sparkles, X } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
 import { isPrimaryGoalNode } from "../shared/goalRules";
 import type { ActionCreateInput, GoalCreateInput, GoalNode, GoalPatchInput } from "../shared/types";
+import { useModalDialog } from "./useModalDialog";
 import {
   aiRouteContracts,
   diagnoseBranchResponseSchema,
@@ -198,15 +199,21 @@ export function AiAssistantDialog({
     setSelected((current) => ({ ...current, [key]: !current[key] }));
   };
 
+  const busy = loading || applying;
+  const { dialogRef, onBackdropPointerDown, onBackdropClick } = useModalDialog<HTMLElement>({
+    onDismiss: onClose,
+    canDismiss: !busy
+  });
+
   return (
-    <div className="dialog-backdrop" role="presentation">
-      <section className="ai-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-dialog-title">
+    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
+      <section ref={dialogRef} tabIndex={-1} className="ai-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-dialog-title">
         <div className="dialog-head">
           <div>
             <p className="eyebrow">AI 助手</p>
             <h2 id="ai-dialog-title">{goal.title}</h2>
           </div>
-          <button type="button" className="icon-button compact" aria-label="关闭 AI 助手" disabled={loading || applying} onClick={onClose}>
+          <button type="button" className="icon-button compact" aria-label="关闭 AI 助手" disabled={busy} onClick={onClose}>
             <X />
           </button>
         </div>
