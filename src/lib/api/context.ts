@@ -11,10 +11,21 @@ export class ApiError extends Error {
   }
 }
 
+export function apiErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    for (const key of ["message", "details", "hint", "code"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) return value;
+    }
+  }
+  return "Request failed";
+}
+
 export function jsonError(error: unknown) {
   const status = error instanceof ApiError ? error.status : 400;
-  const message = error instanceof Error ? error.message : "Request failed";
-  return NextResponse.json({ error: message }, { status });
+  return NextResponse.json({ error: apiErrorMessage(error) }, { status });
 }
 
 export async function getApiContext() {

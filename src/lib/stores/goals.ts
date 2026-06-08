@@ -2,6 +2,9 @@ import type {
   GoalActionCandidate,
   GoalCreateInput,
   GoalGraphEdge,
+  GoalMap,
+  GoalMapCreateInput,
+  GoalMapPatchInput,
   GoalNode,
   GoalPatchInput,
   GoalRelationsInput,
@@ -13,6 +16,7 @@ import type { SupabaseAdminClient } from "../supabase/admin";
 
 export type GoalDbRow = {
   id: string;
+  goal_map_id: string;
   legacy_id: string;
   workspace_id: string;
   title: string;
@@ -31,6 +35,13 @@ export type GoalDbRow = {
   tags: string[] | null;
   last_reviewed: string | null;
   last_progress: string | null;
+};
+
+export type GoalMapDbRow = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  sort_order: number | null;
 };
 
 export type GoalRelationDbRow = {
@@ -116,10 +127,19 @@ function sortGoals(goals: GoalNode[]) {
   goals.forEach((goal) => sortGoals(goal.children));
 }
 
+function goalMapFromRow(row: GoalMapDbRow): GoalMap {
+  return {
+    id: row.id,
+    name: row.name,
+    sortOrder: Number(row.sort_order) || 0
+  };
+}
+
 export function buildGoalsResponse(
   goalRows: GoalDbRow[],
   relationRows: GoalRelationDbRow[],
-  workspaceId: string
+  workspaceId: string,
+  goalMapRows: GoalMapDbRow[] = []
 ): GoalsResponse {
   const byDbId = new Map(goalRows.map((row) => [row.id, row]));
   const parentTitleBySource = new Map<string, string>();
@@ -136,6 +156,7 @@ export function buildGoalsResponse(
     const primaryRootGoal = isPrimaryRoot(row, parentTitle);
     return {
       id: row.legacy_id,
+      goalMapId: row.goal_map_id,
       title: row.title,
       filePath: row.file_path,
       status: VALID_STATUSES.has(row.status) ? row.status : "active",
@@ -196,6 +217,9 @@ export function buildGoalsResponse(
 
   return {
     workspaceId,
+    goalMaps: goalMapRows
+      .map(goalMapFromRow)
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "zh-CN")),
     goals: topLevel,
     flatGoals: nodes,
     graph: {
@@ -243,11 +267,24 @@ async function goalByLegacyId(client: SupabaseAdminClient, workspaceId: string, 
   return data as GoalDbRow | null;
 }
 
-async function goalByTitle(client: SupabaseAdminClient, workspaceId: string, title: string) {
+async function goalByTitle(client: SupabaseAdminClient, workspaceId: string, title: string, goalMapId?: string) {
   const key = referenceKey(title);
   const { data, error } = await client.from("goals").select("*").eq("workspace_id", workspaceId);
   if (error) throw error;
-  return ((data ?? []) as GoalDbRow[]).find((row) => referenceKey(row.title) === key) ?? null;
+  return ((data ?? []) as GoalDbRow[]).find((row) => referenceKey(row.title) === key && (!goalMapId || row.goal_map_id === goalMapId)) ?? null;
+}
+
+async function goalMapById(client: SupabaseAdminClient, workspaceId: string, id: string) {
+  const { data, error } = await client.from("goal_maps").select("*").eq("workspace_id", workspaceId).eq("id", id).maybeSingle();
+  if (error) throw error;
+  return data as GoalMapDbRow | null;
+}
+
+async function goalMapByName(client: SupabaseAdminClient, workspaceId: string, name: string) {
+  const key = referenceKey(name);
+  const { data, error } = await client.from("goal_maps").select("*").eq("workspace_id", workspaceId);
+  if (error) throw error;
+  return ((data ?? []) as GoalMapDbRow[]).find((row) => referenceKey(row.name) === key) ?? null;
 }
 
 async function parentTitleForGoal(client: SupabaseAdminClient, workspaceId: string, sourceGoalId: string) {
@@ -271,12 +308,20 @@ async function parentTitleForGoal(client: SupabaseAdminClient, workspaceId: stri
   return String(parent.data?.title ?? "");
 }
 
-async function enqueueAuditAndSync(client: SupabaseAdminClient, workspaceId: string, actorUserId: string, action: string, entityId: string, payload: unknown) {
+async function enqueueAuditAndSync(
+  client: SupabaseAdminClient,
+  workspaceId: string,
+  actorUserId: string,
+  action: string,
+  entityId: string,
+  payload: unknown,
+  entityType = "goal"
+) {
   await client.from("audit_events").insert({
     workspace_id: workspaceId,
     actor_user_id: actorUserId,
     action,
-    entity_type: "goal",
+    entity_type: entityType,
     entity_id: entityId,
     payload
   });
@@ -296,30 +341,116 @@ export class SupabaseGoalStore {
   ) {}
 
   async readGoals(): Promise<GoalsResponse> {
-    const [goals, relations] = await Promise.all([
+    const [goalMaps, goals, relations] = await Promise.all([
+      this.client.from("goal_maps").select("*").eq("workspace_id", this.workspaceId).order("sort_order", { ascending: true }).order("created_at", { ascending: true }),
       this.client.from("goals").select("*").eq("workspace_id", this.workspaceId),
       this.client.from("goal_relations").select("*").eq("workspace_id", this.workspaceId)
     ]);
+    if (goalMaps.error) throw goalMaps.error;
     if (goals.error) throw goals.error;
     if (relations.error) throw relations.error;
-    return buildGoalsResponse((goals.data ?? []) as GoalDbRow[], (relations.data ?? []) as GoalRelationDbRow[], this.workspaceId);
+    return buildGoalsResponse(
+      (goals.data ?? []) as GoalDbRow[],
+      (relations.data ?? []) as GoalRelationDbRow[],
+      this.workspaceId,
+      (goalMaps.data ?? []) as GoalMapDbRow[]
+    );
+  }
+
+  async createGoalMap(input: GoalMapCreateInput): Promise<GoalMap> {
+    const name = input.name.trim();
+    if (!name) throw new Error("Goal map name cannot be empty");
+    const duplicate = await goalMapByName(this.client, this.workspaceId, name);
+    if (duplicate) throw new Error(`Goal map already exists: ${name}`);
+
+    const existing = await this.client.from("goal_maps").select("sort_order").eq("workspace_id", this.workspaceId);
+    if (existing.error) throw existing.error;
+    const sortOrder =
+      ((existing.data ?? []) as Array<{ sort_order: number | null }>).reduce((max, row) => Math.max(max, Number(row.sort_order) || 0), -1) + 1;
+    const { data, error } = await this.client
+      .from("goal_maps")
+      .insert({
+        workspace_id: this.workspaceId,
+        name,
+        sort_order: sortOrder
+      })
+      .select("*")
+      .single();
+    if (error) throw error;
+    await enqueueAuditAndSync(this.client, this.workspaceId, this.actorUserId, "goal_map.create", data.id, { name }, "goal_map");
+    return goalMapFromRow(data as GoalMapDbRow);
+  }
+
+  async patchGoalMap(id: string, input: GoalMapPatchInput): Promise<GoalMap> {
+    const current = await goalMapById(this.client, this.workspaceId, id);
+    if (!current) throw new Error(`Goal map not found: ${id}`);
+
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (input.name !== undefined) {
+      const name = input.name.trim();
+      if (!name) throw new Error("Goal map name cannot be empty");
+      const duplicate = await goalMapByName(this.client, this.workspaceId, name);
+      if (duplicate && duplicate.id !== current.id) throw new Error(`Goal map already exists: ${name}`);
+      patch.name = name;
+    }
+
+    const { data, error } = await this.client.from("goal_maps").update(patch).eq("workspace_id", this.workspaceId).eq("id", current.id).select("*").single();
+    if (error) throw error;
+    await enqueueAuditAndSync(this.client, this.workspaceId, this.actorUserId, "goal_map.update", current.id, input, "goal_map");
+    return goalMapFromRow(data as GoalMapDbRow);
+  }
+
+  async deleteGoalMap(id: string): Promise<MarkdownWriteResult> {
+    const current = await goalMapById(this.client, this.workspaceId, id);
+    if (!current) throw new Error(`Goal map not found: ${id}`);
+
+    const goals = await this.client.from("goals").select("id").eq("workspace_id", this.workspaceId).eq("goal_map_id", current.id);
+    if (goals.error) throw goals.error;
+    const goalIds = ((goals.data ?? []) as Array<{ id: string }>).map((goal) => goal.id);
+
+    if (goalIds.length) {
+      const sourceRelations = await this.client.from("goal_relations").delete().eq("workspace_id", this.workspaceId).in("source_goal_id", goalIds);
+      if (sourceRelations.error) throw sourceRelations.error;
+      const targetRelations = await this.client.from("goal_relations").delete().eq("workspace_id", this.workspaceId).in("target_goal_id", goalIds);
+      if (targetRelations.error) throw targetRelations.error;
+      const deletedGoals = await this.client.from("goals").delete().eq("workspace_id", this.workspaceId).eq("goal_map_id", current.id);
+      if (deletedGoals.error) throw deletedGoals.error;
+    }
+
+    const { error } = await this.client.from("goal_maps").delete().eq("workspace_id", this.workspaceId).eq("id", current.id);
+    if (error) throw error;
+    await enqueueAuditAndSync(
+      this.client,
+      this.workspaceId,
+      this.actorUserId,
+      "goal_map.delete",
+      current.id,
+      { name: current.name, deletedGoalCount: goalIds.length },
+      "goal_map"
+    );
+    return { ok: true, filePath: "", message: "Goal map deleted" };
   }
 
   async createGoal(input: GoalCreateInput): Promise<MarkdownWriteResult> {
     const title = input.title.trim();
     if (!title) throw new Error("Goal title cannot be empty");
+    const goalMapId = input.goalMapId.trim();
+    if (!goalMapId) throw new Error("Goal map is required");
+    const goalMap = await goalMapById(this.client, this.workspaceId, goalMapId);
+    if (!goalMap) throw new Error(`Goal map not found: ${goalMapId}`);
     const duplicate = await goalByTitle(this.client, this.workspaceId, title);
     if (duplicate) throw new Error(`Goal already exists: ${title}`);
 
     const parentTitle = titleFromWikilink(input.parent);
-    const parent = parentTitle ? await goalByTitle(this.client, this.workspaceId, parentTitle) : null;
-    if (parentTitle && !parent) throw new Error(`Parent goal not found: ${parentTitle}`);
+    const parent = parentTitle ? await goalByTitle(this.client, this.workspaceId, parentTitle, goalMapId) : null;
+    if (parentTitle && !parent) throw new Error(`Parent goal not found in current goal map: ${parentTitle}`);
 
     const domainTitle = titleFromWikilink(input.domain || parent?.domain_title || title);
     const primaryRoot = isPrimaryGoalTitle(title) && !parentTitle;
     const legacyId = await uniqueLegacyId(this.client, this.workspaceId, parentTitle, title);
     const row = {
       workspace_id: this.workspaceId,
+      goal_map_id: goalMapId,
       legacy_id: legacyId,
       title,
       file_path: markdownPath(title, domainTitle, parentTitle),
@@ -373,8 +504,8 @@ export class SupabaseGoalStore {
       resolvedParentTitle = titleFromWikilink(input.parent);
       await this.client.from("goal_relations").delete().eq("workspace_id", this.workspaceId).eq("source_goal_id", current.id).eq("relation_type", "parent");
       if (resolvedParentTitle) {
-        const parent = await goalByTitle(this.client, this.workspaceId, resolvedParentTitle);
-        if (!parent) throw new Error(`Parent goal not found: ${resolvedParentTitle}`);
+        const parent = await goalByTitle(this.client, this.workspaceId, resolvedParentTitle, current.goal_map_id);
+        if (!parent) throw new Error(`Parent goal not found in current goal map: ${resolvedParentTitle}`);
         const insertParent = await this.client.from("goal_relations").insert({
           workspace_id: this.workspaceId,
           source_goal_id: current.id,

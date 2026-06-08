@@ -37,6 +37,7 @@ export const goalPatchSchema = z.object({
 
 export const goalCreateSchema = z.object({
   title: z.string().min(1),
+  goalMapId: z.string().min(1),
   domain: z.string().min(1),
   parent: z.string().optional(),
   horizon: z.string().optional(),
@@ -49,6 +50,14 @@ export const goalCreateSchema = z.object({
   successSignals: z.array(z.string()).optional(),
   actionCandidates: z.array(goalActionCandidateInputSchema).optional(),
   reviewQuestions: z.array(z.string()).optional()
+});
+
+export const goalMapCreateSchema = z.object({
+  name: z.string().min(1)
+});
+
+export const goalMapPatchSchema = z.object({
+  name: z.string().min(1).optional()
 });
 
 export const relationsSchema = z.object({

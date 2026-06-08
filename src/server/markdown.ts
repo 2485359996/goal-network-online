@@ -661,6 +661,7 @@ export class VaultService {
       const primaryRootGoal = isPrimaryRootGoal(title, data.parent);
       goals.push({
         id: String(data.id ?? `goal-${title}`),
+        goalMapId: "root",
         title,
         filePath: relativePath(this.root, filePath),
         status: VALID_STATUSES.has(String(data.status)) ? (String(data.status) as GoalNode["status"]) : "active",
@@ -735,7 +736,12 @@ export class VaultService {
     sortGoals(topLevel);
     applyWeightedProgress(topLevel);
 
-    return { goals: topLevel, flatGoals: goals, graph: { nodes: graphNodes, edges } };
+    return {
+      goalMaps: [{ id: "root", name: "目标网络", sortOrder: 0 }],
+      goals: topLevel,
+      flatGoals: goals,
+      graph: { nodes: graphNodes, edges }
+    };
   }
 
   private async rewriteGoalReferences(oldTitle: string, newTitle: string) {

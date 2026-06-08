@@ -76,6 +76,86 @@ describe("AI routes", () => {
     expect(response.json()).toEqual({ error: "AI provider not configured" });
   });
 
+  it("returns 501 for valid draft-goal requests until a provider is configured", async () => {
+    const routes = buildRoutes();
+    const response = await inject(routes, "/api/ai/draft-goal", {
+      mode: "top",
+      goalMap: { id: "map-1", name: "目标网络" },
+      siblings: [],
+      existingTitles: ["Delivery"],
+      domainCandidates: ["Career"],
+      draft: {
+        title: "New goal",
+        domain: "Career",
+        horizon: "medium",
+        priority: 50,
+        progress: 0,
+        summary: "",
+        successSignals: [],
+        actionCandidates: [],
+        reviewQuestions: []
+      }
+    });
+
+    expect(response.statusCode).toBe(501);
+    expect(response.json()).toEqual({ error: "AI provider not configured" });
+  });
+
+  it("calls a configured provider for draft-goal and parses a goal draft", async () => {
+    const request = {
+      mode: "top",
+      goalMap: { id: "map-1", name: "目标网络" },
+      siblings: [],
+      existingTitles: ["Delivery"],
+      domainCandidates: ["Career"],
+      draft: {
+        title: "New goal",
+        domain: "Career",
+        horizon: "medium",
+        priority: 50,
+        progress: 0,
+        summary: "",
+        successSignals: [],
+        actionCandidates: [],
+        reviewQuestions: []
+      }
+    };
+
+    const result = await runAiProvider("draft-goal", request, {
+      env: {
+        AI_PROVIDER_URL: "https://provider.example/v1",
+        AI_PROVIDER_KEY: "test-key",
+        AI_PROVIDER_MODEL: "test-model"
+      },
+      readLocalEnv: () => ({}),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    title: "Improve release confidence",
+                    domain: "Career",
+                    priority: 60,
+                    summary: "Make release readiness measurable."
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    });
+
+    expect(result).toEqual({
+      title: "Improve release confidence",
+      domain: "Career",
+      priority: 60,
+      summary: "Make release readiness measurable."
+    });
+  });
+
   it("returns 400 for malformed requests", async () => {
     const routes = buildRoutes();
     const response = await inject(routes, "/api/ai/improve-goal", {

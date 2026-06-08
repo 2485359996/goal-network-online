@@ -297,6 +297,7 @@ tags:
 
     const result = await service.createGoal({
       title: "No Date Goal",
+      goalMapId: "root",
       domain: child!.domain,
       parent: child!.title
     });
@@ -352,6 +353,7 @@ tags:
 
     const result = await service.createGoal({
       title: "简历优化",
+      goalMapId: "root",
       domain: "职业发展",
       parent: "当前交付"
     });

@@ -132,7 +132,8 @@ function systemPromptFor(endpoint: AiEndpoint) {
     "improve-goal": "summary, successSignals, actionCandidates, reviewQuestions, warnings",
     "suggest-subgoals": "subgoals, warnings",
     "diagnose-branch": "findings, warnings",
-    "suggest-weekly-actions": "weeklyActions, warnings"
+    "suggest-weekly-actions": "weeklyActions, warnings",
+    "draft-goal": "title, domain, horizon, priority, progress, summary, successSignals, actionCandidates, reviewQuestions, warnings"
   } satisfies Record<AiEndpoint, string>;
 
   return [

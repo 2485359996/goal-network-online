@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  draftGoalRequestSchema,
+  draftGoalResponseSchema,
   improveGoalRequestSchema,
   improveGoalResponseSchema,
   normalizeAiActionCandidates
@@ -52,5 +54,38 @@ describe("AI contracts", () => {
       { text: "Write plan", done: false },
       { text: "Review plan", done: true }
     ]);
+  });
+
+  it("accepts draft-goal requests and rejects free-form draft-goal responses", () => {
+    const request = {
+      mode: "subgoal",
+      goalMap: { id: "map-1", name: "目标网络" },
+      parentGoal: validGoalContext,
+      sourceGoal: validGoalContext,
+      siblings: [],
+      existingTitles: ["Delivery"],
+      domainCandidates: ["Career"],
+      draft: {
+        title: "Improve release confidence",
+        domain: "Career",
+        horizon: "medium",
+        priority: 50,
+        progress: 0,
+        summary: "",
+        successSignals: [],
+        actionCandidates: [],
+        reviewQuestions: []
+      }
+    };
+
+    expect(draftGoalRequestSchema.safeParse(request).success).toBe(true);
+    expect(draftGoalRequestSchema.safeParse({ ...request, mode: "wrong" }).success).toBe(false);
+    expect(
+      draftGoalResponseSchema.safeParse({
+        title: "Improve release confidence",
+        summary: "Make the release path measurable.",
+        markdown: "# Free-form content"
+      }).success
+    ).toBe(false);
   });
 });

@@ -433,6 +433,7 @@ function defaultSelections(tab: AiTab, response: AiResponse, goal: GoalNode): Se
 function createSubgoalInput(parent: GoalNode, suggestion: AiSubgoalSuggestion): GoalCreateInput {
   return {
     title: suggestion.title,
+    goalMapId: parent.goalMapId,
     parent: parent.title,
     domain: titleFromWikilink(parent.domain) || parent.title,
     horizon: suggestion.horizon || parent.horizon,

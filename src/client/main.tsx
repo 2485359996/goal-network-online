@@ -41,6 +41,7 @@ import type {
   ActionCreateInput,
   GoalActionCandidate,
   GoalCreateInput,
+  GoalMap,
   GoalNode,
   GoalPatchInput,
   GoalsResponse,
@@ -49,6 +50,7 @@ import type {
 import { createBrowserSupabaseClient } from "../lib/supabase/client";
 import { isPrimaryGoalNode, isPrimaryGoalTitle, normalizedGoalTitle } from "../shared/goalRules";
 import { AiAssistantDialog } from "./AiAssistantDialog";
+import { CreateGoalDialog, type CreateGoalDialogContext } from "./CreateGoalDialog";
 import { useModalDialog } from "./useModalDialog";
 import {
   applyThemePreference,
@@ -60,10 +62,13 @@ import {
 } from "./theme";
 
 const emptyGoals: GoalsResponse = {
+  goalMaps: [],
   goals: [],
   flatGoals: [],
   graph: { nodes: [], edges: [] }
 };
+
+const ACTIVE_GOAL_MAP_STORAGE_KEY = "goal-network.activeGoalMapId";
 
 function mediaQueryMatches(query: string, fallback = false) {
   return typeof window === "undefined" ? fallback : window.matchMedia(query).matches;
@@ -215,6 +220,24 @@ function flattenGoals(goals: GoalNode[]) {
   return result;
 }
 
+export function filterGoalsByGoalMap(goals: GoalNode[], goalMapId: string): GoalNode[] {
+  if (!goalMapId) return [];
+  return goals
+    .filter((goal) => goal.goalMapId === goalMapId)
+    .map((goal) => ({
+      ...goal,
+      children: filterGoalsByGoalMap(goal.children || [], goalMapId)
+    }));
+}
+
+export function goalMapCenterTitle(goalMap: Pick<GoalMap, "name"> | undefined) {
+  return goalMap?.name.trim() || "目标地图";
+}
+
+export function shouldShowFirstGoalMapCta(goalMaps: GoalMap[], loading: boolean) {
+  return !loading && goalMaps.length === 0;
+}
+
 function findGoalById(goals: GoalNode[], id: string): GoalNode | undefined {
   for (const goal of goals) {
     if (goal.id === id) return goal;
@@ -363,11 +386,6 @@ function parentGoal(goals: GoalNode[], selectedId: string) {
   return parentId && parentId !== "root" ? findGoalById(goals, parentId) : undefined;
 }
 
-export function parentMapFocusId(goals: GoalNode[], focusId: string) {
-  if (focusId === "root") return "root";
-  return parentGoal(goals, focusId)?.id || "root";
-}
-
 function rebalanceImportance(goals: GoalNode[], selectedId: string, nextImportance: number): ImportanceOverrides {
   const siblings = siblingGoals(goals, selectedId);
   if (!siblings.some((goal) => goal.id === selectedId)) return {};
@@ -389,17 +407,10 @@ function rebalanceImportance(goals: GoalNode[], selectedId: string, nextImportan
   return overrides;
 }
 
-function uniqueTitle(base: string, goals: GoalNode[]) {
-  const titles = new Set(goals.map((goal) => goal.title));
-  if (!titles.has(base)) return base;
-  let index = 2;
-  while (titles.has(`${base} ${index}`)) index += 1;
-  return `${base} ${index}`;
-}
-
 export function GoalApp() {
   const [goals, setGoals] = useState<GoalsResponse>(emptyGoals);
   const [selectedId, setSelectedId] = useState("root");
+  const [activeGoalMapId, setActiveGoalMapId] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
@@ -407,13 +418,16 @@ export function GoalApp() {
   const [importancePreview, setImportancePreview] = useState<ImportanceOverrides>({});
   const [progressPreview, setProgressPreview] = useState<ProgressOverrides>({});
   const [mapPositionPreview, setMapPositionPreview] = useState<MapPositionOverrides>({});
-  const [focusId, setFocusId] = useState("root");
   const [scopeListCollapsed, setScopeListCollapsed] = useState(true);
   const [deleteCandidate, setDeleteCandidate] = useState<GoalNode | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
+  const [createGoalDialogContext, setCreateGoalDialogContext] = useState<CreateGoalDialogContext | null>(null);
+  const [createGoalMapOpen, setCreateGoalMapOpen] = useState(false);
+  const [renameGoalMapCandidate, setRenameGoalMapCandidate] = useState<GoalMap | null>(null);
+  const [deleteGoalMapCandidate, setDeleteGoalMapCandidate] = useState<GoalMap | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiGoal, setAiGoal] = useState<GoalNode | null>(null);
-  const [detailWidth, setDetailWidth] = useState(500);
+  const [detailWidth, setDetailWidth] = useState(440);
   const [mapPaneHeight, setMapPaneHeight] = useState(520);
   // 这三个初值必须与服务端 SSR 输出一致（确定值），否则水合那一帧渲染的图标/aria/布局会和服务端不符 → hydration mismatch。
   // 客户端真实值在挂载后由各自的 effect 纠正（stacked→layout effect、systemPrefersDark/themePreference→theme effect）。
@@ -477,6 +491,9 @@ export function GoalApp() {
 
     const channel = supabase
       .channel(`goal-network:${workspaceId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "goal_maps", filter: `workspace_id=eq.${workspaceId}` }, () => {
+        void reload().catch(() => undefined);
+      })
       .on("postgres_changes", { event: "*", schema: "public", table: "goals", filter: `workspace_id=eq.${workspaceId}` }, () => {
         void reload().catch(() => undefined);
       })
@@ -499,28 +516,48 @@ export function GoalApp() {
     };
   }, [goals.workspaceId, reload]);
 
-  const visibleTree = useMemo(() => filterGoalTree(goals.goals, false), [goals.goals]);
+  const allVisibleTree = useMemo(() => filterGoalTree(goals.goals, false), [goals.goals]);
+  const activeGoalMap = useMemo(() => goals.goalMaps.find((goalMap) => goalMap.id === activeGoalMapId), [activeGoalMapId, goals.goalMaps]);
+  const visibleTree = useMemo(
+    () => (activeGoalMap ? filterGoalsByGoalMap(allVisibleTree, activeGoalMap.id) : []),
+    [activeGoalMap, allVisibleTree]
+  );
   const visibleFlatGoals = useMemo(() => flattenGoals(visibleTree), [visibleTree]);
   const selectedGoal = useMemo(
     () => visibleFlatGoals.find((goal) => goal.id === selectedId),
     [selectedId, visibleFlatGoals]
   );
-  const selectedGoalFull = useMemo(() => goals.flatGoals.find((goal) => goal.id === selectedId), [goals.flatGoals, selectedId]);
+  const selectedGoalFull = useMemo(() => visibleFlatGoals.find((goal) => goal.id === selectedId), [selectedId, visibleFlatGoals]);
   const activeAiGoal = useMemo(() => (aiGoal ? goals.flatGoals.find((goal) => goal.id === aiGoal.id) ?? aiGoal : null), [aiGoal, goals.flatGoals]);
-  const selectedParent = useMemo(() => parentGoal(goals.goals, selectedId), [goals.goals, selectedId]);
-  const focusGoal = useMemo(() => (focusId === "root" ? undefined : findGoalById(visibleTree, focusId)), [focusId, visibleTree]);
-  const focusParentId = useMemo(() => parentMapFocusId(visibleTree, focusId), [focusId, visibleTree]);
-  const mapGoals = useMemo(() => (focusGoal ? focusGoal.children || [] : visibleTree), [focusGoal, visibleTree]);
-  const mapContextId = focusGoal?.id || "root";
-  const domainTitles = useMemo(() => uniqueDomainTitles(goals.flatGoals), [goals.flatGoals]);
+  const selectedParent = useMemo(() => parentGoal(visibleTree, selectedId), [selectedId, visibleTree]);
+  const mapGoals = visibleTree;
+  const mapContextId = activeGoalMap?.id || "root";
+  const mapCenterId = activeGoalMap?.id || "root";
+  const domainTitles = useMemo(() => uniqueDomainTitles(visibleFlatGoals), [visibleFlatGoals]);
+  const goalMapCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const goal of goals.flatGoals) counts[goal.goalMapId] = (counts[goal.goalMapId] ?? 0) + 1;
+    return counts;
+  }, [goals.flatGoals]);
 
   useEffect(() => {
-    if (selectedId !== "root" && !selectedGoal) setSelectedId("root");
-  }, [selectedGoal, selectedId]);
+    if (goals.goalMaps.length === 0) {
+      if (activeGoalMapId) setActiveGoalMapId("");
+      if (selectedId !== "root") setSelectedId("root");
+      return;
+    }
+
+    const storedId = typeof window === "undefined" ? "" : window.localStorage.getItem(ACTIVE_GOAL_MAP_STORAGE_KEY) ?? "";
+    const preferredId = activeGoalMapId || storedId;
+    const nextMap = goals.goalMaps.find((goalMap) => goalMap.id === preferredId) ?? goals.goalMaps[0];
+    if (nextMap.id !== activeGoalMapId) setActiveGoalMapId(nextMap.id);
+    if (typeof window !== "undefined") window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, nextMap.id);
+  }, [activeGoalMapId, goals.goalMaps, selectedId]);
 
   useEffect(() => {
-    if (focusId !== "root" && !focusGoal) setFocusId("root");
-  }, [focusGoal, focusId]);
+    const centerId = activeGoalMap?.id || "root";
+    if (selectedId !== centerId && !selectedGoal) setSelectedId(centerId);
+  }, [activeGoalMap, selectedGoal, selectedId]);
 
   useEffect(() => {
     setImportancePreview((current) => (Object.keys(current).length ? {} : current));
@@ -529,8 +566,8 @@ export function GoalApp() {
 
   const clampDetailWidth = useCallback((value: number) => {
     const workspaceWidth = workspaceRef.current?.getBoundingClientRect().width ?? window.innerWidth;
-    const maxWidth = Math.max(320, Math.min(760, workspaceWidth - 280));
-    return clamp(Math.round(value), 320, maxWidth);
+    const maxWidth = Math.max(340, Math.min(560, workspaceWidth - 520));
+    return clamp(Math.round(value), 340, maxWidth);
   }, []);
 
   const clampMapPaneHeight = useCallback((value: number) => {
@@ -704,6 +741,7 @@ export function GoalApp() {
       const primaryGoal = isPrimaryGoalTitle(input.title) && !normalizedGoalTitle(input.parent);
       const payload: GoalCreateInput = {
         ...input,
+        goalMapId: input.goalMapId,
         priority: Number(input.priority),
         clarity: Number(input.clarity)
       };
@@ -713,22 +751,79 @@ export function GoalApp() {
         body: JSON.stringify(payload)
       });
       const next = await loadGoals();
-      const createdGoal = next.flatGoals.find((goal) => goal.title === input.title.trim());
+      const createdGoal = next.flatGoals.find((goal) => goal.title === input.title.trim() && goal.goalMapId === input.goalMapId);
       if (createdGoal) {
         pendingEditRef.current = null;
         delete draftCacheRef.current[createdGoal.id];
         setSelectedId(createdGoal.id);
-        const parentTitle = normalizedGoalTitle(input.parent);
-        if (parentTitle) {
-          const parentNode = next.flatGoals.find((goal) => goal.title === parentTitle);
-          if (parentNode) setFocusId(parentNode.id);
-        }
       } else {
-        setSelectedId("root");
+        setSelectedId(activeGoalMap?.id || "root");
       }
       return next;
     }, "目标已创建");
   };
+
+  const selectGoalMap = useCallback((goalMapId: string) => {
+    queuePendingEditSave();
+    setActiveGoalMapId(goalMapId);
+    setSelectedId(goalMapId);
+    setImportancePreview({});
+    setProgressPreview({});
+    setMapPositionPreview({});
+    if (typeof window !== "undefined") window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, goalMapId);
+  }, [queuePendingEditSave]);
+
+  const createGoalMap = useCallback(async (name: string): Promise<boolean> => {
+    return runWrite(async () => {
+      const created = await api<GoalMap>("/api/goal-maps", {
+        method: "POST",
+        body: JSON.stringify({ name })
+      });
+      const next = await loadGoals();
+      const nextMap = next.goalMaps.find((goalMap) => goalMap.id === created.id) ?? created;
+      setActiveGoalMapId(nextMap.id);
+      setSelectedId(nextMap.id);
+      if (typeof window !== "undefined") window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, nextMap.id);
+      return next;
+    }, "目标地图已创建");
+  }, [loadGoals, runWrite]);
+
+  const patchGoalMap = useCallback(async (goalMap: GoalMap, name: string): Promise<boolean> => {
+    return runWrite(async () => {
+      const updated = await api<GoalMap>(`/api/goal-maps/${encodeURIComponent(goalMap.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name })
+      });
+      const next = await loadGoals();
+      setActiveGoalMapId(updated.id);
+      setSelectedId(updated.id);
+      if (typeof window !== "undefined") window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, updated.id);
+      return next;
+    }, "目标地图已重命名");
+  }, [loadGoals, runWrite]);
+
+  const deleteGoalMap = useCallback(async (goalMap: GoalMap): Promise<boolean> => {
+    return runWrite(async () => {
+      pendingEditRef.current = null;
+      await api(`/api/goal-maps/${encodeURIComponent(goalMap.id)}`, {
+        method: "DELETE"
+      });
+      const next = await loadGoals();
+      const keptActiveMap = next.goalMaps.find((item) => item.id === activeGoalMapId && item.id !== goalMap.id);
+      const nextActiveMap = keptActiveMap ?? next.goalMaps[0];
+      const nextActiveId = nextActiveMap?.id ?? "";
+      setActiveGoalMapId(nextActiveId);
+      setSelectedId(nextActiveId || "root");
+      setImportancePreview({});
+      setProgressPreview({});
+      setMapPositionPreview({});
+      if (typeof window !== "undefined") {
+        if (nextActiveId) window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, nextActiveId);
+        else window.localStorage.removeItem(ACTIVE_GOAL_MAP_STORAGE_KEY);
+      }
+      return next;
+    }, "目标地图已删除");
+  }, [activeGoalMapId, loadGoals, runWrite]);
 
   const patchGoalFromAi = useCallback(async (goalId: string, patch: GoalPatchInput): Promise<boolean> => {
     return runWrite(async () => {
@@ -756,16 +851,13 @@ export function GoalApp() {
   }, []);
 
   const deleteGoal = async (goal: GoalNode) => {
-    const deletedIds = collectDescendants(goal, new Set([goal.id]));
-
     const deleted = await runWrite(async () => {
       pendingEditRef.current = null;
       await api(`/api/goals/${encodeURIComponent(goal.id)}`, {
         method: "DELETE"
       });
       await loadGoals();
-      setSelectedId("root");
-      if (deletedIds.has(focusId)) setFocusId("root");
+      setSelectedId(activeGoalMap?.id || "root");
     }, "目标已删除");
     if (deleted) setDeleteCandidate(null);
   };
@@ -818,37 +910,31 @@ export function GoalApp() {
     }, "目标位置已重置");
   }, [loadGoals, mapContextId, runWrite, selectedGoalFull]);
 
-  const createQuickGoal = useCallback(async (mode: "subgoal" | "sibling") => {
-    if (!selectedGoalFull) return;
-    await queuePendingEditSave();
+  const openCreateQuickGoalDialog = useCallback((mode: "subgoal" | "sibling") => {
+    if (!activeGoalMap || !selectedGoalFull) return;
     const parent = mode === "subgoal" ? selectedGoalFull : selectedParent;
     if (mode === "sibling" && !parent) return;
-    const source = selectedGoalFull || parent;
-    const title = uniqueTitle("新目标", goals.flatGoals);
-    await createGoal({
-      title,
-      parent: parent?.title || "",
-      domain: titleFromLink(source?.domain) || titleFromLink(parent?.domain) || domainTitles[0] || title,
-      horizon: source?.horizon || "medium",
-      priority: 50,
-      clarity: 1,
-      progress: 0
+    setCreateGoalDialogContext({
+      mode,
+      goalMap: activeGoalMap,
+      parentGoal: parent,
+      sourceGoal: selectedGoalFull,
+      siblings: mode === "subgoal" ? selectedGoalFull.children : siblingGoals(visibleTree, selectedGoalFull.id),
+      existingGoals: goals.flatGoals,
+      domainCandidates: domainTitles
     });
-  }, [createGoal, domainTitles, goals.flatGoals, queuePendingEditSave, selectedGoalFull, selectedParent]);
+  }, [activeGoalMap, domainTitles, goals.flatGoals, selectedGoalFull, selectedParent, visibleTree]);
 
-  const createTopGoal = useCallback(async () => {
-    await queuePendingEditSave();
-    const title = uniqueTitle("新目标", goals.flatGoals);
-    await createGoal({
-      title,
-      parent: "",
-      domain: domainTitles[0] || title,
-      horizon: "medium",
-      priority: 50,
-      clarity: 1,
-      progress: 0
+  const openCreateTopGoalDialog = useCallback(() => {
+    if (!activeGoalMap) return;
+    setCreateGoalDialogContext({
+      mode: "top",
+      goalMap: activeGoalMap,
+      siblings: visibleTree,
+      existingGoals: goals.flatGoals,
+      domainCandidates: domainTitles
     });
-  }, [createGoal, domainTitles, goals.flatGoals, queuePendingEditSave]);
+  }, [activeGoalMap, domainTitles, goals.flatGoals, visibleTree]);
 
   const submitRename = async (nextTitle: string) => {
     if (!selectedGoalFull) return;
@@ -864,25 +950,12 @@ export function GoalApp() {
       });
       const next = await loadGoals();
       const renamedGoal = next.flatGoals.find((item) => item.title === trimmed);
-      const nextId = renamedGoal?.id || (next.flatGoals.some((item) => item.id === selectedGoalFull.id) ? selectedGoalFull.id : "root");
+      const nextId = renamedGoal?.id || (next.flatGoals.some((item) => item.id === selectedGoalFull.id) ? selectedGoalFull.id : activeGoalMap?.id || "root");
       setSelectedId(nextId);
-      if (focusId === selectedGoalFull.id) setFocusId(nextId);
     }, "目标已重命名");
     setRenameOpen(false);
   };
 
-  const changeMapFocus = useCallback((id: string) => {
-    queuePendingEditSave();
-    setFocusId(id);
-    setSelectedId(id);
-    setImportancePreview({});
-    setProgressPreview({});
-    setMapPositionPreview({});
-  }, [queuePendingEditSave]);
-
-  const openParentMap = useCallback(() => {
-    changeMapFocus(focusParentId);
-  }, [changeMapFocus, focusParentId]);
   const activeCount = useMemo(() => visibleFlatGoals.filter((goal) => goal.status === "active").length, [visibleFlatGoals]);
   const doneCount = useMemo(() => visibleFlatGoals.filter((goal) => goal.status === "done").length, [visibleFlatGoals]);
   const progressAverage = useMemo(() => averageProgress(visibleFlatGoals), [visibleFlatGoals]);
@@ -953,30 +1026,51 @@ export function GoalApp() {
 
       <main ref={workspaceRef} className={`map-workspace${resizingClass}`} style={workspaceStyle}>
         <section ref={mapPaneRef} className={`map-pane ${scopeListCollapsed ? "scope-collapsed" : "scope-open"}`} aria-label="Goalscape 风格目标地图">
-          <MapScopeList
-            topGoals={visibleTree}
-            focusId={focusId}
-            collapsed={scopeListCollapsed}
-            onToggle={() => setScopeListCollapsed((current) => !current)}
-            onFocus={changeMapFocus}
-          />
-          <MapActions
-            selectedGoal={selectedGoalFull}
-            saving={saving}
-            canAddSibling={Boolean(selectedParent)}
-            canResetPosition={hasCustomMapPosition(selectedGoalFull, mapContextId)}
-            onAddSubgoal={() => void createQuickGoal("subgoal")}
-            onAddSibling={() => void createQuickGoal("sibling")}
-            onRename={() => selectedGoalFull && setRenameOpen(true)}
-            onResetPosition={resetSelectedMapPosition}
-            onDelete={() => selectedGoalFull && setDeleteCandidate(selectedGoalFull)}
-          />
-          {loading ? (
+          {!shouldShowFirstGoalMapCta(goals.goalMaps, loading) && activeGoalMap && (
+            <div className="map-pane-toolbar" aria-label="Map tools">
+              <MapScopeList
+                goalMaps={goals.goalMaps}
+                activeGoalMapId={activeGoalMap.id}
+                goalCounts={goalMapCounts}
+                collapsed={scopeListCollapsed}
+                saving={saving}
+                onToggle={() => setScopeListCollapsed((current) => !current)}
+                onSelectMap={selectGoalMap}
+                onCreateMap={() => setCreateGoalMapOpen(true)}
+                onRenameMap={setRenameGoalMapCandidate}
+                onDeleteMap={setDeleteGoalMapCandidate}
+              />
+              <MapActions
+                activeGoalMap={activeGoalMap}
+                mapCenterSelected={selectedId === mapCenterId && !selectedGoalFull}
+                selectedGoal={selectedGoalFull}
+                saving={saving}
+                canAddSibling={Boolean(selectedParent)}
+                canResetPosition={hasCustomMapPosition(selectedGoalFull, mapContextId)}
+                onAddTopGoal={openCreateTopGoalDialog}
+                onAddSubgoal={() => openCreateQuickGoalDialog("subgoal")}
+                onAddSibling={() => openCreateQuickGoalDialog("sibling")}
+                onRenameMap={() => activeGoalMap && setRenameGoalMapCandidate(activeGoalMap)}
+                onRename={() => selectedGoalFull && setRenameOpen(true)}
+                onResetPosition={resetSelectedMapPosition}
+                onDelete={() => selectedGoalFull && setDeleteCandidate(selectedGoalFull)}
+              />
+            </div>
+          )}
+          <div className="map-canvas">
+            {loading ? (
             <div className="loading-state">
               <Loader2 className="spin" />
               正在读取 Obsidian 目标
             </div>
-          ) : (
+          ) : shouldShowFirstGoalMapCta(goals.goalMaps, loading) ? (
+            <div className="first-map-empty" role="status">
+              <button type="button" className="first-map-cta" onClick={() => setCreateGoalMapOpen(true)} disabled={saving}>
+                <Sparkles />
+                开始你的第一个目标
+              </button>
+            </div>
+          ) : activeGoalMap ? (
             <GoalMap
               goals={mapGoals}
               selectedId={selectedId}
@@ -984,27 +1078,23 @@ export function GoalApp() {
               progressOverrides={progressPreview}
               positionOverrides={mapPositionPreview}
               mapContextId={mapContextId}
-              centerId={focusGoal?.id || "root"}
-              centerTitle={focusGoal?.title || "目标网络"}
-              emptyLabel={focusGoal ? "这个目标还没有子目标" : ""}
+              centerId={mapCenterId}
+              centerTitle={goalMapCenterTitle(activeGoalMap)}
+              emptyLabel={visibleTree.length === 0 ? "这张目标地图还没有目标" : ""}
               onSelect={selectGoal}
-              onOpenMap={changeMapFocus}
-              onOpenParentMap={focusGoal ? openParentMap : undefined}
               onPreviewPosition={previewMapPosition}
               onCommitPosition={saveMapPosition}
             />
-          )}
-          {!loading && !focusGoal && visibleTree.length === 0 && (
-            <div className="empty-scape" role="status">
-              <p className="empty-scape-eyebrow">星图待点亮</p>
-              <h2 className="empty-scape-title">还没有任何目标星</h2>
-              <p className="empty-scape-hint">从一颗顶层目标开始，让能量从中心流向你的各个生命领域。</p>
-              <button type="button" className="empty-scape-cta" onClick={() => void createTopGoal()} disabled={saving}>
-                <Sparkles />
-                点亮第一颗目标
+          ) : null}
+            {!loading && activeGoalMap && visibleTree.length === 0 && (
+            <div className="empty-scape map-empty-scape" role="status">
+              <button type="button" className="empty-scape-cta secondary" onClick={openCreateTopGoalDialog} disabled={saving}>
+                <CirclePlus />
+                添加第一个目标
               </button>
             </div>
-          )}
+            )}
+          </div>
         </section>
 
         <div
@@ -1045,6 +1135,7 @@ export function GoalApp() {
 
         <GoalDetailPanel
           selectedGoal={selectedGoal}
+          activeGoalMap={activeGoalMap}
           cachedDraft={selectedGoal ? draftCacheRef.current[selectedGoal.id] : undefined}
           topGoals={visibleTree}
           saving={saving}
@@ -1070,11 +1161,60 @@ export function GoalApp() {
           onCreateWeeklyAction={createWeeklyActionFromAi}
         />
       )}
+      {createGoalDialogContext && (
+        <CreateGoalDialog
+          context={createGoalDialogContext}
+          saving={saving}
+          onCancel={() => setCreateGoalDialogContext(null)}
+          onBeforeSubmit={queuePendingEditSave}
+          onBeforeGenerate={queuePendingEditSave}
+          onCreate={createGoal}
+        />
+      )}
       <RenameGoalDialog
         goal={renameOpen ? selectedGoalFull ?? null : null}
         saving={saving}
         onCancel={() => setRenameOpen(false)}
         onConfirm={(title) => void submitRename(title)}
+      />
+      <GoalMapNameDialog
+        open={createGoalMapOpen}
+        title="新建目标地图"
+        initialName=""
+        saving={saving}
+        submitLabel="创建"
+        onCancel={() => setCreateGoalMapOpen(false)}
+        onConfirm={(name) => {
+          void createGoalMap(name).then((created) => {
+            if (created) setCreateGoalMapOpen(false);
+          });
+        }}
+      />
+      <GoalMapNameDialog
+        open={Boolean(renameGoalMapCandidate)}
+        title="重命名目标地图"
+        initialName={renameGoalMapCandidate?.name || ""}
+        saving={saving}
+        submitLabel="重命名"
+        onCancel={() => setRenameGoalMapCandidate(null)}
+        onConfirm={(name) => {
+          if (!renameGoalMapCandidate) return;
+          void patchGoalMap(renameGoalMapCandidate, name).then((renamed) => {
+            if (renamed) setRenameGoalMapCandidate(null);
+          });
+        }}
+      />
+      <DeleteGoalMapDialog
+        goalMap={deleteGoalMapCandidate}
+        goalCount={deleteGoalMapCandidate ? goalMapCounts[deleteGoalMapCandidate.id] ?? 0 : 0}
+        saving={saving}
+        onCancel={() => setDeleteGoalMapCandidate(null)}
+        onConfirm={() => {
+          if (!deleteGoalMapCandidate) return;
+          void deleteGoalMap(deleteGoalMapCandidate).then((deleted) => {
+            if (deleted) setDeleteGoalMapCandidate(null);
+          });
+        }}
       />
       <DeleteGoalDialog
         goal={deleteCandidate}
@@ -1087,24 +1227,61 @@ export function GoalApp() {
 }
 
 function MapScopeList({
-  topGoals,
-  focusId,
+  goalMaps,
+  activeGoalMapId,
+  goalCounts,
   collapsed,
+  saving,
   onToggle,
-  onFocus
+  onSelectMap,
+  onCreateMap,
+  onRenameMap,
+  onDeleteMap
 }: {
-  topGoals: GoalNode[];
-  focusId: string;
+  goalMaps: GoalMap[];
+  activeGoalMapId: string;
+  goalCounts: Record<string, number>;
   collapsed: boolean;
+  saving: boolean;
   onToggle: () => void;
-  onFocus: (id: string) => void;
+  onSelectMap: (id: string) => void;
+  onCreateMap: () => void;
+  onRenameMap: (goalMap: GoalMap) => void;
+  onDeleteMap: (goalMap: GoalMap) => void;
 }) {
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const openMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (collapsed) setOpenMenuId(null);
+  }, [collapsed]);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!openMenuRef.current?.contains(event.target as Node)) setOpenMenuId(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpenMenuId(null);
+      }
+    };
+    openMenuRef.current?.querySelector<HTMLElement>(".menu-item:not([disabled])")?.focus();
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown, true);
+    };
+  }, [openMenuId]);
+
   return (
-    <aside className={`map-scope-list${collapsed ? " collapsed" : ""}`} aria-label="目标视角列表">
+    <aside className={`map-scope-list${collapsed ? " collapsed" : ""}`} aria-label="目标地图列表">
       <button
         type="button"
         className="scope-toggle"
-        aria-label={collapsed ? "打开目标列表" : "折叠目标列表"}
+        aria-label={collapsed ? "打开目标地图列表" : "折叠目标地图列表"}
         aria-expanded={!collapsed}
         onClick={onToggle}
       >
@@ -1112,30 +1289,73 @@ function MapScopeList({
       </button>
       {!collapsed && (
         <div className="scope-content">
-          <p className="scope-title">目标视角</p>
-          <button
-            type="button"
-            className={focusId === "root" ? "scope-item active" : "scope-item"}
-            style={{ "--scope-accent": "var(--accent)" } as React.CSSProperties}
-            onClick={() => onFocus("root")}
-          >
-            <span>整体目标</span>
-            <small>{topGoals.length} 个一级目标</small>
-          </button>
+          <p className="scope-title">目标地图</p>
+          {goalMaps.map((goalMap) => {
+            const active = activeGoalMapId === goalMap.id;
+            const menuOpen = openMenuId === goalMap.id;
+            return (
+              <div key={goalMap.id} className="scope-map-entry" style={{ "--scope-accent": "var(--accent)" } as React.CSSProperties}>
+                <button
+                  type="button"
+                  className={active ? "scope-item active" : "scope-item"}
+                  onClick={() => onSelectMap(goalMap.id)}
+                >
+                  <span>{goalMap.name}</span>
+                  <small>{goalCounts[goalMap.id] ?? 0} 个目标</small>
+                </button>
+                <div className="scope-item-menu-wrap" ref={menuOpen ? openMenuRef : null}>
+                  <button
+                    type="button"
+                    className="scope-item-menu-trigger"
+                    title="目标地图操作"
+                    aria-label={`目标地图「${goalMap.name}」操作`}
+                    aria-haspopup="menu"
+                    aria-expanded={menuOpen}
+                    disabled={saving}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setOpenMenuId((current) => (current === goalMap.id ? null : goalMap.id));
+                    }}
+                  >
+                    <Ellipsis />
+                  </button>
+                  {menuOpen && (
+                    <div className="quick-menu scope-map-menu" role="menu">
+                      <button
+                        type="button"
+                        className="menu-item"
+                        disabled={saving}
+                        onClick={() => {
+                          setOpenMenuId(null);
+                          onRenameMap(goalMap);
+                        }}
+                      >
+                        <Pencil />
+                        重命名地图
+                      </button>
+                      <button
+                        type="button"
+                        className="menu-item danger-menu-item"
+                        disabled={saving}
+                        onClick={() => {
+                          setOpenMenuId(null);
+                          onDeleteMap(goalMap);
+                        }}
+                      >
+                        <Trash2 />
+                        删除地图
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
           <div className="scope-divider" />
-          {topGoals.map((goal) => (
-            <button
-              key={goal.id}
-              type="button"
-              className={focusId === goal.id ? "scope-item active" : "scope-item"}
-              style={{ "--scope-accent": domainAccentToken(goal.domain || goal.title) } as React.CSSProperties}
-              onClick={() => onFocus(goal.id)}
-            >
-              <span>{goal.title}</span>
-              <small>{goal.children.length} 个子目标</small>
-            </button>
-          ))}
-          {topGoals.length === 0 && <p className="muted-text">还没有一级目标。</p>}
+          <button type="button" className="scope-create" onClick={onCreateMap}>
+            <Plus />
+            <span>新建目标地图</span>
+          </button>
         </div>
       )}
     </aside>
@@ -1143,22 +1363,30 @@ function MapScopeList({
 }
 
 function MapActions({
+  activeGoalMap,
+  mapCenterSelected,
   selectedGoal,
   saving,
   canAddSibling,
   canResetPosition,
+  onAddTopGoal,
   onAddSubgoal,
   onAddSibling,
+  onRenameMap,
   onRename,
   onResetPosition,
   onDelete
 }: {
+  activeGoalMap: GoalMap | undefined;
+  mapCenterSelected: boolean;
   selectedGoal: GoalNode | undefined;
   saving: boolean;
   canAddSibling: boolean;
   canResetPosition: boolean;
+  onAddTopGoal: () => void;
   onAddSubgoal: () => void;
   onAddSibling: () => void;
+  onRenameMap: () => void;
   onRename: () => void;
   onResetPosition: () => void;
   onDelete: () => void;
@@ -1167,6 +1395,7 @@ function MapActions({
   const menuWrapRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const disabled = saving || !selectedGoal;
+  const mapDisabled = saving || !activeGoalMap;
 
   useEffect(() => {
     if (!open) return;
@@ -1188,6 +1417,47 @@ function MapActions({
       document.removeEventListener("keydown", handleKeyDown, true);
     };
   }, [open]);
+
+  if (mapCenterSelected) {
+    return (
+      <div className="map-actions">
+        <button type="button" className="icon-button" title="添加顶层目标" aria-label="添加顶层目标" disabled={mapDisabled} onClick={onAddTopGoal}>
+          <ListPlus />
+        </button>
+        <div className="menu-wrap" ref={menuWrapRef}>
+          <button
+            type="button"
+            ref={triggerRef}
+            className="icon-button"
+            title="目标地图菜单"
+            aria-label="目标地图菜单"
+            aria-haspopup="menu"
+            aria-expanded={open}
+            disabled={mapDisabled}
+            onClick={() => setOpen((current) => !current)}
+          >
+            <Ellipsis />
+          </button>
+          {open && (
+            <div className="quick-menu" role="menu">
+              <button
+                type="button"
+                className="menu-item"
+                disabled={mapDisabled}
+                onClick={() => {
+                  setOpen(false);
+                  onRenameMap();
+                }}
+              >
+                <Pencil />
+                重命名地图
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="map-actions">
@@ -1316,6 +1586,180 @@ function DeleteGoalDialogBody({
   );
 }
 
+function DeleteGoalMapDialog({
+  goalMap,
+  goalCount,
+  saving,
+  onCancel,
+  onConfirm
+}: {
+  goalMap: GoalMap | null;
+  goalCount: number;
+  saving: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!goalMap) return null;
+  return (
+    <DeleteGoalMapDialogBody goalMap={goalMap} goalCount={goalCount} saving={saving} onCancel={onCancel} onConfirm={onConfirm} />
+  );
+}
+
+function DeleteGoalMapDialogBody({
+  goalMap,
+  goalCount,
+  saving,
+  onCancel,
+  onConfirm
+}: {
+  goalMap: GoalMap;
+  goalCount: number;
+  saving: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { dialogRef, onBackdropPointerDown, onBackdropClick } = useModalDialog<HTMLElement>({
+    onDismiss: onCancel,
+    canDismiss: !saving
+  });
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
+      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-goal-map-dialog-title">
+        <div className="dialog-head">
+          <div>
+            <p className="eyebrow">删除目标地图</p>
+            <h2 id="delete-goal-map-dialog-title">彻底删除「{goalMap.name}」？</h2>
+          </div>
+          <button type="button" className="icon-button compact" aria-label="取消删除" disabled={saving} onClick={onCancel}>
+            <X />
+          </button>
+        </div>
+        <p className="dialog-copy">
+          这会删除这张目标地图{goalCount ? `，并一并删除其中 ${goalCount} 个目标` : ""}。此操作无法在应用内撤销。
+        </p>
+        <div className="dialog-actions">
+          <button type="button" className="secondary-button" disabled={saving} onClick={onCancel}>
+            取消
+          </button>
+          <button type="button" className="danger-button" disabled={saving} onClick={onConfirm}>
+            {saving ? <Loader2 className="spin" /> : <Trash2 />}
+            彻底删除
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function GoalMapNameDialog({
+  open,
+  title,
+  initialName,
+  saving,
+  submitLabel,
+  onCancel,
+  onConfirm
+}: {
+  open: boolean;
+  title: string;
+  initialName: string;
+  saving: boolean;
+  submitLabel: string;
+  onCancel: () => void;
+  onConfirm: (name: string) => void;
+}) {
+  if (!open) return null;
+  return (
+    <GoalMapNameDialogBody
+      title={title}
+      initialName={initialName}
+      saving={saving}
+      submitLabel={submitLabel}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
+  );
+}
+
+function GoalMapNameDialogBody({
+  title,
+  initialName,
+  saving,
+  submitLabel,
+  onCancel,
+  onConfirm
+}: {
+  title: string;
+  initialName: string;
+  saving: boolean;
+  submitLabel: string;
+  onCancel: () => void;
+  onConfirm: (name: string) => void;
+}) {
+  const { dialogRef, onBackdropPointerDown, onBackdropClick } = useModalDialog<HTMLElement>({
+    onDismiss: onCancel,
+    canDismiss: !saving
+  });
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [name, setName] = useState(initialName);
+
+  useEffect(() => {
+    setName(initialName);
+    window.setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 0);
+  }, [initialName]);
+
+  const trimmed = name.trim();
+  const canSubmit = !saving && trimmed.length > 0 && trimmed !== initialName.trim();
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
+      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="goal-map-dialog-title">
+        <div className="dialog-head">
+          <div>
+            <p className="eyebrow">目标地图</p>
+            <h2 id="goal-map-dialog-title">{title}</h2>
+          </div>
+          <button type="button" className="icon-button compact" aria-label="取消" disabled={saving} onClick={onCancel}>
+            <X />
+          </button>
+        </div>
+        <form
+          className="rename-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (canSubmit) onConfirm(trimmed);
+          }}
+        >
+          <label className="rename-field">
+            <span className="field-label">地图名称</span>
+            <input
+              ref={inputRef}
+              type="text"
+              value={name}
+              maxLength={120}
+              placeholder="输入目标地图名称"
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+          <div className="dialog-actions">
+            <button type="button" className="secondary-button" disabled={saving} onClick={onCancel}>
+              取消
+            </button>
+            <button type="submit" className="primary-button" disabled={!canSubmit}>
+              {saving ? <Loader2 className="spin" /> : <Pencil />}
+              {submitLabel}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function RenameGoalDialog({
   goal,
   saving,
@@ -1404,21 +1848,14 @@ function RenameGoalDialogBody({
   );
 }
 
-export type GoalscapeSlotKey = "life" | "growth" | "career" | "extra";
-
-export type GoalscapeSlot = {
-  key: GoalscapeSlotKey;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  color: string;
-};
+type GoalscapeSectorRole = "primary" | "descendant";
 
 type GoalscapeNodeLayout = {
   node: GoalNode;
   parentId: string;
   depth: number;
+  treeDepth: number;
+  visibleDepth: number;
   x: number;
   y: number;
   width: number;
@@ -1426,8 +1863,17 @@ type GoalscapeNodeLayout = {
   color: string;
   progress: number;
   importance: number;
-  slotKey: GoalscapeSlotKey;
   variant: number;
+  treeDistance: number;
+  perspectiveScale: number;
+  opacity: number;
+  zIndex: number;
+  linkParentId: string;
+  sectorStartAngle: number;
+  sectorEndAngle: number;
+  sectorMidAngle: number;
+  sectorRole: GoalscapeSectorRole;
+  childCount?: number;
 };
 
 export type GoalscapeOrbit = {
@@ -1438,26 +1884,26 @@ export type GoalscapeOrbit = {
   ry: number;
 };
 
-export function canOpenGoalSubmap(layout: Pick<GoalscapeNodeLayout, "node" | "depth">) {
-  return layout.depth === 1 || (layout.node.children || []).length > 0;
-}
-
 export const goalscapeCenter = { x: 600, y: 380, width: 142, height: 120 };
 
 const goalscapeViewBox = { width: 1200, height: 760 };
 
-export function goalscapeOrbitForDepth(depth: number): GoalscapeOrbit {
+export function goalscapeOrbitForDepth(depth: number, visibleDepth = 2): GoalscapeOrbit {
   const safeDepth = Math.max(1, Math.round(depth));
-  const scale = Math.min(1, 0.55 + (safeDepth - 1) * 0.45);
-  const radiusX = Math.min(goalscapeCenter.x - 120, goalscapeViewBox.width - goalscapeCenter.x - 120);
-  const radiusY = Math.min(goalscapeCenter.y - 70, goalscapeViewBox.height - goalscapeCenter.y - 70);
+  const safeVisibleDepth = Math.max(1, Math.round(visibleDepth));
+  const inner = { rx: 170, ry: 120 };
+  const edge = { rx: 470, ry: 300 };
+  const ratio =
+    safeVisibleDepth === 1
+      ? 0.5
+      : clamp((Math.min(safeDepth, safeVisibleDepth) - 1) / (safeVisibleDepth - 1), 0, 1);
 
   return {
     depth: safeDepth,
     cx: goalscapeCenter.x,
     cy: goalscapeCenter.y,
-    rx: radiusX * scale,
-    ry: radiusY * scale
+    rx: inner.rx + (edge.rx - inner.rx) * ratio,
+    ry: inner.ry + (edge.ry - inner.ry) * ratio
   };
 }
 
@@ -1477,194 +1923,6 @@ export function constrainGoalscapePositionToOrbit(position: MapPosition, orbit: 
   };
 }
 
-const goalscapeSlotStyles: Record<GoalscapeSlotKey, Pick<GoalscapeSlot, "width" | "height" | "color">> = {
-  life: { width: 114, height: 92, color: "#10b981" },
-  growth: { width: 124, height: 98, color: "#6366f1" },
-  career: { width: 118, height: 88, color: "#0284c7" },
-  extra: { width: 106, height: 78, color: "#64748b" }
-};
-
-export const goalscapePrimarySlots: GoalscapeSlot[] = [
-  { key: "life", x: 382, y: 354, ...goalscapeSlotStyles.life },
-  { key: "growth", x: 777, y: 229, ...goalscapeSlotStyles.growth },
-  { key: "career", x: 694, y: 559, ...goalscapeSlotStyles.career }
-];
-
-type GoalscapeSlotPosition = {
-  key?: GoalscapeSlotKey;
-  x: number;
-  y: number;
-};
-
-const goalscapeFourGoalPositions: GoalscapeSlotPosition[] = [
-  { key: "life", x: 372, y: 184 },
-  { key: "growth", x: 907, y: 199 },
-  { key: "career", x: 917, y: 559 },
-  { key: "extra", x: 372, y: 559 }
-];
-
-const goalscapePreferenceAngles: Record<Exclude<GoalscapeSlotKey, "extra">, number> = {
-  life: 190,
-  growth: 315,
-  career: 50
-};
-
-const goalscapeRing = {
-  radiusX: 365,
-  radiusY: 235,
-  startAngle: -90
-};
-
-function goalscapeSlotFromPosition(position: GoalscapeSlotPosition, key: GoalscapeSlotKey): GoalscapeSlot {
-  return {
-    key,
-    x: position.x,
-    y: position.y,
-    ...goalscapeSlotStyles[key]
-  };
-}
-
-function normalizeGoalscapeAngle(angle: number) {
-  return ((angle % 360) + 360) % 360;
-}
-
-function goalscapeAngleDistance(a: number, b: number) {
-  const distance = Math.abs(normalizeGoalscapeAngle(a) - normalizeGoalscapeAngle(b));
-  return Math.min(distance, 360 - distance);
-}
-
-function goalscapeSlotAngle(slot: Pick<GoalscapeSlot, "x" | "y">) {
-  return normalizeGoalscapeAngle((Math.atan2(slot.y - goalscapeCenter.y, slot.x - goalscapeCenter.x) * 180) / Math.PI);
-}
-
-function generatedGoalscapePositions(total: number): GoalscapeSlotPosition[] {
-  return Array.from({ length: total }, (_, index) => {
-    const angle = goalscapeRing.startAngle + index * (360 / total);
-    const radians = (angle * Math.PI) / 180;
-    const staggerScale = total > 8 && index % 2 === 1 ? 0.86 : 1;
-    return {
-      x: goalscapeCenter.x + Math.cos(radians) * goalscapeRing.radiusX * staggerScale,
-      y: goalscapeCenter.y + Math.sin(radians) * goalscapeRing.radiusY * staggerScale
-    };
-  });
-}
-
-function goalscapePositionsForCount(total: number): GoalscapeSlotPosition[] {
-  if (total === 4) return goalscapeFourGoalPositions;
-  return generatedGoalscapePositions(total);
-}
-
-function fallbackGoalscapeSlot(index: number, total: number) {
-  const positions = goalscapePositionsForCount(Math.max(4, total));
-  return goalscapeSlotFromPosition(positions[index % positions.length], "extra");
-}
-
-function goalscapeSlotPreference(goal: GoalNode): GoalscapeSlotKey | undefined {
-  const text = `${goal.title} ${titleFromLink(goal.domain)}`;
-  if (text.includes("幸福") || text.includes("生活") || text.includes("家庭")) return "life";
-  if (text.includes("个人") || text.includes("成长") || text.includes("认知") || text.includes("知识")) return "growth";
-  if (text.includes("职业") || text.includes("交付") || text.includes("作品") || text.includes("机会")) return "career";
-  return undefined;
-}
-
-function isGoalscapeSemanticSlot(key: GoalscapeSlotKey | undefined): key is Exclude<GoalscapeSlotKey, "extra"> {
-  return key === "life" || key === "growth" || key === "career";
-}
-
-function assignGoalscapeFixedSlots(goals: GoalNode[]) {
-  const slots = new Map<string, GoalscapeSlot>();
-  const available = [...goalscapePrimarySlots];
-  const claimed = new Set<GoalscapeSlotKey>();
-
-  goals.forEach((goal) => {
-    const preferred = goalscapeSlotPreference(goal);
-    const slot = preferred ? available.find((item) => item.key === preferred && !claimed.has(item.key)) : undefined;
-    if (!slot) return;
-    slots.set(goal.id, slot);
-    claimed.add(slot.key);
-  });
-
-  goals.forEach((goal) => {
-    if (slots.has(goal.id)) return;
-    const slot = available.find((item) => !claimed.has(item.key));
-    if (!slot) return;
-    slots.set(goal.id, slot);
-    claimed.add(slot.key);
-  });
-
-  return slots;
-}
-
-type GoalscapePositionCandidate = {
-  position: GoalscapeSlotPosition;
-  index: number;
-  angle: number;
-};
-
-function nearestGoalscapePosition(
-  candidates: GoalscapePositionCandidate[],
-  angle: number
-): GoalscapePositionCandidate | undefined {
-  return [...candidates].sort(
-    (a, b) => goalscapeAngleDistance(a.angle, angle) - goalscapeAngleDistance(b.angle, angle) || a.index - b.index
-  )[0];
-}
-
-export function assignGoalscapeSlots(goals: GoalNode[]) {
-  if (goals.length <= goalscapePrimarySlots.length) return assignGoalscapeFixedSlots(goals);
-
-  const slots = new Map<string, GoalscapeSlot>();
-  const available = goalscapePositionsForCount(goals.length).map((position, index) => ({
-    position,
-    index,
-    angle: goalscapeSlotAngle(position)
-  }));
-
-  const claim = (goal: GoalNode, candidate: GoalscapePositionCandidate, key: GoalscapeSlotKey) => {
-    slots.set(goal.id, goalscapeSlotFromPosition(candidate.position, key));
-    available.splice(available.indexOf(candidate), 1);
-  };
-
-  goals.forEach((goal) => {
-    const preferred = goalscapeSlotPreference(goal);
-    if (!isGoalscapeSemanticSlot(preferred)) return;
-    const candidate = nearestGoalscapePosition(available, goalscapePreferenceAngles[preferred]);
-    if (candidate) claim(goal, candidate, preferred);
-  });
-
-  goals.forEach((goal) => {
-    if (slots.has(goal.id)) return;
-    const candidate = available.shift();
-    if (!candidate) return;
-    const key = goalscapeSlotPreference(goal) || candidate.position.key || "extra";
-    slots.set(goal.id, goalscapeSlotFromPosition(candidate.position, key));
-  });
-
-  return slots;
-}
-
-export function goalscapeChildOffset(slot: Pick<GoalscapeSlot, "x" | "y">, childIndex: number, totalChildren: number) {
-  const count = Math.max(1, totalChildren);
-  const index = clamp(childIndex, 0, count - 1);
-  const spread =
-    count === 1 ? 0 :
-    count === 2 ? 72 :
-    count === 3 ? 116 :
-    count === 4 ? 138 :
-    count === 5 ? 154 :
-    count === 6 ? 168 :
-    Math.min(220, 138 + (count - 4) * 18);
-  const step = count <= 1 ? 0 : spread / (count - 1);
-  const angle = goalscapeSlotAngle(slot) - spread / 2 + step * index;
-  const radius = count >= 5 ? 198 : count >= 4 ? 190 : count === 3 ? 184 : 176;
-  const radians = (angle * Math.PI) / 180;
-  const x = slot.x + Math.cos(radians) * radius;
-  const y = slot.y + Math.sin(radians) * radius;
-  const safeX = clamp(x, 96, goalscapeViewBox.width - 96);
-  const safeY = clamp(y, 78, goalscapeViewBox.height - 78);
-  return { x: safeX - slot.x, y: safeY - slot.y };
-}
-
 export function goalscapeNodeDensity(progress: number) {
   return 0.12 + 0.68 * (clamp(progress, 0, 100) / 100);
 }
@@ -1673,29 +1931,42 @@ export function goalscapeStarlightCoreRadius(baseRadius: number, progress: numbe
   return baseRadius * (0.2 + 0.8 * (clamp(progress, 0, 100) / 100));
 }
 
-function goalscapeChildNodeSize(parentSize: Pick<GoalscapeSlot, "width" | "height">, childIndex: number) {
-  const scale = Math.max(0.72, 0.78 - Math.min(childIndex, 3) * 0.015);
+function goalscapeChildNodeSize(
+  parentSize: Pick<GoalscapeNodeLayout, "width" | "height">,
+  childIndex: number,
+  depth = 2,
+  densityScale = 1,
+  focusScale = 1
+) {
+  const depthScale = clamp(0.8 - Math.max(0, depth - 2) * 0.075, 0.58, 0.8);
+  const siblingTaper = 1 - Math.min(childIndex, 4) * 0.015;
+  const scale = clamp(depthScale * siblingTaper * densityScale * focusScale, 0.42, 1.08);
+  const minWidth = depth === 1 ? 82 : depth === 2 ? 68 : depth === 3 ? 54 : 46;
+  const minHeight = depth === 1 ? 66 : depth === 2 ? 54 : depth === 3 ? 44 : 36;
   return {
-    width: Math.round(parentSize.width * scale),
-    height: Math.round(parentSize.height * scale)
+    width: Math.round(clamp(parentSize.width * scale, minWidth, parentSize.width * 1.08)),
+    height: Math.round(clamp(parentSize.height * scale, minHeight, parentSize.height * 1.08))
   };
 }
 
 function goalscapeNodeVisualMetrics(layout: Pick<GoalscapeNodeLayout, "width" | "height" | "depth">) {
-  const depthScale = layout.depth === 1 ? 1 : 0.9;
-  const iconSize = Math.round(clamp(layout.width * 0.27 * depthScale, layout.depth === 1 ? 28 : 23, layout.depth === 1 ? 32 : 26));
-  const titleSize = Math.round(clamp(layout.width * (layout.depth === 1 ? 0.145 : 0.14), layout.depth === 1 ? 16 : 12, layout.depth === 1 ? 18 : 13));
-  const progressSize = Math.round(clamp(layout.width * 0.095, 10, 12));
+  const iconMin = layout.depth === 1 ? 28 : layout.depth === 2 ? 22 : 17;
+  const iconMax = layout.depth === 1 ? 32 : layout.depth === 2 ? 26 : 22;
+  const titleMin = layout.depth === 1 ? 16 : layout.depth === 2 ? 12 : 10;
+  const titleMax = layout.depth === 1 ? 18 : layout.depth === 2 ? 13 : 12;
+  const iconSize = Math.round(clamp(layout.width * 0.26, iconMin, iconMax));
+  const titleSize = Math.round(clamp(layout.width * (layout.depth === 1 ? 0.145 : 0.14), titleMin, titleMax));
+  const progressSize = Math.round(clamp(layout.width * 0.095, layout.depth >= 3 ? 8 : 10, 12));
   return {
     iconSize,
     iconGlyphSize: Math.round(iconSize * 0.58),
-    iconY: layout.depth === 1 ? layout.height * 0.48 : layout.height * 0.46,
-    titleY: layout.depth === 1 ? layout.height * 0.03 : layout.height * 0.06,
-    titleLineGap: layout.depth === 1 ? Math.round(titleSize * 1.18) : Math.round(titleSize * 1.16),
+    iconY: layout.depth === 1 ? layout.height * 0.48 : layout.depth === 2 ? layout.height * 0.46 : layout.height * 0.44,
+    titleY: layout.depth === 1 ? layout.height * 0.03 : layout.depth === 2 ? layout.height * 0.06 : layout.height * 0.08,
+    titleLineGap: layout.depth === 1 ? Math.round(titleSize * 1.18) : Math.round(titleSize * 1.14),
     titleSize,
     progressSize,
-    progressY: layout.height * (layout.depth === 1 ? 0.42 : 0.44),
-    coreRadius: clamp(layout.width * 0.095, layout.depth === 1 ? 10 : 7, layout.depth === 1 ? 12 : 9)
+    progressY: layout.height * (layout.depth === 1 ? 0.42 : layout.depth === 2 ? 0.44 : 0.46),
+    coreRadius: clamp(layout.width * 0.095, layout.depth === 1 ? 10 : layout.depth === 2 ? 7 : 5, layout.depth === 1 ? 12 : 9)
   };
 }
 
@@ -1829,57 +2100,439 @@ function goalscapeNodeColor(goal: GoalNode, fallback: string) {
   return normalizeHexColor(goal.color) || domainBaseColor(goal.domain || goal.title) || fallback;
 }
 
+const goalscapeMaxVisibleDepth = 4;
+const goalscapeMinOrbitGap = 90;
+const goalscapeCollapseMinWidth = 52;
+const goalscapeCollapseMinHeight = 40;
+const goalscapeFocusSectorMidAngle = -35;
+const goalscapeFocusPathWeightScale = 2.4;
+const goalscapeFocusSiblingWeightScale = 0.55;
+
+type GoalscapeTreeStats = {
+  maxDepth: number;
+  counts: Map<number, number>;
+};
+
+type GoalscapeSector = {
+  startAngle: number;
+  endAngle: number;
+};
+
+const goalscapeFullSector: GoalscapeSector = { startAngle: -90, endAngle: 270 };
+
+type GoalscapeFocusContext = {
+  activeSelectionId?: string;
+  selectedPathIds: Set<string>;
+  selectedDescendantIds: Set<string>;
+  selectedSubtreeIds: Set<string>;
+  maxTreeDepth: number;
+};
+
+function goalscapeSectorMidAngle(sector: GoalscapeSector) {
+  return (sector.startAngle + sector.endAngle) / 2;
+}
+
+function goalscapeSectorSpan(sector: GoalscapeSector) {
+  return Math.max(0.001, sector.endAngle - sector.startAngle);
+}
+
+function collectGoalscapeTreeStats(goals: GoalNode[], depth = 1, stats: GoalscapeTreeStats = { maxDepth: 0, counts: new Map() }) {
+  for (const goal of goals) {
+    stats.maxDepth = Math.max(stats.maxDepth, depth);
+    stats.counts.set(depth, (stats.counts.get(depth) ?? 0) + 1);
+    collectGoalscapeTreeStats(goal.children || [], depth + 1, stats);
+  }
+  return stats;
+}
+
+function goalscapeOrbitCircumference(orbit: Pick<GoalscapeOrbit, "rx" | "ry">) {
+  return Math.PI * (3 * (orbit.rx + orbit.ry) - Math.sqrt((3 * orbit.rx + orbit.ry) * (orbit.rx + 3 * orbit.ry)));
+}
+
+function goalscapeOrbitCapacity(depth: number, visibleDepth: number) {
+  const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
+  return Math.max(1, Math.floor(goalscapeOrbitCircumference(orbit) / goalscapeMinOrbitGap));
+}
+
+function goalscapeVisibleDepth(stats: GoalscapeTreeStats) {
+  if (stats.maxDepth === 0) return 3;
+
+  let visibleDepth = Math.min(goalscapeMaxVisibleDepth, Math.max(3, stats.maxDepth));
+  while (visibleDepth > 3) {
+    let overflowDepth = 0;
+    for (let depth = 1; depth <= visibleDepth; depth += 1) {
+      const count = stats.counts.get(depth) ?? 0;
+      if (count > goalscapeOrbitCapacity(depth, visibleDepth)) {
+        overflowDepth = depth;
+        break;
+      }
+    }
+    if (overflowDepth === 0) return visibleDepth;
+    if (overflowDepth <= 3) return 3;
+    visibleDepth = overflowDepth - 1;
+  }
+
+  return Math.max(3, visibleDepth);
+}
+
+function goalscapeRingDensityScale(count: number, depth: number, visibleDepth: number) {
+  const capacity = goalscapeOrbitCapacity(depth, visibleDepth);
+  const pressure = Math.max(1, count) / capacity;
+  if (pressure <= 0.72) return 1;
+  return clamp(1 - (pressure - 0.72) * 0.28, 0.7, 1);
+}
+
+function goalscapeSubtreeLeafCount(goal: GoalNode): number {
+  const children = goal.children || [];
+  if (children.length === 0) return 1;
+  return children.reduce((sum, child) => sum + goalscapeSubtreeLeafCount(child), 0);
+}
+
+function countGoalscapeDescendants(goal: GoalNode): number {
+  return (goal.children || []).reduce((sum, child) => sum + 1 + countGoalscapeDescendants(child), 0);
+}
+
+function goalscapePointOnOrbit(angle: number, depth: number, visibleDepth: number): MapPosition {
+  const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
+  return goalscapePointOnSpecificOrbit(angle, orbit);
+}
+
+function goalscapePointOnSpecificOrbit(angle: number, orbit: GoalscapeOrbit): MapPosition {
+  const radians = (angle * Math.PI) / 180;
+  const deltaX = Math.cos(radians);
+  const deltaY = Math.sin(radians);
+  const scale = 1 / Math.sqrt(deltaX ** 2 / orbit.rx ** 2 + deltaY ** 2 / orbit.ry ** 2);
+  return {
+    x: orbit.cx + deltaX * scale,
+    y: orbit.cy + deltaY * scale
+  };
+}
+
+function goalscapeAngleForPosition(position: MapPosition) {
+  return (Math.atan2(position.y - goalscapeCenter.y, position.x - goalscapeCenter.x) * 180) / Math.PI;
+}
+
+function goalscapeAngleInSector(angle: number, sector: GoalscapeSector) {
+  const candidates = [angle - 720, angle - 360, angle, angle + 360, angle + 720];
+  return candidates.find((candidate) => candidate >= sector.startAngle && candidate <= sector.endAngle);
+}
+
+function clampGoalscapeAngleToSector(angle: number, sector: GoalscapeSector, padding = 0) {
+  if (goalscapeSectorSpan(sector) >= 359.5) return angle;
+
+  const safePadding = Math.min(Math.max(0, padding), goalscapeSectorSpan(sector) / 2.5);
+  const range = {
+    startAngle: sector.startAngle + safePadding,
+    endAngle: sector.endAngle - safePadding
+  };
+  const inside = goalscapeAngleInSector(angle, range);
+  if (inside !== undefined) return inside;
+
+  return [angle - 720, angle - 360, angle, angle + 360, angle + 720]
+    .map((candidate) => ({
+      angle: clamp(candidate, range.startAngle, range.endAngle),
+      distance:
+        candidate < range.startAngle
+          ? range.startAngle - candidate
+          : candidate > range.endAngle
+            ? candidate - range.endAngle
+            : 0
+    }))
+    .sort((a, b) => a.distance - b.distance)[0].angle;
+}
+
+function constrainGoalscapePositionToSectorOrbit(
+  position: MapPosition,
+  orbit: GoalscapeOrbit,
+  sector: GoalscapeSector,
+  padding = 4
+): MapPosition {
+  const orbitPosition = constrainGoalscapePositionToOrbit(position, orbit);
+  const angle = clampGoalscapeAngleToSector(goalscapeAngleForPosition(orbitPosition), sector, padding);
+  return goalscapePointOnSpecificOrbit(angle, orbit);
+}
+
+function goalscapeWeightedSpans(weights: number[], totalSpan: number, minSpan: number) {
+  if (weights.length === 0) return [];
+  const totalWeight = weights.reduce((sum, weight) => sum + Math.max(0, weight), 0) || weights.length;
+  const rawSpans = weights.map((weight) => (totalSpan * Math.max(0, weight || 1)) / totalWeight);
+  const floor = Math.max(0, Math.min(minSpan, totalSpan / weights.length));
+  const floored = rawSpans.map((span) => span < floor);
+  const floorTotal = floored.filter(Boolean).length * floor;
+  if (floorTotal >= totalSpan) return Array.from({ length: weights.length }, () => totalSpan / weights.length);
+
+  const remainingRaw = rawSpans.reduce((sum, span, index) => sum + (floored[index] ? 0 : span), 0);
+  const remainingSpan = totalSpan - floorTotal;
+  return rawSpans.map((span, index) => (floored[index] ? floor : (span / remainingRaw) * remainingSpan));
+}
+
+function goalscapeSectorWeights(goals: GoalNode[], focusContext: GoalscapeFocusContext) {
+  const hasSelectedPathSibling = Boolean(
+    focusContext.activeSelectionId && goals.some((goal) => focusContext.selectedPathIds.has(goal.id))
+  );
+
+  return goals.map((goal) => {
+    const base = goalscapeSubtreeLeafCount(goal);
+    if (!hasSelectedPathSibling) return base;
+    return base * (focusContext.selectedPathIds.has(goal.id) ? goalscapeFocusPathWeightScale : goalscapeFocusSiblingWeightScale);
+  });
+}
+
+function goalscapeSectorsForSiblings(goals: GoalNode[], parentSector: GoalscapeSector, focusContext: GoalscapeFocusContext) {
+  const result = new Map<string, GoalscapeSector>();
+  if (goals.length === 0) return result;
+
+  if (goals.length === 1) {
+    result.set(goals[0].id, parentSector);
+    return result;
+  }
+
+  const spans = goalscapeWeightedSpans(
+    goalscapeSectorWeights(goals, focusContext),
+    goalscapeSectorSpan(parentSector),
+    Math.min(40, goalscapeSectorSpan(parentSector) / goals.length)
+  );
+  let cursor = parentSector.startAngle;
+  goals.forEach((goal, index) => {
+    const span = spans[index] ?? goalscapeSectorSpan(parentSector) / goals.length;
+    result.set(goal.id, { startAngle: cursor, endAngle: cursor + span });
+    cursor += span;
+  });
+  return result;
+}
+
+function rotateGoalscapeSector(sector: GoalscapeSector, delta: number): GoalscapeSector {
+  return {
+    startAngle: sector.startAngle + delta,
+    endAngle: sector.endAngle + delta
+  };
+}
+
+function buildGoalscapeSectorIndex(goals: GoalNode[], focusContext: GoalscapeFocusContext) {
+  const sectors = new Map<string, GoalscapeSector>();
+  const visit = (nodes: GoalNode[], parentSector: GoalscapeSector) => {
+    const siblingSectors = goalscapeSectorsForSiblings(nodes, parentSector, focusContext);
+    for (const node of nodes) {
+      const sector = siblingSectors.get(node.id) || parentSector;
+      sectors.set(node.id, sector);
+      visit(node.children || [], sector);
+    }
+  };
+
+  visit(goals, goalscapeFullSector);
+  const selectedSector = focusContext.activeSelectionId ? sectors.get(focusContext.activeSelectionId) : undefined;
+  if (!selectedSector) return sectors;
+
+  const delta = goalscapeFocusSectorMidAngle - goalscapeSectorMidAngle(selectedSector);
+  return new Map(Array.from(sectors.entries()).map(([id, sector]) => [id, rotateGoalscapeSector(sector, delta)]));
+}
+
+function buildGoalscapeDescendantSet(goal: GoalNode | undefined) {
+  if (!goal) return undefined;
+  const descendants = new Set<string>();
+  const visit = (nodes: GoalNode[]) => {
+    for (const node of nodes) {
+      descendants.add(node.id);
+      visit(node.children || []);
+    }
+  };
+  visit(goal.children || []);
+  return descendants;
+}
+
+function buildGoalscapeSelectedPathIds(goals: GoalNode[], selectedId: string | undefined) {
+  const path = new Set<string>();
+  if (!selectedId || selectedId === "root" || !findGoalById(goals, selectedId)) return path;
+
+  const parents = buildParentMap(goals);
+  let current: string | undefined = selectedId;
+  while (current && current !== "root") {
+    path.add(current);
+    current = parents.get(current);
+  }
+  return path;
+}
+
+function buildGoalscapeSubtreeSet(goal: GoalNode | undefined, descendants: Set<string> | undefined) {
+  const subtree = new Set<string>();
+  if (!goal) return subtree;
+  subtree.add(goal.id);
+  for (const descendant of descendants || []) subtree.add(descendant);
+  return subtree;
+}
+
+function buildGoalscapeFocusContext(goals: GoalNode[], selectedId: string | undefined, maxTreeDepth: number): GoalscapeFocusContext {
+  const selectedGoal = selectedId && selectedId !== "root" ? findGoalById(goals, selectedId) : undefined;
+  const selectedDescendantIds = buildGoalscapeDescendantSet(selectedGoal) || new Set<string>();
+  return {
+    activeSelectionId: selectedGoal?.id,
+    selectedPathIds: buildGoalscapeSelectedPathIds(goals, selectedGoal?.id),
+    selectedDescendantIds,
+    selectedSubtreeIds: buildGoalscapeSubtreeSet(selectedGoal, selectedDescendantIds),
+    maxTreeDepth
+  };
+}
+
+function countGoalscapeRenderDepths(goals: GoalNode[], treeDepth = 1, counts = new Map<number, number>()) {
+  for (const goal of goals) {
+    counts.set(treeDepth, (counts.get(treeDepth) ?? 0) + 1);
+    countGoalscapeRenderDepths(goal.children || [], treeDepth + 1, counts);
+  }
+  return counts;
+}
+
+function goalscapeSelectionEmphasis(goalId: string, focusContext: GoalscapeFocusContext) {
+  if (!focusContext.activeSelectionId) {
+    return {
+      treeDistance: 0,
+      scale: 1,
+      perspectiveScale: 1,
+      opacity: 1,
+      zIndexBoost: 0,
+      inwardShift: 0,
+      inSelectedSubtree: false,
+      inSelectedPath: false
+    };
+  }
+
+  const inSelectedSubtree = focusContext.selectedSubtreeIds.has(goalId);
+  const inSelectedPath = focusContext.selectedPathIds.has(goalId);
+  if (inSelectedSubtree) {
+    const isSelectedNode = goalId === focusContext.activeSelectionId;
+    return {
+      treeDistance: 0,
+      scale: isSelectedNode ? 1.18 : 1.14,
+      perspectiveScale: isSelectedNode ? 1.08 : 1.05,
+      opacity: 1,
+      zIndexBoost: isSelectedNode ? 120 : 90,
+      inwardShift: isSelectedNode ? 0.3 : 0.18,
+      inSelectedSubtree,
+      inSelectedPath
+    };
+  }
+
+  if (inSelectedPath) {
+    return {
+      treeDistance: 1,
+      scale: 0.78,
+      perspectiveScale: 0.9,
+      opacity: 0.82,
+      zIndexBoost: 30,
+      inwardShift: 0.04,
+      inSelectedSubtree,
+      inSelectedPath
+    };
+  }
+
+  return {
+    treeDistance: 2,
+    scale: 0.62,
+    perspectiveScale: 0.82,
+    opacity: 0.76,
+    zIndexBoost: -30,
+    inwardShift: 0,
+    inSelectedSubtree,
+    inSelectedPath
+  };
+}
+
+function goalscapeShiftTowardCenter(position: MapPosition, amount: number): MapPosition {
+  if (amount <= 0) return position;
+  return {
+    x: position.x + (goalscapeCenter.x - position.x) * amount,
+    y: position.y + (goalscapeCenter.y - position.y) * amount
+  };
+}
+
+function shouldCollapseGoalscapeChildren(
+  layout: Pick<GoalscapeNodeLayout, "node" | "depth" | "treeDepth" | "width" | "height">,
+  visibleDepth: number
+) {
+  const children = layout.node.children || [];
+  if (children.length === 0) return false;
+
+  if (layout.treeDepth >= visibleDepth) return true;
+  if (children.length > goalscapeOrbitCapacity(layout.treeDepth + 1, visibleDepth)) return true;
+  return layout.width < goalscapeCollapseMinWidth || layout.height < goalscapeCollapseMinHeight;
+}
+
+function isGoalscapeOutermostLeaf(goal: GoalNode, treeDepth: number, focusContext: GoalscapeFocusContext) {
+  return focusContext.maxTreeDepth > 1 && treeDepth === focusContext.maxTreeDepth && (goal.children || []).length === 0;
+}
+
+function shouldRenderGoalscapeNode(goal: GoalNode, treeDepth: number, focusContext: GoalscapeFocusContext) {
+  if (!isGoalscapeOutermostLeaf(goal, treeDepth, focusContext)) return true;
+  return Boolean(focusContext.activeSelectionId && focusContext.selectedSubtreeIds.has(goal.id));
+}
+
+function addGoalscapeHiddenChildCount(layout: GoalscapeNodeLayout, hiddenGoal: GoalNode) {
+  layout.childCount = (layout.childCount ?? 0) + 1 + countGoalscapeDescendants(hiddenGoal);
+}
+
+const goalscapeTopNodeBaseSize = { width: 118, height: 92 };
+
+function goalscapeTopNodeSize(densityScale: number, focusScale: number) {
+  const scale = clamp(densityScale * focusScale, 0.54, 1.12);
+  return {
+    width: Math.round(clamp(goalscapeTopNodeBaseSize.width * scale, 58, goalscapeTopNodeBaseSize.width * 1.12)),
+    height: Math.round(clamp(goalscapeTopNodeBaseSize.height * scale, 48, goalscapeTopNodeBaseSize.height * 1.12))
+  };
+}
+
 export function buildGoalscapeLayout(
   goals: GoalNode[],
   importanceOverrides: ImportanceOverrides,
   progressOverrides: ProgressOverrides,
   positionOverrides: MapPositionOverrides = {},
-  mapContextId = "root"
+  mapContextId = "root",
+  selectedId?: string
 ) {
+  const stats = collectGoalscapeTreeStats(goals);
+  const focusContext = buildGoalscapeFocusContext(goals, selectedId, stats.maxDepth);
+  const renderDepthCounts = countGoalscapeRenderDepths(goals);
+  const visibleDepth = goalscapeVisibleDepth(stats);
   const topImportance = normalizedImportance(goals, importanceOverrides);
-  const slots = assignGoalscapeSlots(goals);
+  const sectorIndex = buildGoalscapeSectorIndex(goals, focusContext);
   const layouts: GoalscapeNodeLayout[] = [];
 
-  goals.forEach((goal, index) => {
-    const slot = slots.get(goal.id) || fallbackGoalscapeSlot(index, goals.length);
-    const orbit = goalscapeOrbitForDepth(1);
-    const stableChildAnchor = constrainGoalscapePositionToOrbit({ x: slot.x, y: slot.y }, orbit);
-    const position = constrainGoalscapePositionToOrbit(
-      goalMapPosition(goal, { x: slot.x, y: slot.y }, positionOverrides, mapContextId),
-      orbit
-    );
-    const color = goalscapeNodeColor(goal, slot.color);
-    const importance = topImportance[goal.id] ?? 0;
-    layouts.push({
-      node: goal,
-      parentId: "root",
-      depth: 1,
-      x: position.x,
-      y: position.y,
-      width: slot.width,
-      height: slot.height,
-      color,
-      progress: weightedGoalProgress(goal, importanceOverrides, progressOverrides),
-      importance,
-      slotKey: slot.key,
-      variant: index
-    });
+  const appendChildren = (parentLayout: GoalscapeNodeLayout, parentSector: GoalscapeSector) => {
+    const children = parentLayout.node.children || [];
+    if (children.length === 0) return;
 
-    const children = goal.children;
+    if (shouldCollapseGoalscapeChildren(parentLayout, visibleDepth)) {
+      parentLayout.childCount = countGoalscapeDescendants(parentLayout.node);
+      return;
+    }
+
     const childImportance = normalizedImportance(children, importanceOverrides);
     children.forEach((child, childIndex) => {
-      const childSize = goalscapeChildNodeSize(slot, childIndex);
-      const offset = goalscapeChildOffset(stableChildAnchor, childIndex, children.length);
-      const childOrbit = goalscapeOrbitForDepth(2);
-      const childPosition = constrainGoalscapePositionToOrbit(
-        goalMapPosition(child, { x: stableChildAnchor.x + offset.x, y: stableChildAnchor.y + offset.y }, positionOverrides, mapContextId),
-        childOrbit
-      );
-      const childColor = goalscapeNodeColor(child, color);
-      layouts.push({
+      const treeDepth = parentLayout.treeDepth + 1;
+      if (!shouldRenderGoalscapeNode(child, treeDepth, focusContext)) {
+        addGoalscapeHiddenChildCount(parentLayout, child);
+        return;
+      }
+
+      const depth = treeDepth;
+      const sector = sectorIndex.get(child.id) || parentSector;
+      const sectorRole: GoalscapeSectorRole = "descendant";
+      const childAngle = goalscapeSectorMidAngle(sector);
+      const childOrbit = goalscapeOrbitForDepth(depth, visibleDepth);
+      const fallback = goalscapePointOnOrbit(childAngle, depth, visibleDepth);
+      const emphasis = goalscapeSelectionEmphasis(child.id, focusContext);
+      const childPosition = goalscapeShiftTowardCenter(constrainGoalscapePositionToSectorOrbit(
+        goalMapPosition(child, fallback, positionOverrides, mapContextId),
+        childOrbit,
+        sector
+      ), emphasis.inwardShift);
+      const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? children.length, depth, visibleDepth);
+      const childSize = goalscapeChildNodeSize(parentLayout, childIndex, depth, densityScale, emphasis.scale);
+      const childColor = goalscapeNodeColor(child, parentLayout.color);
+      const childLayout: GoalscapeNodeLayout = {
         node: child,
-        parentId: goal.id,
-        depth: 2,
+        parentId: parentLayout.node.id,
+        depth,
+        treeDepth,
+        visibleDepth,
         x: childPosition.x,
         y: childPosition.y,
         width: childSize.width,
@@ -1887,10 +2540,70 @@ export function buildGoalscapeLayout(
         color: childColor,
         progress: weightedGoalProgress(child, importanceOverrides, progressOverrides),
         importance: childImportance[child.id] ?? 0,
-        slotKey: slot.key,
-        variant: childIndex + index + 1
-      });
+        variant: layouts.length + childIndex,
+        treeDistance: focusContext.activeSelectionId ? emphasis.treeDistance : treeDepth,
+        perspectiveScale: emphasis.perspectiveScale,
+        opacity: emphasis.opacity,
+        zIndex: Math.round(1000 - depth * 10 + emphasis.zIndexBoost),
+        linkParentId: parentLayout.node.id,
+        sectorStartAngle: sector.startAngle,
+        sectorEndAngle: sector.endAngle,
+        sectorMidAngle: childAngle,
+        sectorRole
+      };
+
+      layouts.push(childLayout);
+      appendChildren(childLayout, sector);
     });
+  };
+
+  goals.forEach((goal, index) => {
+    const treeDepth = 1;
+    if (!shouldRenderGoalscapeNode(goal, treeDepth, focusContext)) return;
+
+    const depth = treeDepth;
+    const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
+    const sector = sectorIndex.get(goal.id) || goalscapeFullSector;
+    const sectorRole: GoalscapeSectorRole = "primary";
+    const angle = goalscapeSectorMidAngle(sector);
+    const fallback = goalscapePointOnOrbit(angle, depth, visibleDepth);
+    const emphasis = goalscapeSelectionEmphasis(goal.id, focusContext);
+    const position = goalscapeShiftTowardCenter(constrainGoalscapePositionToSectorOrbit(
+      goalMapPosition(goal, fallback, positionOverrides, mapContextId),
+      orbit,
+      sector
+    ), emphasis.inwardShift);
+    const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? goals.length, depth, visibleDepth);
+    const size = goalscapeTopNodeSize(densityScale, emphasis.scale);
+    const color = goalscapeNodeColor(goal, "#64748b");
+    const importance = topImportance[goal.id] ?? 0;
+    const layout: GoalscapeNodeLayout = {
+      node: goal,
+      parentId: "root",
+      depth,
+      treeDepth,
+      visibleDepth,
+      x: position.x,
+      y: position.y,
+      width: size.width,
+      height: size.height,
+      color,
+      progress: weightedGoalProgress(goal, importanceOverrides, progressOverrides),
+      importance,
+      variant: index,
+      treeDistance: focusContext.activeSelectionId ? emphasis.treeDistance : treeDepth,
+      perspectiveScale: emphasis.perspectiveScale,
+      opacity: emphasis.opacity,
+      zIndex: Math.round(1000 - depth * 10 + emphasis.zIndexBoost),
+      linkParentId: "root",
+      sectorStartAngle: sector.startAngle,
+      sectorEndAngle: sector.endAngle,
+      sectorMidAngle: angle,
+      sectorRole
+    };
+
+    layouts.push(layout);
+    appendChildren(layout, sector);
   });
 
   return layouts;
@@ -1914,6 +2627,35 @@ function goalscapeConnectionPath(from: { x: number; y: number }, to: { x: number
   const midX = (from.x + to.x) / 2;
   const midY = (from.y + to.y) / 2;
   return `M ${from.x} ${from.y} C ${midX} ${from.y}, ${midX} ${midY}, ${to.x} ${to.y}`;
+}
+
+function goalscapeSectorBandPath(layout: GoalscapeNodeLayout) {
+  const span = Math.min(goalscapeSectorSpan({ startAngle: layout.sectorStartAngle, endAngle: layout.sectorEndAngle }), 359.5);
+  const startAngle = layout.sectorStartAngle;
+  const endAngle = layout.sectorStartAngle + span;
+  const outer = goalscapeOrbitForDepth(layout.depth, layout.visibleDepth);
+  const inner =
+    layout.depth === 1
+      ? { depth: 0, cx: goalscapeCenter.x, cy: goalscapeCenter.y, rx: 104, ry: 76 }
+      : goalscapeOrbitForDepth(layout.depth - 1, layout.visibleDepth);
+  const startOuter = goalscapePointOnSpecificOrbit(startAngle, outer);
+  const endOuter = goalscapePointOnSpecificOrbit(endAngle, outer);
+  const endInner = goalscapePointOnSpecificOrbit(endAngle, inner);
+  const startInner = goalscapePointOnSpecificOrbit(startAngle, inner);
+  const largeArc = span > 180 ? 1 : 0;
+
+  return [
+    `M ${startInner.x.toFixed(1)} ${startInner.y.toFixed(1)}`,
+    `L ${startOuter.x.toFixed(1)} ${startOuter.y.toFixed(1)}`,
+    `A ${outer.rx.toFixed(1)} ${outer.ry.toFixed(1)} 0 ${largeArc} 1 ${endOuter.x.toFixed(1)} ${endOuter.y.toFixed(1)}`,
+    `L ${endInner.x.toFixed(1)} ${endInner.y.toFixed(1)}`,
+    `A ${inner.rx.toFixed(1)} ${inner.ry.toFixed(1)} 0 ${largeArc} 0 ${startInner.x.toFixed(1)} ${startInner.y.toFixed(1)}`,
+    "Z"
+  ].join(" ");
+}
+
+function goalscapeSectorOpacity(layout: GoalscapeNodeLayout) {
+  return clamp(0.18 - Math.max(0, layout.depth - 1) * 0.035, 0.075, 0.18);
 }
 
 function goalscapeLabelLines(title: string, maxChars: number, maxLines: number) {
@@ -1953,13 +2695,15 @@ function GoalscapeBridge({
   to,
   id,
   color,
-  width = 7
+  width = 7,
+  opacity = 1
 }: {
   from: { x: number; y: number };
   to: { x: number; y: number };
   id: string;
   color: string;
   width?: number;
+  opacity?: number;
 }) {
   const d = goalscapeConnectionPath(from, to);
 
@@ -1967,7 +2711,13 @@ function GoalscapeBridge({
     <g
       key={id}
       className="goalscape-bridge-group"
-      style={{ "--node-color": color, "--deck-width": width } as React.CSSProperties & { "--node-color": string; "--deck-width": number }}
+      style={
+        { "--node-color": color, "--deck-width": width, "--bridge-opacity": opacity } as React.CSSProperties & {
+          "--node-color": string;
+          "--deck-width": number;
+          "--bridge-opacity": number;
+        }
+      }
     >
       <path d={d} className="goalscape-bridge-glow" stroke={color} />
       <path d={d} className="goalscape-bridge-cables" />
@@ -1987,8 +2737,6 @@ const GoalMap = React.memo(function GoalMap({
   centerTitle,
   emptyLabel,
   onSelect,
-  onOpenMap,
-  onOpenParentMap,
   onPreviewPosition,
   onCommitPosition
 }: {
@@ -2002,26 +2750,39 @@ const GoalMap = React.memo(function GoalMap({
   centerTitle: string;
   emptyLabel: string;
   onSelect: (id: string) => void;
-  onOpenMap: (id: string) => void;
-  onOpenParentMap?: () => void;
   onPreviewPosition: (id: string, position: MapPosition) => void;
   onCommitPosition: (id: string, position: MapPosition) => void;
 }) {
   const layouts = useMemo(
-    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId),
-    [goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId]
+    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, selectedId),
+    [goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, selectedId]
   );
   const family = useMemo(() => selectedFamily(goals, selectedId), [goals, selectedId]);
-  const topLayouts = useMemo(() => layouts.filter((item) => item.depth === 1), [layouts]);
-  const childLayouts = useMemo(() => layouts.filter((item) => item.depth === 2), [layouts]);
-  const topLayoutById = useMemo(() => new Map(topLayouts.map((item) => [item.node.id, item])), [topLayouts]);
-  const visibleLayouts = useMemo(() => [...topLayouts, ...childLayouts], [topLayouts, childLayouts]);
+  const centerNodeId = centerId;
+  const centerDisplayTitle = centerTitle;
+  const visibleLayouts = useMemo(
+    () => [...layouts].sort((a, b) => a.zIndex - b.zIndex || a.depth - b.depth || a.node.id.localeCompare(b.node.id)),
+    [layouts]
+  );
+  const layoutById = useMemo(() => new Map(visibleLayouts.map((item) => [item.node.id, item])), [visibleLayouts]);
+  const parentById = useMemo(() => buildParentMap(goals), [goals]);
+  const visibleDepth = layouts[0]?.visibleDepth ?? 2;
   const visibleOrbitDepths = useMemo(
     () => Array.from(new Set(visibleLayouts.map((layout) => layout.depth))).sort((a, b) => a - b),
     [visibleLayouts]
   );
-  const centerGoal = useMemo(() => goals.find((item) => item.id === centerId) ?? null, [goals, centerId]);
-  const centerPearlTint = useMemo(() => goalscapeCenterPearlTint(centerId, centerGoal), [centerId, centerGoal]);
+  const visibleSectorBands = useMemo(
+    () =>
+      [...layouts].sort(
+        (a, b) =>
+          a.depth - b.depth ||
+          goalscapeSectorSpan({ startAngle: b.sectorStartAngle, endAngle: b.sectorEndAngle }) -
+            goalscapeSectorSpan({ startAngle: a.sectorStartAngle, endAngle: a.sectorEndAngle }) ||
+          a.node.id.localeCompare(b.node.id)
+      ),
+    [layouts]
+  );
+  const centerPearlTint = useMemo(() => goalscapeCenterPearlTint(centerNodeId, null), [centerNodeId]);
   const centerPearlPath = useMemo(
     () =>
       goalscapeBlobPath(
@@ -2033,7 +2794,7 @@ const GoalMap = React.memo(function GoalMap({
       ),
     []
   );
-  const centerLabel = useMemo(() => goalscapeLabelLines(centerTitle, 5, 2), [centerTitle]);
+  const centerLabel = useMemo(() => goalscapeLabelLines(centerDisplayTitle, 5, 2), [centerDisplayTitle]);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{
     id: string;
@@ -2042,6 +2803,7 @@ const GoalMap = React.memo(function GoalMap({
     nodeStart: MapPosition;
     current: MapPosition;
     orbit: GoalscapeOrbit;
+    sector: GoalscapeSector;
     moved: boolean;
     frame: number | null;
   } | null>(null);
@@ -2063,10 +2825,14 @@ const GoalMap = React.memo(function GoalMap({
     if (!drag || event.pointerId !== drag.pointerId) return;
     const point = pointFromPointer(event);
     if (!point) return;
-    const next = constrainGoalscapePositionToOrbit({
-      x: drag.nodeStart.x + point.x - drag.pointerStart.x,
-      y: drag.nodeStart.y + point.y - drag.pointerStart.y
-    }, drag.orbit);
+    const next = constrainGoalscapePositionToSectorOrbit(
+      {
+        x: drag.nodeStart.x + point.x - drag.pointerStart.x,
+        y: drag.nodeStart.y + point.y - drag.pointerStart.y
+      },
+      drag.orbit,
+      drag.sector
+    );
     drag.current = next;
     if (Math.hypot(next.x - drag.nodeStart.x, next.y - drag.nodeStart.y) > 3) drag.moved = true;
     if (drag.frame === null) {
@@ -2115,7 +2881,8 @@ const GoalMap = React.memo(function GoalMap({
       pointerStart,
       nodeStart: { x: layout.x, y: layout.y },
       current: { x: layout.x, y: layout.y },
-      orbit: goalscapeOrbitForDepth(layout.depth),
+      orbit: goalscapeOrbitForDepth(layout.depth, layout.visibleDepth),
+      sector: { startAngle: layout.sectorStartAngle, endAngle: layout.sectorEndAngle },
       moved: false,
       frame: null
     };
@@ -2133,9 +2900,16 @@ const GoalMap = React.memo(function GoalMap({
   }, [onSelect]);
 
   return (
-    <svg ref={svgRef} className={`goal-map goalscape-map${layouts.length > 20 ? " dense" : ""}`} viewBox="0 0 1200 760" role="img" aria-labelledby="map-title map-desc">
-      <title id="map-title">{centerTitle}目标地图</title>
-      <desc id="map-desc">用发光岛屿节点展示目标层级，并用连接线表达目标关系。</desc>
+    <svg
+      ref={svgRef}
+      className={`goal-map goalscape-map${layouts.length > 20 ? " dense" : ""}${selectedId !== centerId ? " focused" : ""}`}
+      viewBox="0 0 1200 760"
+      role="img"
+      aria-labelledby="map-title map-desc"
+      onClick={() => onSelect(centerId)}
+    >
+      <title id="map-title">{centerDisplayTitle}目标地图</title>
+      <desc id="map-desc">Pearl goals are arranged in circular sectors. Selecting a goal emphasizes its subtree in place.</desc>
       <defs>
         {/* Glow level filters for starlight cores */}
         <filter id="goalscape-glow-level-0" x="-50%" y="-50%" width="200%" height="200%">
@@ -2233,7 +3007,7 @@ const GoalMap = React.memo(function GoalMap({
           <stop offset="0%" stopColor={centerPearlTint.iridescent} stopOpacity="0.42" />
           <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
         </radialGradient>
-        {layouts.map((layout, index) => {
+        {visibleLayouts.map((layout, index) => {
           const nodePath = goalscapeBlobPath(layout.x, layout.y, layout.width, layout.height, layout.variant);
           return (
             <React.Fragment key={`${layout.node.id}-bottle-defs`}>
@@ -2255,53 +3029,68 @@ const GoalMap = React.memo(function GoalMap({
         })}
       </defs>
 
+      <g className="goalscape-sectors" aria-hidden="true">
+        {visibleSectorBands.map((layout) => (
+          <path
+            key={`${layout.node.id}-sector`}
+            className="goalscape-sector-band"
+            data-depth={layout.depth}
+            data-role={layout.sectorRole}
+            d={goalscapeSectorBandPath(layout)}
+            style={
+              {
+                "--sector-color": layout.color,
+                "--sector-opacity": goalscapeSectorOpacity(layout)
+              } as React.CSSProperties & {
+                "--sector-color": string;
+                "--sector-opacity": number;
+              }
+            }
+          />
+        ))}
+      </g>
+
       <g className="goalscape-orbits" aria-hidden="true">
         {visibleOrbitDepths.map((depth) => {
-          const orbit = goalscapeOrbitForDepth(depth);
+          const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
           return <ellipse key={depth} data-depth={depth} cx={orbit.cx} cy={orbit.cy} rx={orbit.rx} ry={orbit.ry} />;
         })}
       </g>
 
       <g className="goalscape-connections" aria-hidden="true">
-        {topLayouts.map((layout) => (
-          <GoalscapeBridge
-            key={`center-${layout.node.id}`}
-            from={goalscapeCenter}
-            to={layout}
-            id={`center-${layout.node.id}`}
-            color={layout.color}
-          />
-        ))}
-        {childLayouts.map((layout) => {
-          const parent = topLayoutById.get(layout.parentId);
+        {visibleLayouts.map((layout) => {
+          let parentId = layout.linkParentId;
+          let parent = parentId === "root" || parentId === centerNodeId ? goalscapeCenter : layoutById.get(parentId);
+          while (!parent && parentId && parentId !== "root") {
+            parentId = parentById.get(parentId) || "root";
+            parent = parentId === "root" || parentId === centerNodeId ? goalscapeCenter : layoutById.get(parentId);
+          }
           return parent ? (
             <GoalscapeBridge
-              key={`child-${layout.node.id}`}
+              key={`${layout.linkParentId}-${layout.node.id}`}
               from={parent}
               to={layout}
-              id={`child-${layout.node.id}`}
+              id={`${layout.linkParentId}-${layout.node.id}`}
               color={layout.color}
-              width={4}
+              width={(layout.depth === 1 ? 7 : Math.max(3, 6.2 - layout.depth * 0.85)) * clamp(layout.perspectiveScale, 0.55, 1.08)}
+              opacity={clamp(layout.opacity + 0.08, 0.25, 1)}
             />
           ) : null;
         })}
       </g>
 
       <g
-        className={selectedId === centerId ? "goalscape-center active" : "goalscape-center"}
+        className={selectedId === centerNodeId ? "goalscape-center active" : "goalscape-center"}
         role="button"
         tabIndex={0}
         focusable="true"
         style={{ "--center-glow": centerPearlTint.glow } as React.CSSProperties & { "--center-glow": string }}
-        onClick={() => onSelect(centerId)}
-        onDoubleClick={(event) => {
-          if (!onOpenParentMap) return;
-          event.preventDefault();
+        onClick={(event) => {
           event.stopPropagation();
-          onOpenParentMap();
+          onSelect(centerId);
         }}
         onKeyDown={(event) => selectOnKey(event, centerId)}
-        aria-label={centerTitle}
+        aria-label={selectedId !== centerId ? `${centerDisplayTitle}，点击返回地图中心` : centerDisplayTitle}
       >
         <GoalscapeCenterAstrolabe cx={goalscapeCenter.x} cy={goalscapeCenter.y} />
 
@@ -2394,10 +3183,10 @@ const GoalMap = React.memo(function GoalMap({
         </g>
       </g>
 
-      {layouts.map((layout, index) => {
+      {visibleLayouts.map((layout, index) => {
         const active = selectedId === layout.node.id;
         const related = !family || family.has(layout.node.id);
-        const opensSubmap = canOpenGoalSubmap(layout);
+        const depthTone = layout.perspectiveScale >= 0.98 ? " front" : layout.opacity <= 0.58 ? " back" : "";
         const Icon = goalIconComponent(layout.node);
         const visualMetrics = goalscapeNodeVisualMetrics(layout);
         const label = goalscapeLabelLines(layout.node.title, layout.depth === 1 ? 5 : 6, 2);
@@ -2406,27 +3195,36 @@ const GoalMap = React.memo(function GoalMap({
         const clipPathId = `goalscape-node-clip-${index}`;
         const nodePath = goalscapeBlobPath(layout.x, layout.y, layout.width, layout.height, layout.variant);
         const progressFill = goalscapeProgressFillGeometry(layout.y, layout.height, layout.progress);
+        const childCount = layout.childCount ?? 0;
+        const badgeLabel = childCount > 99 ? "+99" : `+${childCount}`;
+        const badgeRadius = clamp(9 + badgeLabel.length * 2.1, 12, 18);
+        const badgeX = layout.x + layout.width * 0.34;
+        const badgeY = layout.y - layout.height * 0.36;
         return (
           <g
             key={layout.node.id}
-            className={`goalscape-node depth-${layout.depth}${active ? " active" : ""}${related ? "" : " dim"}${draggingId === layout.node.id ? " dragging" : ""}`}
+            className={`goalscape-node depth-${layout.depth}${depthTone}${active ? " active" : ""}${related ? "" : " dim"}${draggingId === layout.node.id ? " dragging" : ""}`}
             role="button"
             tabIndex={0}
             focusable="true"
-            aria-label={`${layout.node.title}，进度 ${layout.progress}%${opensSubmap ? "，双击打开目标地图" : ""}`}
+            data-sector-role={layout.sectorRole}
+            aria-label={`${layout.node.title}，进度 ${layout.progress}%${childCount ? `，折叠 ${childCount} 个后代` : ""}`}
             style={
               {
                 "--node-color": layout.color,
                 "--node-icon-size": `${visualMetrics.iconSize}px`,
                 "--node-icon-glyph-size": `${visualMetrics.iconGlyphSize}px`,
                 "--node-title-size": `${visualMetrics.titleSize}px`,
-                "--node-progress-size": `${visualMetrics.progressSize}px`
+                "--node-progress-size": `${visualMetrics.progressSize}px`,
+                "--node-depth-scale": layout.perspectiveScale,
+                opacity: layout.opacity
               } as React.CSSProperties & {
                 "--node-color": string;
                 "--node-icon-size": string;
                 "--node-icon-glyph-size": string;
                 "--node-title-size": string;
                 "--node-progress-size": string;
+                "--node-depth-scale": number;
               }
             }
             onPointerDown={(event) => startNodeDrag(event, layout)}
@@ -2437,13 +3235,8 @@ const GoalMap = React.memo(function GoalMap({
                 event.stopPropagation();
                 return;
               }
-              onSelect(layout.node.id);
-            }}
-            onDoubleClick={(event) => {
-              if (!opensSubmap) return;
-              event.preventDefault();
               event.stopPropagation();
-              onOpenMap(layout.node.id);
+              onSelect(layout.node.id);
             }}
             onKeyDown={(event) => selectOnKey(event, layout.node.id)}
           >
@@ -2540,6 +3333,14 @@ const GoalMap = React.memo(function GoalMap({
               <text className="goalscape-node-progress" x={layout.x} y={layout.y + visualMetrics.progressY}>
                 {layout.progress}%
               </text>
+              {childCount > 0 && (
+                <g className="goalscape-node-badge" aria-hidden="true">
+                  <circle cx={badgeX} cy={badgeY} r={badgeRadius} />
+                  <text x={badgeX} y={badgeY + 4}>
+                    {badgeLabel}
+                  </text>
+                </g>
+              )}
             </g>
           </g>
         );
@@ -2556,6 +3357,7 @@ const GoalMap = React.memo(function GoalMap({
 
 const GoalDetailPanel = React.memo(function GoalDetailPanel({
   selectedGoal,
+  activeGoalMap,
   cachedDraft,
   topGoals,
   saving,
@@ -2569,6 +3371,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   onOpenAi
 }: {
   selectedGoal: GoalNode | undefined;
+  activeGoalMap?: GoalMap;
   cachedDraft?: EditDraft;
   topGoals: GoalNode[];
   saving: boolean;
@@ -2608,19 +3411,11 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
       <aside className="detail-panel" aria-live="polite">
         <div className="detail-head root-head">
           <div className="goal-heading">
-            <p className="eyebrow">整体目标</p>
-            <h2>目标网络</h2>
+            <p className="eyebrow">目标地图</p>
+            <h2>{goalMapCenterTitle(activeGoalMap)}</h2>
           </div>
           <span className="status-badge active">地图</span>
         </div>
-
-        <section className="root-intro" aria-label="目标网络介绍">
-          <h3>把人生方向变成清晰可推进的地图</h3>
-          <p>
-            目标网络帮你把长期愿景、阶段目标和下一步行动连接在一起。你可以一眼看清重心在哪里、哪些目标正在推进，
-            也能随时调整优先级，让每天的选择都更靠近真正重要的结果。
-          </p>
-        </section>
 
         <section>
           <h3>顶层目标</h3>

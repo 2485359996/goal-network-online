@@ -6,6 +6,7 @@ import type { GoalNode } from "../src/shared/types";
 const ownerUserId = process.env.IMPORT_OWNER_USER_ID?.trim();
 const vaultRoot = process.env.GOAL_NETWORK_VAULT;
 const workspaceName = process.env.IMPORT_WORKSPACE_NAME?.trim() || "Imported Goal Network";
+const defaultGoalMapName = "目标网络";
 
 function relationTitle(value: string) {
   return titleFromWikilink(value).trim();
@@ -64,6 +65,29 @@ async function main() {
     if (membership.error) throw membership.error;
   }
 
+  const existingGoalMap = await admin
+    .from("goal_maps")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("name", defaultGoalMapName)
+    .maybeSingle();
+  if (existingGoalMap.error) throw existingGoalMap.error;
+
+  let goalMapId = String(existingGoalMap.data?.id ?? "");
+  if (!goalMapId) {
+    const goalMap = await admin
+      .from("goal_maps")
+      .insert({
+        workspace_id: workspaceId,
+        name: defaultGoalMapName,
+        sort_order: 0
+      })
+      .select("id")
+      .single();
+    if (goalMap.error) throw goalMap.error;
+    goalMapId = goalMap.data.id as string;
+  }
+
   const titleToDbId = new Map<string, string>();
   for (const goal of sourceGoals.flatGoals) {
     const parentTitle = relationTitle(goal.parent);
@@ -71,6 +95,7 @@ async function main() {
       .from("goals")
       .insert({
         workspace_id: workspaceId,
+        goal_map_id: goalMapId,
         legacy_id: goal.id,
         title: goal.title,
         file_path: goal.filePath || markdownPath(goal.title, relationTitle(goal.domain) || goal.title, parentTitle),

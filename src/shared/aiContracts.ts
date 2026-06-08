@@ -35,6 +35,23 @@ const baseGoalRequestSchema = z.object({
   siblings: z.array(aiGoalContextSchema)
 }).strict();
 
+const aiGoalMapContextSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1)
+}).strict();
+
+const aiGoalDraftSchema = z.object({
+  title: z.string(),
+  domain: z.string(),
+  horizon: z.string(),
+  priority: z.number().min(0).max(100),
+  progress: z.number().min(0).max(100),
+  summary: z.string(),
+  successSignals: z.array(z.string()),
+  actionCandidates: z.array(aiActionCandidateInputSchema),
+  reviewQuestions: z.array(z.string())
+}).strict();
+
 export const improveGoalRequestSchema = baseGoalRequestSchema;
 export const suggestSubgoalsRequestSchema = baseGoalRequestSchema;
 export const diagnoseBranchRequestSchema = baseGoalRequestSchema.extend({
@@ -42,6 +59,16 @@ export const diagnoseBranchRequestSchema = baseGoalRequestSchema.extend({
 }).strict();
 export const suggestWeeklyActionsRequestSchema = baseGoalRequestSchema.extend({
   branchGoals: z.array(aiGoalContextSchema)
+}).strict();
+export const draftGoalRequestSchema = z.object({
+  mode: z.enum(["top", "subgoal", "sibling"]),
+  goalMap: aiGoalMapContextSchema,
+  parentGoal: aiGoalContextSchema.optional(),
+  sourceGoal: aiGoalContextSchema.optional(),
+  siblings: z.array(aiGoalContextSchema),
+  existingTitles: z.array(z.string()),
+  domainCandidates: z.array(z.string()),
+  draft: aiGoalDraftSchema
 }).strict();
 
 export const aiSubgoalSuggestionSchema = z.object({
@@ -93,6 +120,19 @@ export const suggestWeeklyActionsResponseSchema = z.object({
   warnings: warningsSchema
 }).strict();
 
+export const draftGoalResponseSchema = z.object({
+  title: z.string().min(1),
+  domain: z.string().optional(),
+  horizon: z.string().optional(),
+  priority: z.number().min(0).max(100).optional(),
+  progress: z.number().min(0).max(100).optional(),
+  summary: z.string().optional(),
+  successSignals: z.array(z.string()).optional(),
+  actionCandidates: z.array(aiActionCandidateInputSchema).optional(),
+  reviewQuestions: z.array(z.string()).optional(),
+  warnings: warningsSchema
+}).strict();
+
 export const aiRouteContracts = {
   "improve-goal": {
     path: "/api/ai/improve-goal",
@@ -113,6 +153,11 @@ export const aiRouteContracts = {
     path: "/api/ai/suggest-weekly-actions",
     request: suggestWeeklyActionsRequestSchema,
     response: suggestWeeklyActionsResponseSchema
+  },
+  "draft-goal": {
+    path: "/api/ai/draft-goal",
+    request: draftGoalRequestSchema,
+    response: draftGoalResponseSchema
   }
 } as const;
 
@@ -124,10 +169,12 @@ export type AiImproveGoalRequest = z.infer<typeof improveGoalRequestSchema>;
 export type AiSuggestSubgoalsRequest = z.infer<typeof suggestSubgoalsRequestSchema>;
 export type AiDiagnoseBranchRequest = z.infer<typeof diagnoseBranchRequestSchema>;
 export type AiSuggestWeeklyActionsRequest = z.infer<typeof suggestWeeklyActionsRequestSchema>;
+export type AiDraftGoalRequest = z.infer<typeof draftGoalRequestSchema>;
 export type AiImproveGoalResponse = z.infer<typeof improveGoalResponseSchema>;
 export type AiSuggestSubgoalsResponse = z.infer<typeof suggestSubgoalsResponseSchema>;
 export type AiDiagnoseBranchResponse = z.infer<typeof diagnoseBranchResponseSchema>;
 export type AiSuggestWeeklyActionsResponse = z.infer<typeof suggestWeeklyActionsResponseSchema>;
+export type AiDraftGoalResponse = z.infer<typeof draftGoalResponseSchema>;
 export type AiSubgoalSuggestion = z.infer<typeof aiSubgoalSuggestionSchema>;
 export type AiFinding = z.infer<typeof aiFindingSchema>;
 export type AiWeeklyActionSuggestion = z.infer<typeof aiWeeklyActionSchema>;

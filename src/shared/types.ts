@@ -12,6 +12,12 @@ export interface GoalMapPosition {
   y: number;
 }
 
+export interface GoalMap {
+  id: string;
+  name: string;
+  sortOrder: number;
+}
+
 export type GoalActionCandidateInput = GoalActionCandidate | string;
 
 export interface GoalSections {
@@ -25,6 +31,7 @@ export interface GoalSections {
 
 export interface GoalNode {
   id: string;
+  goalMapId: string;
   title: string;
   filePath: string;
   status: GoalStatus;
@@ -66,6 +73,7 @@ export interface GoalGraphEdge {
 
 export interface GoalsResponse {
   workspaceId?: string;
+  goalMaps: GoalMap[];
   goals: GoalNode[];
   flatGoals: GoalNode[];
   graph: {
@@ -98,6 +106,7 @@ export interface GoalPatchInput {
 
 export interface GoalCreateInput {
   title: string;
+  goalMapId: string;
   domain: string;
   parent?: string;
   horizon?: string;
@@ -110,6 +119,14 @@ export interface GoalCreateInput {
   successSignals?: string[];
   actionCandidates?: GoalActionCandidateInput[];
   reviewQuestions?: string[];
+}
+
+export interface GoalMapCreateInput {
+  name: string;
+}
+
+export interface GoalMapPatchInput {
+  name?: string;
 }
 
 export interface GoalRelationsInput {
