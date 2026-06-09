@@ -8,11 +8,19 @@ import {
   goalMapCenterTitle,
   goalscapeCenter,
   goalscapeCenterPearlSize,
+  goalscapeCenterVisualMode,
+  goalHasMapPosition,
+  mapAddActionAvailability,
+  mapPositionPreviewForContext,
   goalscapeNodeDensity,
   goalscapeOrbitForDepth,
   goalscapeProgressFillGeometry,
   goalscapeStarlightCoreRadius,
+  pruneSavedMapPositionPreviews,
+  shouldApplyGoalsResponse,
   shouldShowFirstGoalMapCta,
+  withMapPositionPreview,
+  withoutMapPositionPreview,
   weightedGoalProgress
 } from "./main";
 
@@ -40,33 +48,12 @@ function angularDistanceDegrees(a: number, b: number) {
   return Math.abs(((a - b + 540) % 360) - 180);
 }
 
-type SectorLayout = ReturnType<typeof buildGoalscapeLayout>[number] & {
-  sectorStartAngle?: number;
-  sectorEndAngle?: number;
-  sectorMidAngle?: number;
-  sectorRole?: "primary" | "descendant" | "ancestor" | "context";
-};
-
-function expectSectorLayout(layout: ReturnType<typeof buildGoalscapeLayout>[number] | undefined) {
-  expect(layout).toBeDefined();
-  const sectorLayout = layout as SectorLayout;
-  expect(sectorLayout.sectorStartAngle).toBeTypeOf("number");
-  expect(sectorLayout.sectorEndAngle).toBeTypeOf("number");
-  expect(sectorLayout.sectorMidAngle).toBeTypeOf("number");
-  expect(sectorLayout.sectorRole).toBeTypeOf("string");
-  return sectorLayout as Required<Pick<SectorLayout, "sectorStartAngle" | "sectorEndAngle" | "sectorMidAngle" | "sectorRole">> &
-    ReturnType<typeof buildGoalscapeLayout>[number];
+function relativeAngleDegrees(angle: number, center: number) {
+  return ((angle - center + 540) % 360) - 180;
 }
 
-function sectorSpan(layout: SectorLayout) {
-  return (layout.sectorEndAngle ?? 0) - (layout.sectorStartAngle ?? 0);
-}
-
-function expectSectorInside(child: SectorLayout, parent: SectorLayout) {
-  expect(child.sectorStartAngle).toBeGreaterThanOrEqual((parent.sectorStartAngle ?? 0) - 0.001);
-  expect(child.sectorEndAngle).toBeLessThanOrEqual((parent.sectorEndAngle ?? 0) + 0.001);
-  expect(child.sectorMidAngle).toBeGreaterThanOrEqual((parent.sectorStartAngle ?? 0) - 0.001);
-  expect(child.sectorMidAngle).toBeLessThanOrEqual((parent.sectorEndAngle ?? 0) + 0.001);
+function expectAngleClose(actual: number, expected: number) {
+  expect(angularDistanceDegrees(actual, expected)).toBeLessThan(0.25);
 }
 
 function buildGoalscapeLayoutWithSelection(goals: GoalNode[], selectedId: string) {
@@ -84,6 +71,17 @@ function buildGoalscapeLayoutWithSelection(goals: GoalNode[], selectedId: string
 
 function layoutIds(layouts: ReturnType<typeof buildGoalscapeLayout>) {
   return layouts.map((layout) => layout.node.id);
+}
+
+function layoutSnapshot(layouts: ReturnType<typeof buildGoalscapeLayout>) {
+  return layouts.map((layout) => ({
+    id: layout.node.id,
+    x: Math.round(layout.x),
+    y: Math.round(layout.y),
+    width: layout.width,
+    height: layout.height,
+    opacity: layout.opacity
+  }));
 }
 
 describe("goalscape layout", () => {
@@ -116,31 +114,133 @@ describe("goalscape layout", () => {
 
     expect(goalscapeCenter).toMatchObject({ x: 600, y: 380 });
     expect(compositionCenter.x).toBeCloseTo(600, -1);
-    expect(Math.abs(compositionCenter.y - 380)).toBeLessThan(10);
+    expect(Math.abs(compositionCenter.y - 380)).toBeLessThan(12);
   });
 
-  it("lays out the first ring as contiguous weighted sunburst sectors from twelve o'clock", () => {
+  it("uses goal center visuals after drilling into a goal", () => {
+    const centerGoal = goal("focus", "个人成长");
+
+    expect(goalscapeCenterVisualMode("map-1", null)).toBe("map");
+    expect(goalscapeCenterVisualMode(centerGoal.id, centerGoal)).toBe("goal");
+  });
+
+  it("keeps both add-target actions visible at the map center", () => {
+    expect(
+      mapAddActionAvailability({
+        mapCenterSelected: true,
+        hasActiveGoalMap: true,
+        hasSelectedGoal: false,
+        canAddSibling: false,
+        saving: false
+      })
+    ).toEqual({
+      subgoalDisabled: false,
+      siblingDisabled: true,
+      subgoalUsesTopGoal: true
+    });
+  });
+
+  it("enables sibling add action when a selected goal can create a sibling", () => {
+    expect(
+      mapAddActionAvailability({
+        mapCenterSelected: false,
+        hasActiveGoalMap: true,
+        hasSelectedGoal: true,
+        canAddSibling: true,
+        saving: false
+      })
+    ).toMatchObject({
+      subgoalDisabled: false,
+      siblingDisabled: false,
+      subgoalUsesTopGoal: false
+    });
+  });
+
+  it("lays out top-level goals evenly around the full orbit from twelve o'clock", () => {
     const alpha = goal("alpha");
     const beta = { ...goal("beta"), children: [goal("beta-a"), goal("beta-b")] };
     const gamma = goal("gamma");
     const layouts = buildGoalscapeLayout([alpha, beta, gamma], {}, {});
-    const topLayouts = [alpha, beta, gamma].map((item) => expectSectorLayout(layouts.find((layout) => layout.node.id === item.id)));
+    const topLayouts = [alpha, beta, gamma].map((item) => {
+      const layout = layouts.find((itemLayout) => itemLayout.node.id === item.id);
+      expect(layout).toBeDefined();
+      return layout!;
+    });
     const orbit = goalscapeOrbitForDepth(1, topLayouts[0].visibleDepth);
 
-    expect(topLayouts.map((layout) => layout.sectorStartAngle)).toEqual([
-      expect.closeTo(-90, 3),
-      expect.closeTo(0, 3),
-      expect.closeTo(180, 3)
-    ]);
-    expect(topLayouts.map((layout) => layout.sectorEndAngle)).toEqual([
-      expect.closeTo(0, 3),
-      expect.closeTo(180, 3),
-      expect.closeTo(270, 3)
-    ]);
-    expect(topLayouts.reduce((sum, layout) => sum + sectorSpan(layout), 0)).toBeCloseTo(360, 3);
+    expectAngleClose(angleDegreesFromCenter(topLayouts[0]), -90);
+    expectAngleClose(angleDegreesFromCenter(topLayouts[1]), 30);
+    expectAngleClose(angleDegreesFromCenter(topLayouts[2]), 150);
     for (const layout of topLayouts) {
-      expect(angularDistanceDegrees(angleDegreesFromCenter(layout), layout.sectorMidAngle)).toBeLessThan(0.001);
       expect(ellipseValue(layout, orbit)).toBeCloseTo(1, 2);
+    }
+  });
+
+  it("keeps fallback top-level positions stable when a goal is appended", () => {
+    const initial = buildGoalscapeLayout([goal("alpha"), goal("beta"), goal("gamma")], {}, {});
+    const appended = buildGoalscapeLayout([goal("alpha"), goal("beta"), goal("gamma"), goal("delta")], {}, {});
+
+    for (const id of ["alpha", "beta", "gamma"]) {
+      const before = initial.find((layout) => layout.node.id === id);
+      const after = appended.find((layout) => layout.node.id === id);
+      expect(before).toBeDefined();
+      expect(after).toBeDefined();
+      expectAngleClose(angleDegreesFromCenter(after!), angleDegreesFromCenter(before!));
+    }
+  });
+
+  it("fans child goals around the parent angle without sector fields", () => {
+    const parent = { ...goal("parent"), children: [goal("child-a"), goal("child-b"), goal("child-c")] };
+    const layouts = buildGoalscapeLayout([parent], {}, {});
+    const parentLayout = layouts.find((layout) => layout.node.id === "parent");
+    const childAngles = ["child-a", "child-b", "child-c"].map((id) => {
+      const layout = layouts.find((item) => item.node.id === id);
+      expect(layout).toBeDefined();
+      expect("sectorStartAngle" in layout!).toBe(false);
+      expect("sectorEndAngle" in layout!).toBe(false);
+      expect("sectorRole" in layout!).toBe(false);
+      return angleDegreesFromCenter(layout!);
+    });
+
+    expect(parentLayout).toBeDefined();
+    expectAngleClose(angleDegreesFromCenter(parentLayout!), -90);
+    expectAngleClose(childAngles[0], -90);
+    expectAngleClose(childAngles[1], -120);
+    expectAngleClose(childAngles[2], -60);
+  });
+
+  it("keeps fallback child positions stable when a sibling is appended", () => {
+    const initialParent = { ...goal("parent"), children: [goal("child-a"), goal("child-b")] };
+    const appendedParent = { ...goal("parent"), children: [goal("child-a"), goal("child-b"), goal("child-c")] };
+    const initial = buildGoalscapeLayout([initialParent], {}, {});
+    const appended = buildGoalscapeLayout([appendedParent], {}, {});
+
+    for (const id of ["child-a", "child-b"]) {
+      const before = initial.find((layout) => layout.node.id === id);
+      const after = appended.find((layout) => layout.node.id === id);
+      expect(before).toBeDefined();
+      expect(after).toBeDefined();
+      expectAngleClose(angleDegreesFromCenter(after!), angleDegreesFromCenter(before!));
+    }
+  });
+
+  it("keeps child fans inside each top-level parent's angular lane", () => {
+    const roots = Array.from({ length: 8 }, (_, rootIndex) => ({
+      ...goal(`root-${rootIndex}`),
+      children: Array.from({ length: 4 }, (_, childIndex) => goal(`root-${rootIndex}-child-${childIndex}`))
+    }));
+    const layouts = buildGoalscapeLayout(roots, {}, {});
+    const parentLane = (360 / roots.length) * 0.78;
+
+    for (const root of roots) {
+      const parentLayout = layouts.find((layout) => layout.node.id === root.id);
+      expect(parentLayout).toBeDefined();
+      const parentAngle = angleDegreesFromCenter(parentLayout!);
+      for (const child of root.children) {
+        const childLayout = layouts.find((layout) => layout.node.id === child.id);
+        expect(childLayout).toBeDefined();
+        expect(angularDistanceDegrees(angleDegreesFromCenter(childLayout!), parentAngle)).toBeLessThanOrEqual(parentLane / 2 + 0.25);
+      }
     }
   });
 
@@ -161,36 +261,127 @@ describe("goalscape layout", () => {
     expect(angleFromCenter(previewedLayout!)).toBeCloseTo(angleFromCenter(previewPosition), 2);
   });
 
-  it("keeps child goal positions stable while previewing a parent drag", () => {
-    const child = { ...goal("child"), children: [goal("child-leaf")] };
-    const parent = { ...goal("parent"), children: [child] };
-    const baselineChild = buildGoalscapeLayout([parent], {}, {}).find((layout) => layout.node.id === "child");
-    const draggedChild = buildGoalscapeLayout([parent], {}, {}, { parent: { x: 900, y: 510 } }).find((layout) => layout.node.id === "child");
+  it("matches saved map positions before clearing drag previews", () => {
+    const pending = { ...goal("pending"), map_positions: { root: { x: 260, y: 220 } } };
+    const saved = { ...goal("saved"), map_positions: { root: { x: 860, y: 520 } } };
 
-    expect(baselineChild).toBeDefined();
-    expect(draggedChild).toBeDefined();
-    expect(draggedChild!.x).toBeCloseTo(baselineChild!.x, 5);
-    expect(draggedChild!.y).toBeCloseTo(baselineChild!.y, 5);
+    expect(goalHasMapPosition(pending, "root", { x: 860, y: 520 })).toBe(false);
+    expect(goalHasMapPosition(saved, "root", { x: 860, y: 520 })).toBe(true);
+  });
+
+  it("ignores stale goal reload responses and state updates that finish after a newer request starts", () => {
+    expect(shouldApplyGoalsResponse(1, 2)).toBe(false);
+    expect(shouldApplyGoalsResponse(2, 2)).toBe(true);
+  });
+
+  it("keeps map position drag previews scoped to the active map context", () => {
+    const rootPreview = withMapPositionPreview({}, "root", "child", { x: 900, y: 510 });
+    const scopedPreview = withMapPositionPreview(rootPreview, "focus", "child", { x: 260, y: 220 });
+    const withoutScoped = withoutMapPositionPreview(scopedPreview, "focus", "child");
+
+    expect(mapPositionPreviewForContext(scopedPreview, "root").child).toEqual({ x: 900, y: 510 });
+    expect(mapPositionPreviewForContext(scopedPreview, "focus").child).toEqual({ x: 260, y: 220 });
+    expect(mapPositionPreviewForContext(withoutScoped, "focus").child).toBeUndefined();
+    expect(mapPositionPreviewForContext(withoutScoped, "root").child).toEqual({ x: 900, y: 510 });
+  });
+
+  it("clears only persisted drag previews from their matching map context", () => {
+    const saved = {
+      ...goal("child"),
+      map_positions: {
+        root: { x: 900, y: 510 },
+        focus: { x: 260, y: 220 }
+      }
+    };
+    const previews = withMapPositionPreview(
+      withMapPositionPreview(
+        withMapPositionPreview({}, "root", saved.id, { x: 900, y: 510 }),
+        "focus",
+        saved.id,
+        { x: 260, y: 220 }
+      ),
+      "other",
+      saved.id,
+      { x: 600, y: 690 }
+    );
+    const pruned = pruneSavedMapPositionPreviews(previews, [saved]);
+
+    expect(mapPositionPreviewForContext(pruned, "root")[saved.id]).toBeUndefined();
+    expect(mapPositionPreviewForContext(pruned, "focus")[saved.id]).toBeUndefined();
+    expect(mapPositionPreviewForContext(pruned, "other")[saved.id]).toEqual({ x: 600, y: 690 });
+  });
+
+  it("keeps a single parent's child fan centered after dragging the parent", () => {
+    const parent = { ...goal("parent"), children: [goal("child-a"), goal("child-b"), goal("child-c")] };
+    const baselineLayouts = buildGoalscapeLayout([parent], {}, {});
+    const draggedLayouts = buildGoalscapeLayout([parent], {}, {}, { parent: { x: 900, y: 510 } });
+    const baselineParent = baselineLayouts.find((layout) => layout.node.id === "parent");
+    const draggedParent = draggedLayouts.find((layout) => layout.node.id === "parent");
+
+    expect(baselineParent).toBeDefined();
+    expect(draggedParent).toBeDefined();
+    expect(angularDistanceDegrees(angleDegreesFromCenter(draggedParent!), angleDegreesFromCenter(baselineParent!))).toBeGreaterThan(20);
+
+    for (const layouts of [baselineLayouts, draggedLayouts]) {
+      const parentLayout = layouts.find((layout) => layout.node.id === "parent");
+      expect(parentLayout).toBeDefined();
+      const parentAngle = angleDegreesFromCenter(parentLayout!);
+      const childDeltas = ["child-a", "child-b", "child-c"].map((id) => {
+        const layout = layouts.find((item) => item.node.id === id);
+        expect(layout).toBeDefined();
+        return relativeAngleDegrees(angleDegreesFromCenter(layout!), parentAngle);
+      });
+
+      expect(Math.abs(childDeltas[0])).toBeLessThan(0.25);
+      expect(Math.abs(childDeltas[1] + 30)).toBeLessThan(0.25);
+      expect(Math.abs(childDeltas[2] - 30)).toBeLessThan(0.25);
+    }
+  });
+
+  it("keeps saved child positions attached to the dragged parent preview", () => {
+    const parent = {
+      ...goal("parent"),
+      children: [
+        { ...goal("child-a"), map_positions: { root: { x: 1090, y: 380 } } },
+        { ...goal("child-b"), map_positions: { root: { x: 600, y: 690 } } },
+        { ...goal("child-c"), map_positions: { root: { x: 110, y: 380 } } }
+      ]
+    };
+    const draggedLayouts = buildGoalscapeLayout([parent], {}, {}, { parent: { x: 900, y: 510 } });
+    const parentLayout = draggedLayouts.find((layout) => layout.node.id === "parent");
+
+    expect(parentLayout).toBeDefined();
+    const parentAngle = angleDegreesFromCenter(parentLayout!);
+    const childDeltas = ["child-a", "child-b", "child-c"].map((id) => {
+      const layout = draggedLayouts.find((item) => item.node.id === id);
+      expect(layout).toBeDefined();
+      return relativeAngleDegrees(angleDegreesFromCenter(layout!), parentAngle);
+    });
+
+    expect(Math.abs(childDeltas[0])).toBeLessThan(0.25);
+    expect(Math.abs(childDeltas[1] + 30)).toBeLessThan(0.25);
+    expect(Math.abs(childDeltas[2] - 30)).toBeLessThan(0.25);
   });
 
   it("scopes saved map positions to the current focus context", () => {
     const scoped = { ...goal("scoped"), map_positions: { root: { x: 420, y: 260 }, parent: { x: 880, y: 500 } } };
-    const fallbackLayout = expectSectorLayout(buildGoalscapeLayout([scoped], {}, {}, {}, "other")[0]);
+    const fallbackLayout = buildGoalscapeLayout([scoped], {}, {}, {}, "other")[0];
 
     expect(angleFromCenter(buildGoalscapeLayout([scoped], {}, {}, {}, "root")[0])).toBeCloseTo(angleFromCenter({ x: 420, y: 260 }), 2);
     expect(angleFromCenter(buildGoalscapeLayout([scoped], {}, {}, {}, "parent")[0])).toBeCloseTo(angleFromCenter({ x: 880, y: 500 }), 2);
-    expect(angularDistanceDegrees(angleDegreesFromCenter(fallbackLayout), fallbackLayout.sectorMidAngle)).toBeLessThan(0.001);
+    expect(angleDegreesFromCenter(fallbackLayout)).toBeCloseTo(-90, 3);
   });
 
   it("keeps custom positions inside the goalscape viewbox", () => {
     expect(clampGoalscapePosition({ x: -100, y: 999 })).toEqual({ x: 80, y: 690 });
   });
 
-  it("constrains arbitrary positions to an ellipse orbit", () => {
+  it("constrains arbitrary positions to a circular orbit", () => {
     const orbit = goalscapeOrbitForDepth(1);
     const constrained = constrainGoalscapePositionToOrbit({ x: 420, y: 260 }, orbit);
     const centered = constrainGoalscapePositionToOrbit(goalscapeCenter, orbit);
 
+    expect(orbit.rx).toBe(orbit.ry);
     expect(ellipseValue(constrained, orbit)).toBeCloseTo(1, 2);
     expect(angleFromCenter(constrained)).toBeCloseTo(angleFromCenter({ x: 420, y: 260 }), 2);
     expect(centered).toEqual({ x: orbit.cx, y: orbit.cy - orbit.ry });
@@ -209,7 +400,7 @@ describe("goalscape layout", () => {
     expect(ellipseValue(childLayout!, goalscapeOrbitForDepth(2, childLayout!.visibleDepth))).toBeCloseTo(1, 2);
   });
 
-  it("hides the outermost leaf ring by default and badges the parent", () => {
+  it("renders only two outer goal levels from the current center", () => {
     const branch = { ...goal("branch"), children: [goal("branch-leaf-a"), goal("branch-leaf-b")] };
     const other = { ...goal("other"), children: [goal("other-leaf")] };
     const layouts = buildGoalscapeLayout([branch, other], {}, {});
@@ -220,33 +411,36 @@ describe("goalscape layout", () => {
       | (ReturnType<typeof buildGoalscapeLayout>[number] & { childCount?: number })
       | undefined;
 
-    expect(layoutIds(layouts)).toEqual(["branch", "other"]);
-    expect(branchLayout?.childCount).toBe(2);
-    expect(otherLayout?.childCount).toBe(1);
+    expect(layoutIds(layouts)).toEqual(["branch", "branch-leaf-a", "branch-leaf-b", "other", "other-leaf"]);
+    expect(branchLayout?.childCount).toBeUndefined();
+    expect(otherLayout?.childCount).toBeUndefined();
   });
 
-  it("shows only the selected subtree's outermost leaves", () => {
-    const branch = { ...goal("branch"), children: [goal("branch-leaf-a"), goal("branch-leaf-b")] };
-    const other = { ...goal("other"), children: [goal("other-leaf")] };
-    const layouts = buildGoalscapeLayoutWithSelection([branch, other], "branch");
-
-    expect(layoutIds(layouts)).toEqual(["branch", "branch-leaf-a", "branch-leaf-b", "other"]);
-    expect((layouts.find((layout) => layout.node.id === "branch") as { childCount?: number } | undefined)?.childCount).toBeUndefined();
-    expect((layouts.find((layout) => layout.node.id === "other") as { childCount?: number } | undefined)?.childCount).toBe(1);
-  });
-
-  it("recursively lays out visible depth three nodes on matching orbits while hiding the outer leaf ring", () => {
+  it("hides goals deeper than two outer levels and badges their parent", () => {
     const greatGrandchild = goal("great-grandchild");
     const grandchild = { ...goal("grandchild"), children: [greatGrandchild] };
     const child = { ...goal("child"), children: [grandchild] };
     const parent = { ...goal("parent"), children: [child] };
     const layouts = buildGoalscapeLayout([parent], {}, {});
+    const childLayout = layouts.find((layout) => layout.node.id === "child") as
+      | (ReturnType<typeof buildGoalscapeLayout>[number] & { childCount?: number })
+      | undefined;
 
-    expect(layouts.map((layout) => layout.node.id)).toEqual(["parent", "child", "grandchild"]);
-    expect((layouts.find((layout) => layout.node.id === "grandchild") as { childCount?: number } | undefined)?.childCount).toBe(1);
+    expect(layouts.map((layout) => layout.node.id)).toEqual(["parent", "child"]);
+    expect(childLayout?.childCount).toBe(2);
     for (const layout of layouts) {
       expect(ellipseValue(layout, goalscapeOrbitForDepth(layout.depth, layout.visibleDepth))).toBeCloseTo(1, 2);
     }
+  });
+
+  it("shows hidden descendants after drilling into their parent goal", () => {
+    const greatGrandchild = goal("great-grandchild");
+    const grandchild = { ...goal("grandchild"), children: [greatGrandchild] };
+    const child = { ...goal("child"), children: [grandchild] };
+    const drilledLayouts = buildGoalscapeLayout(child.children, {}, {});
+
+    expect(layoutIds(drilledLayouts)).toEqual(["grandchild", "great-grandchild"]);
+    expect((drilledLayouts.find((layout) => layout.node.id === "great-grandchild") as { childCount?: number } | undefined)?.childCount).toBeUndefined();
   });
 
   it("collapses crowded descendants into a readable child-count badge", () => {
@@ -265,93 +459,13 @@ describe("goalscape layout", () => {
     expect(layouts.some((layout) => layout.node.id.startsWith("hidden-"))).toBe(false);
   });
 
-  it("expands the selected path sector and compresses unrelated sibling sectors", () => {
-    const focus = { ...goal("focus"), children: [goal("focus-leaf")] };
-    const sibling = { ...goal("sibling"), children: [goal("sibling-leaf")] };
-    const selectedTop = { ...goal("selected-top"), children: [focus, sibling] };
-    const otherTop = { ...goal("other-top"), children: [goal("other-leaf")] };
-    const neutralLayouts = buildGoalscapeLayout([selectedTop, otherTop], {}, {});
-    const selectedLayouts = buildGoalscapeLayoutWithSelection([selectedTop, otherTop], "focus");
-    const neutralTop = expectSectorLayout(neutralLayouts.find((layout) => layout.node.id === "selected-top"));
-    const focusedTop = expectSectorLayout(selectedLayouts.find((layout) => layout.node.id === "selected-top"));
-    const neutralOther = expectSectorLayout(neutralLayouts.find((layout) => layout.node.id === "other-top"));
-    const focusedOther = expectSectorLayout(selectedLayouts.find((layout) => layout.node.id === "other-top"));
-    const neutralFocus = expectSectorLayout(neutralLayouts.find((layout) => layout.node.id === "focus"));
-    const focusedFocus = expectSectorLayout(selectedLayouts.find((layout) => layout.node.id === "focus"));
-    const neutralSibling = expectSectorLayout(neutralLayouts.find((layout) => layout.node.id === "sibling"));
-    const focusedSibling = expectSectorLayout(selectedLayouts.find((layout) => layout.node.id === "sibling"));
-
-    expect(sectorSpan(focusedTop)).toBeGreaterThan(sectorSpan(neutralTop));
-    expect(sectorSpan(focusedOther)).toBeLessThan(sectorSpan(neutralOther));
-    expect(sectorSpan(focusedFocus)).toBeGreaterThan(sectorSpan(neutralFocus));
-    expect(sectorSpan(focusedSibling)).toBeLessThan(sectorSpan(neutralSibling));
-    expect(sectorSpan(focusedTop) + sectorSpan(focusedOther)).toBeCloseTo(360, 3);
-    expect(sectorSpan(focusedFocus) + sectorSpan(focusedSibling)).toBeCloseTo(sectorSpan(focusedTop), 3);
-  });
-
-  it("moves the selected subtree closer to the visual center while keeping ancestors and unrelated branches visible", () => {
-    const focusChild = goal("focus-child");
-    const focus = { ...goal("focus"), children: [focusChild] };
-    const parent = { ...goal("parent"), children: [focus, goal("parent-sibling")] };
+  it("does not change layout geometry when a goal is selected", () => {
+    const focus = { ...goal("focus"), children: [goal("focus-child")] };
     const other = { ...goal("other"), children: [goal("other-child")] };
-    const neutralLayouts = buildGoalscapeLayout([parent, other], {}, {});
-    const selectedLayouts = buildGoalscapeLayoutWithSelection([parent, other], "focus");
-    const neutralFocus = neutralLayouts.find((layout) => layout.node.id === "focus");
-    const selectedFocus = selectedLayouts.find((layout) => layout.node.id === "focus");
-    const ancestor = selectedLayouts.find((layout) => layout.node.id === "parent");
-    const unrelated = selectedLayouts.find((layout) => layout.node.id === "other");
+    const neutralLayouts = buildGoalscapeLayout([focus, other], {}, {});
+    const selectedLayouts = buildGoalscapeLayoutWithSelection([focus, other], "focus");
 
-    expect(neutralFocus).toBeDefined();
-    expect(selectedFocus).toBeDefined();
-    expect(distance(selectedFocus!, goalscapeCenter)).toBeLessThan(distance(neutralFocus!, goalscapeCenter));
-    expect(ancestor).toBeDefined();
-    expect(unrelated).toBeDefined();
-    expect(ancestor!.opacity).toBeGreaterThanOrEqual(0.75);
-    expect(unrelated!.opacity).toBeGreaterThanOrEqual(0.75);
-  });
-
-  it("enlarges the selected node and descendants while shrinking unrelated nodes", () => {
-    const focusChild = goal("focus-child");
-    const focus = { ...goal("focus"), children: [focusChild] };
-    const other = { ...goal("other"), children: [goal("other-child")] };
-    const layouts = buildGoalscapeLayoutWithSelection([focus, other], "focus");
-    const focusLayout = layouts.find((layout) => layout.node.id === "focus");
-    const focusChildLayout = layouts.find((layout) => layout.node.id === "focus-child");
-    const otherLayout = layouts.find((layout) => layout.node.id === "other");
-
-    expect(focusLayout).toBeDefined();
-    expect(focusChildLayout).toBeDefined();
-    expect(otherLayout).toBeDefined();
-    expect(layouts.find((layout) => layout.node.id === "other-child")).toBeUndefined();
-    expect(focusLayout!.width).toBeGreaterThan(otherLayout!.width);
-    expect(focusLayout!.height).toBeGreaterThan(otherLayout!.height);
-    expect(focusChildLayout!.width).toBeGreaterThan(otherLayout!.width);
-    expect(focusChildLayout!.height).toBeGreaterThan(otherLayout!.height);
-    expect(focusLayout!.opacity).toBe(1);
-    expect(otherLayout!.opacity).toBeGreaterThanOrEqual(0.75);
-    expect(otherLayout!.opacity).toBeLessThan(1);
-  });
-
-  it("keeps selected layouts in primary and descendant sectors instead of ancestor or context sectors", () => {
-    const firstGrandchild = goal("first-grandchild");
-    const secondGrandchild = goal("second-grandchild");
-    const first = { ...goal("first"), children: [firstGrandchild, secondGrandchild] };
-    const second = { ...goal("second"), children: [goal("third-grandchild")] };
-    const focus = { ...goal("focus"), children: [first, second] };
-    const root = { ...goal("root"), children: [focus] };
-    const layouts = buildGoalscapeLayoutWithSelection([root], "focus");
-    const firstLayout = expectSectorLayout(layouts.find((layout) => layout.node.id === "first"));
-    const secondLayout = expectSectorLayout(layouts.find((layout) => layout.node.id === "second"));
-    const firstGrandchildLayout = expectSectorLayout(layouts.find((layout) => layout.node.id === "first-grandchild"));
-    const secondGrandchildLayout = expectSectorLayout(layouts.find((layout) => layout.node.id === "third-grandchild"));
-
-    expect(layouts.map((layout) => layout.sectorRole)).not.toContain("ancestor");
-    expect(layouts.map((layout) => layout.sectorRole)).not.toContain("context");
-    expect(firstLayout.sectorEndAngle).toBeLessThanOrEqual(secondLayout.sectorStartAngle + 0.001);
-    expectSectorInside(firstLayout, expectSectorLayout(layouts.find((layout) => layout.node.id === "focus")));
-    expectSectorInside(secondLayout, expectSectorLayout(layouts.find((layout) => layout.node.id === "focus")));
-    expectSectorInside(firstGrandchildLayout, firstLayout);
-    expectSectorInside(secondGrandchildLayout, secondLayout);
+    expect(layoutSnapshot(selectedLayouts)).toEqual(layoutSnapshot(neutralLayouts));
   });
 
   it("returns to neutral depth semantics when the center is selected", () => {
@@ -402,8 +516,11 @@ describe("goalscape layout", () => {
     const innerOrbit = goalscapeOrbitForDepth(1);
     const outerOrbit = goalscapeOrbitForDepth(2);
 
-    expect(outerOrbit.rx - innerOrbit.rx).toBeGreaterThanOrEqual(180);
-    expect(outerOrbit.ry - innerOrbit.ry).toBeGreaterThanOrEqual(110);
+    expect(innerOrbit).toMatchObject({ rx: 174, ry: 174 });
+    expect(outerOrbit).toMatchObject({ rx: 300, ry: 300 });
+    expect(innerOrbit.rx).toBe(innerOrbit.ry);
+    expect(outerOrbit.rx).toBe(outerOrbit.ry);
+    expect(outerOrbit.rx - innerOrbit.rx).toBeGreaterThanOrEqual(120);
   });
 
   it("interpolates crystal node density and starlight core radius correctly", () => {

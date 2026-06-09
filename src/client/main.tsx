@@ -60,6 +60,102 @@ import {
   writeStoredTheme,
   type ThemePreference
 } from "./theme";
+import {
+  averageProgress,
+  blend,
+  buildParentMap,
+  clamp,
+  collectDescendants,
+  domainAccentToken,
+  domainBaseColor,
+  filterGoalTree,
+  filterGoalsByGoalMap,
+  findGoalById,
+  flattenGoals,
+  formatEmpty,
+  goalMapCenterTitle,
+  goalPath,
+  hexToRgb,
+  mediaQueryMatches,
+  normalizeHexColor,
+  normalizedImportance,
+  parentGoal,
+  percentValue,
+  priorityWeight,
+  progressValue,
+  rebalanceImportance,
+  shouldApplyGoalsResponse,
+  shouldShowFirstGoalMapCta,
+  siblingGoals,
+  titleFromLink,
+  uniqueDomainTitles,
+  weightedGoalProgress,
+  type ImportanceOverrides,
+  type ProgressOverrides
+} from "./goalUtils";
+import {
+  buildGoalscapeLayout,
+  clampGoalscapePosition,
+  constrainGoalscapePositionToOrbit,
+  goalHasMapPosition,
+  goalIconComponent,
+  goalMapPosition,
+  goalscapeBlobPath,
+  goalscapeCenter,
+  goalscapeCenterPearlSize,
+  goalscapeCenterPearlTint,
+  goalscapeCenterVisualMode,
+  goalscapeConnectionPath,
+  goalscapeLabelLines,
+  goalscapeLabelMaxChars,
+  goalscapeNodeColor,
+  goalscapeNodeDensity,
+  goalscapeNodeVisualMetrics,
+  goalscapeOrbitForDepth,
+  goalscapeProgressFillGeometry,
+  goalscapeStarlightCoreRadius,
+  goalscapeTopNodeBaseSize,
+  goalscapeTopNodeSize,
+  hasCustomMapPosition,
+  hasMapPositionOverride,
+  mapPositionPreviewForContext,
+  pruneSavedMapPositionPreviews,
+  withMapPositionPreview,
+  withoutMapPositionPreview,
+  type GoalscapeCenterPearlTint,
+  type GoalscapeNodeLayout,
+  type GoalscapeOrbit,
+  type MapPosition,
+  type MapPositionOverrides,
+  type MapPositionPreviewOverrides
+} from "./goalscapeLayout";
+
+// Re-export the goal-data helpers that the goalscape layout test imports from "./main".
+export {
+  filterGoalsByGoalMap,
+  goalMapCenterTitle,
+  shouldApplyGoalsResponse,
+  shouldShowFirstGoalMapCta,
+  weightedGoalProgress
+} from "./goalUtils";
+// Re-export the goalscape geometry/layout API consumed by the layout test from "./main".
+export {
+  buildGoalscapeLayout,
+  clampGoalscapePosition,
+  constrainGoalscapePositionToOrbit,
+  goalHasMapPosition,
+  goalscapeCenter,
+  goalscapeCenterPearlSize,
+  goalscapeCenterVisualMode,
+  goalscapeNodeDensity,
+  goalscapeOrbitForDepth,
+  goalscapeProgressFillGeometry,
+  goalscapeStarlightCoreRadius,
+  mapPositionPreviewForContext,
+  pruneSavedMapPositionPreviews,
+  withMapPositionPreview,
+  withoutMapPositionPreview
+} from "./goalscapeLayout";
 
 const emptyGoals: GoalsResponse = {
   goalMaps: [],
@@ -69,10 +165,6 @@ const emptyGoals: GoalsResponse = {
 };
 
 const ACTIVE_GOAL_MAP_STORAGE_KEY = "goal-network.activeGoalMapId";
-
-function mediaQueryMatches(query: string, fallback = false) {
-  return typeof window === "undefined" ? fallback : window.matchMedia(query).matches;
-}
 
 const STACKED_LAYOUT_QUERY = "(max-width: 1120px)";
 
@@ -96,10 +188,6 @@ type EditDraft = {
   actions: GoalActionCandidate[];
 };
 
-type ImportanceOverrides = Record<string, number>;
-type ProgressOverrides = Record<string, number>;
-type MapPosition = { x: number; y: number };
-type MapPositionOverrides = Record<string, MapPosition>;
 type PendingEdit = {
   goal: GoalNode;
   draft: EditDraft;
@@ -123,288 +211,10 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-function titleFromLink(value: string | undefined) {
-  return String(value ?? "")
-    .trim()
-    .replace(/^"(.*)"$/, "$1")
-    .replace(/^\[\[/, "")
-    .replace(/\]\]$/, "");
-}
-
-function formatEmpty(value: string | number | undefined) {
-  return value === undefined || value === "" ? "未设置" : value;
-}
-
-function percentValue(value: number | undefined, fallback = 0) {
-  const next = Number(value);
-  if (!Number.isFinite(next)) return fallback;
-  return clamp(Math.round(next <= 5 && next > 0 ? next * 20 : next), 0, 100);
-}
-
-function priorityWeight(value: number | undefined, fallback = 1) {
-  const next = Number(value);
-  return Number.isFinite(next) && next > 0 ? next : fallback;
-}
-
-function normalizedImportance(goals: GoalNode[], overrides: ImportanceOverrides = {}) {
-  if (goals.length === 0) return {};
-
-  const weights = goals.map((goal) =>
-    goal.id in overrides ? clamp(Number(overrides[goal.id]), 0, 100) : priorityWeight(goal.priority)
-  );
-  const total = weights.reduce((sum, weight) => sum + weight, 0);
-  const exactValues = weights.map((weight) => (total > 0 ? (weight / total) * 100 : 100 / goals.length));
-  const roundedValues = exactValues.map(Math.floor);
-  let remaining = 100 - roundedValues.reduce((sum, value) => sum + value, 0);
-  const byRemainder = exactValues
-    .map((value, index) => ({ index, remainder: value - Math.floor(value) }))
-    .sort((a, b) => b.remainder - a.remainder || a.index - b.index);
-
-  for (const item of byRemainder) {
-    if (remaining <= 0) break;
-    roundedValues[item.index] += 1;
-    remaining -= 1;
-  }
-
-  return Object.fromEntries(goals.map((goal, index) => [goal.id, roundedValues[index]]));
-}
-
-function progressValue(goal: GoalNode) {
-  return percentValue(goal.progress, percentValue(goal.clarity, 0));
-}
-
-export function weightedGoalProgress(
-  goal: GoalNode,
-  importanceOverrides: ImportanceOverrides = {},
-  progressOverrides: ProgressOverrides = {}
-): number {
-  if ((goal.children || []).length === 0) {
-    return goal.id in progressOverrides ? clamp(Math.round(Number(progressOverrides[goal.id])), 0, 100) : progressValue(goal);
-  }
-
-  const childImportance = normalizedImportance(goal.children, importanceOverrides);
-  const weighted = goal.children.reduce((sum, child) => {
-    return sum + weightedGoalProgress(child, importanceOverrides, progressOverrides) * ((childImportance[child.id] ?? 0) / 100);
-  }, 0);
-  return clamp(Math.round(weighted), 0, 100);
-}
-
-function normalizeHexColor(value: string | undefined) {
-  const raw = String(value ?? "").trim();
-  if (!/^#[0-9a-fA-F]{6}$/.test(raw)) return "";
-  const lower = raw.toLowerCase();
-  if (lower === "#1187a2") return "#0284c7";
-  if (lower === "#7958c8") return "#6366f1";
-  if (lower === "#45945c") return "#10b981";
-  if (lower === "#4fbf83") return "#10b981";
-  if (lower === "#687385") return "#64748b";
-  return raw;
-}
-
-function filterGoalTree(goals: GoalNode[], showArchived: boolean): GoalNode[] {
-  return goals
-    .filter((goal) => showArchived || goal.status !== "archived")
-    .map((goal) => ({
-      ...goal,
-      children: filterGoalTree(goal.children || [], showArchived)
-    }));
-}
-
-function flattenGoals(goals: GoalNode[]) {
-  const result: GoalNode[] = [];
-  const visit = (goal: GoalNode) => {
-    result.push(goal);
-    goal.children.forEach(visit);
-  };
-  goals.forEach(visit);
-  return result;
-}
-
-export function filterGoalsByGoalMap(goals: GoalNode[], goalMapId: string): GoalNode[] {
-  if (!goalMapId) return [];
-  return goals
-    .filter((goal) => goal.goalMapId === goalMapId)
-    .map((goal) => ({
-      ...goal,
-      children: filterGoalsByGoalMap(goal.children || [], goalMapId)
-    }));
-}
-
-export function goalMapCenterTitle(goalMap: Pick<GoalMap, "name"> | undefined) {
-  return goalMap?.name.trim() || "目标地图";
-}
-
-export function shouldShowFirstGoalMapCta(goalMaps: GoalMap[], loading: boolean) {
-  return !loading && goalMaps.length === 0;
-}
-
-function findGoalById(goals: GoalNode[], id: string): GoalNode | undefined {
-  for (const goal of goals) {
-    if (goal.id === id) return goal;
-    const child = findGoalById(goal.children || [], id);
-    if (child) return child;
-  }
-  return undefined;
-}
-
-function goalPath(goals: GoalNode[], id: string): GoalNode[] {
-  for (const goal of goals) {
-    if (goal.id === id) return [goal];
-    const childPath = goalPath(goal.children || [], id);
-    if (childPath.length) return [goal, ...childPath];
-  }
-  return [];
-}
-
-function buildParentMap(goals: GoalNode[], parentId = "root", result = new Map<string, string>()) {
-  for (const goal of goals) {
-    result.set(goal.id, parentId);
-    buildParentMap(goal.children || [], goal.id, result);
-  }
-  return result;
-}
-
-function collectDescendants(goal: GoalNode | undefined, result = new Set<string>()) {
-  if (!goal) return result;
-  for (const child of goal.children || []) {
-    result.add(child.id);
-    collectDescendants(child, result);
-  }
-  return result;
-}
-
-function selectedFamily(goals: GoalNode[], selectedId: string) {
-  if (!selectedId || selectedId === "root") return null;
-  const selected = findGoalById(goals, selectedId);
-  if (!selected) return null;
-
-  const family = collectDescendants(selected, new Set([selected.id]));
-  const parents = buildParentMap(goals);
-  let current = parents.get(selected.id);
-  while (current && current !== "root") {
-    family.add(current);
-    current = parents.get(current);
-  }
-  return family;
-}
-
-function uniqueDomainTitles(goals: GoalNode[]) {
-  const domains = new Set<string>();
-  for (const goal of goals) {
-    const domain = titleFromLink(goal.domain);
-    if (domain) domains.add(domain);
-  }
-  return Array.from(domains).sort((a, b) => a.localeCompare(b, "zh-CN"));
-}
-
-function averageProgress(
-  goals: GoalNode[],
-  importanceOverrides: ImportanceOverrides = {},
-  progressOverrides: ProgressOverrides = {}
-) {
-  const measurable = goals.filter((goal) => !isPrimaryGoalNode(goal));
-  if (measurable.length === 0) return 0;
-  const total = measurable.reduce((sum, goal) => sum + weightedGoalProgress(goal, importanceOverrides, progressOverrides), 0);
-  return Math.round(total / measurable.length);
-}
-
-function hexToRgb(hex: string) {
-  const raw = hex.replace("#", "");
-  const num = parseInt(raw, 16);
-  return {
-    r: (num >> 16) & 255,
-    g: (num >> 8) & 255,
-    b: num & 255
-  };
-}
-
-function blend(hex: string, target: string, amount: number) {
-  const source = hexToRgb(hex);
-  const next = hexToRgb(target);
-  const mix = (a: number, b: number) => Math.round(a + (b - a) * amount);
-  return `rgb(${mix(source.r, next.r)}, ${mix(source.g, next.g)}, ${mix(source.b, next.b)})`;
-}
-
-function domainBaseColor(domain: string) {
-  const normalized = titleFromLink(domain);
-  if (normalized.includes("职业")) return "#0284c7";
-  if (normalized.includes("个人") || normalized.includes("成长")) return "#6366f1";
-  if (normalized.includes("幸福") || normalized.includes("生活")) return "#10b981";
-  return "#64748b";
-}
-
-// UI 克罗姆用：返回主题感知的领域色 token 引用，让明暗主题自动切换为对应明度的领域色。
-// SVG 星图仍使用 domainBaseColor 的原色 hex（节点取色需要具体数值做液面/星核渐变）。
-function domainAccentToken(domain: string) {
-  const normalized = titleFromLink(domain);
-  if (normalized.includes("职业")) return "var(--career)";
-  if (normalized.includes("个人") || normalized.includes("成长")) return "var(--growth)";
-  if (normalized.includes("幸福") || normalized.includes("生活")) return "var(--life)";
-  return "var(--other)";
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function finitePosition(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-export function clampGoalscapePosition(position: MapPosition): MapPosition {
-  return {
-    x: clamp(Math.round(position.x), 80, goalscapeViewBox.width - 80),
-    y: clamp(Math.round(position.y), 70, goalscapeViewBox.height - 70)
-  };
-}
-
-function savedGoalMapPosition(goal: GoalNode, mapContextId: string): MapPosition | undefined {
-  const scoped = goal.map_positions?.[mapContextId];
-  if (scoped) return clampGoalscapePosition(scoped);
-  if (mapContextId !== "root") return undefined;
-  if (!finitePosition(goal.map_x) || !finitePosition(goal.map_y)) return undefined;
-  return clampGoalscapePosition({ x: goal.map_x, y: goal.map_y });
-}
-
-function goalMapPosition(goal: GoalNode, fallback: MapPosition, overrides: MapPositionOverrides, mapContextId: string) {
-  return overrides[goal.id] ? clampGoalscapePosition(overrides[goal.id]) : savedGoalMapPosition(goal, mapContextId) ?? fallback;
-}
-
-function hasCustomMapPosition(goal: GoalNode | undefined, mapContextId: string) {
-  return Boolean(goal && savedGoalMapPosition(goal, mapContextId));
-}
-
-function siblingGoals(goals: GoalNode[], selectedId: string) {
-  const parents = buildParentMap(goals);
-  const parentId = parents.get(selectedId) || "root";
-  if (parentId === "root") return goals;
-  return findGoalById(goals, parentId)?.children || [];
-}
-
-function parentGoal(goals: GoalNode[], selectedId: string) {
-  const parentId = buildParentMap(goals).get(selectedId);
-  return parentId && parentId !== "root" ? findGoalById(goals, parentId) : undefined;
-}
-
-function rebalanceImportance(goals: GoalNode[], selectedId: string, nextImportance: number): ImportanceOverrides {
-  const siblings = siblingGoals(goals, selectedId);
-  if (!siblings.some((goal) => goal.id === selectedId)) return {};
-
-  const selectedImportance = clamp(Math.round(nextImportance), 0, 100);
-  const others = siblings.filter((goal) => goal.id !== selectedId);
-  const remaining = Math.max(0, 100 - selectedImportance);
-  const otherTotal = others.reduce((sum, goal) => sum + priorityWeight(goal.priority), 0);
-  const overrides: ImportanceOverrides = { [selectedId]: selectedImportance };
-
-  let allocated = 0;
-  others.forEach((goal, index) => {
-    const exact = otherTotal > 0 ? (priorityWeight(goal.priority) / otherTotal) * remaining : remaining / Math.max(1, others.length);
-    const next = index === others.length - 1 ? remaining - allocated : Math.round(exact);
-    overrides[goal.id] = next;
-    allocated += next;
-  });
-
-  return overrides;
+function nextGoalsRequestId(ref: React.MutableRefObject<number>) {
+  const requestId = ref.current + 1;
+  ref.current = requestId;
+  return requestId;
 }
 
 export function GoalApp() {
@@ -417,7 +227,8 @@ export function GoalApp() {
   const [error, setError] = useState("");
   const [importancePreview, setImportancePreview] = useState<ImportanceOverrides>({});
   const [progressPreview, setProgressPreview] = useState<ProgressOverrides>({});
-  const [mapPositionPreview, setMapPositionPreview] = useState<MapPositionOverrides>({});
+  const [mapPositionPreview, setMapPositionPreview] = useState<MapPositionPreviewOverrides>({});
+  const [focusRootId, setFocusRootId] = useState<string | null>(null);
   const [scopeListCollapsed, setScopeListCollapsed] = useState(true);
   const [deleteCandidate, setDeleteCandidate] = useState<GoalNode | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -440,6 +251,7 @@ export function GoalApp() {
   const pendingEditRef = useRef<PendingEdit | null>(null);
   const pendingSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const draftCacheRef = useRef<DraftCache>({});
+  const goalsRequestIdRef = useRef(0);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -461,23 +273,30 @@ export function GoalApp() {
   }, []);
 
   const loadGoals = useCallback(async () => {
+    const requestId = nextGoalsRequestId(goalsRequestIdRef);
     const next = await api<GoalsResponse>("/api/goals");
-    setGoals(next);
+    if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) setGoals(next);
     return next;
   }, []);
 
   const reload = useCallback(async () => {
+    const requestId = nextGoalsRequestId(goalsRequestIdRef);
     try {
-      const next = await loadGoals();
-      setError("");
+      const next = await api<GoalsResponse>("/api/goals");
+      if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
+        setGoals(next);
+        setError("");
+      }
       return next;
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "加载失败");
+      if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
+        setError(nextError instanceof Error ? nextError.message : "加载失败");
+      }
       throw nextError;
     } finally {
-      setLoading(false);
+      if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) setLoading(false);
     }
-  }, [loadGoals]);
+  }, []);
 
   useEffect(() => {
     void reload().catch(() => undefined);
@@ -523,6 +342,11 @@ export function GoalApp() {
     [activeGoalMap, allVisibleTree]
   );
   const visibleFlatGoals = useMemo(() => flattenGoals(visibleTree), [visibleTree]);
+  const focusGoal = useMemo(
+    () => (focusRootId ? findGoalById(visibleTree, focusRootId) ?? null : null),
+    [focusRootId, visibleTree]
+  );
+  const focusedPath = useMemo(() => (focusRootId ? goalPath(visibleTree, focusRootId) : []), [focusRootId, visibleTree]);
   const selectedGoal = useMemo(
     () => visibleFlatGoals.find((goal) => goal.id === selectedId),
     [selectedId, visibleFlatGoals]
@@ -530,9 +354,21 @@ export function GoalApp() {
   const selectedGoalFull = useMemo(() => visibleFlatGoals.find((goal) => goal.id === selectedId), [selectedId, visibleFlatGoals]);
   const activeAiGoal = useMemo(() => (aiGoal ? goals.flatGoals.find((goal) => goal.id === aiGoal.id) ?? aiGoal : null), [aiGoal, goals.flatGoals]);
   const selectedParent = useMemo(() => parentGoal(visibleTree, selectedId), [selectedId, visibleTree]);
-  const mapGoals = visibleTree;
-  const mapContextId = activeGoalMap?.id || "root";
-  const mapCenterId = activeGoalMap?.id || "root";
+  const mapGoals = focusGoal ? focusGoal.children ?? [] : visibleTree;
+  const mapContextId = focusGoal ? focusGoal.id : activeGoalMap?.id || "root";
+  const mapCenterId = focusGoal ? focusGoal.id : activeGoalMap?.id || "root";
+  const mapCenterTitle = focusGoal ? focusGoal.title : goalMapCenterTitle(activeGoalMap);
+  const mapEmptyLabel = loading
+    ? ""
+    : focusGoal && mapGoals.length === 0
+      ? "这个目标还没有子目标"
+      : // Empty root map is handled by the .empty-scape CTA overlay below; keep the
+        // in-SVG label empty so the two empty states don't render at the same time.
+        "";
+  const activeMapPositionPreview = useMemo(
+    () => mapPositionPreviewForContext(mapPositionPreview, mapContextId),
+    [mapPositionPreview, mapContextId]
+  );
   const domainTitles = useMemo(() => uniqueDomainTitles(visibleFlatGoals), [visibleFlatGoals]);
   const goalMapCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -560,9 +396,18 @@ export function GoalApp() {
   }, [activeGoalMap, selectedGoal, selectedId]);
 
   useEffect(() => {
+    if (!focusRootId) return;
+    if (!findGoalById(visibleTree, focusRootId)) setFocusRootId(null);
+  }, [focusRootId, visibleTree]);
+
+  useEffect(() => {
     setImportancePreview((current) => (Object.keys(current).length ? {} : current));
     setProgressPreview((current) => (Object.keys(current).length ? {} : current));
   }, [selectedId]);
+
+  useEffect(() => {
+    setMapPositionPreview((current) => pruneSavedMapPositionPreviews(current, goals.flatGoals));
+  }, [goals.flatGoals]);
 
   const clampDetailWidth = useCallback((value: number) => {
     const workspaceWidth = workspaceRef.current?.getBoundingClientRect().width ?? window.innerWidth;
@@ -736,6 +581,19 @@ export function GoalApp() {
     setSelectedId(id);
   }, [queuePendingEditSave, selectedId]);
 
+  const drillGoal = useCallback((id: string) => {
+    queuePendingEditSave();
+    setFocusRootId(id);
+    setSelectedId(id);
+  }, [queuePendingEditSave]);
+
+  const ascendGoal = useCallback(() => {
+    if (!focusRootId) return;
+    const parentId = buildParentMap(visibleTree).get(focusRootId);
+    setFocusRootId(parentId && parentId !== "root" && parentId !== mapCenterId ? parentId : null);
+    setSelectedId(focusRootId);
+  }, [focusRootId, mapCenterId, visibleTree]);
+
   const createGoal = async (input: GoalCreateInput): Promise<boolean> => {
     return runWrite(async () => {
       const primaryGoal = isPrimaryGoalTitle(input.title) && !normalizedGoalTitle(input.parent);
@@ -746,12 +604,16 @@ export function GoalApp() {
         clarity: Number(input.clarity)
       };
       if (!primaryGoal) payload.progress = Number(input.progress ?? 0);
-      await api("/api/goals", {
+      const created = await api<{ id?: string } | null>("/api/goals", {
         method: "POST",
         body: JSON.stringify(payload)
       });
       const next = await loadGoals();
-      const createdGoal = next.flatGoals.find((goal) => goal.title === input.title.trim() && goal.goalMapId === input.goalMapId);
+      // Prefer the server-assigned id; fall back to a title+map match only when the
+      // response carries no id (goal titles are not guaranteed unique within a map).
+      const createdGoal =
+        (created?.id ? next.flatGoals.find((goal) => goal.id === created.id) : undefined) ??
+        next.flatGoals.find((goal) => goal.title === input.title.trim() && goal.goalMapId === input.goalMapId);
       if (createdGoal) {
         pendingEditRef.current = null;
         delete draftCacheRef.current[createdGoal.id];
@@ -767,6 +629,7 @@ export function GoalApp() {
     queuePendingEditSave();
     setActiveGoalMapId(goalMapId);
     setSelectedId(goalMapId);
+    setFocusRootId(null);
     setImportancePreview({});
     setProgressPreview({});
     setMapPositionPreview({});
@@ -871,11 +734,8 @@ export function GoalApp() {
   }, []);
 
   const previewMapPosition = useCallback((goalId: string, position: MapPosition) => {
-    setMapPositionPreview((current) => ({
-      ...current,
-      [goalId]: clampGoalscapePosition(position)
-    }));
-  }, []);
+    setMapPositionPreview((current) => withMapPositionPreview(current, mapContextId, goalId, position));
+  }, [mapContextId]);
 
   const saveMapPosition = useCallback((goalId: string, position: MapPosition) => {
     const nextPosition = clampGoalscapePosition(position);
@@ -885,11 +745,6 @@ export function GoalApp() {
         body: JSON.stringify({ map_positions: { [mapContextId]: nextPosition } })
       });
       await loadGoals();
-      setMapPositionPreview((current) => {
-        const next = { ...current };
-        delete next[goalId];
-        return next;
-      });
     }, "目标位置已保存");
   }, [loadGoals, mapContextId, runWrite]);
 
@@ -902,11 +757,7 @@ export function GoalApp() {
         body: JSON.stringify({ map_positions: { [mapContextId]: null } })
       });
       await loadGoals();
-      setMapPositionPreview((current) => {
-        const next = { ...current };
-        delete next[goalId];
-        return next;
-      });
+      setMapPositionPreview((current) => withoutMapPositionPreview(current, mapContextId, goalId));
     }, "目标位置已重置");
   }, [loadGoals, mapContextId, runWrite, selectedGoalFull]);
 
@@ -936,6 +787,15 @@ export function GoalApp() {
     });
   }, [activeGoalMap, domainTitles, goals.flatGoals, visibleTree]);
 
+  const openCreateSiblingGoalDialog = useCallback(() => {
+    if (!selectedGoalFull) return;
+    if (!selectedParent) {
+      openCreateTopGoalDialog();
+      return;
+    }
+    openCreateQuickGoalDialog("sibling");
+  }, [openCreateQuickGoalDialog, openCreateTopGoalDialog, selectedGoalFull, selectedParent]);
+
   const submitRename = async (nextTitle: string) => {
     if (!selectedGoalFull) return;
     const trimmed = nextTitle.trim();
@@ -949,8 +809,11 @@ export function GoalApp() {
         body: JSON.stringify({ title: trimmed })
       });
       const next = await loadGoals();
-      const renamedGoal = next.flatGoals.find((item) => item.title === trimmed);
-      const nextId = renamedGoal?.id || (next.flatGoals.some((item) => item.id === selectedGoalFull.id) ? selectedGoalFull.id : activeGoalMap?.id || "root");
+      // Renaming never changes the goal id, so keep the current selection by id.
+      // (A title lookup could resolve to a different goal that shares the new title.)
+      const nextId = next.flatGoals.some((item) => item.id === selectedGoalFull.id)
+        ? selectedGoalFull.id
+        : activeGoalMap?.id || "root";
       setSelectedId(nextId);
     }, "目标已重命名");
     setRenameOpen(false);
@@ -1040,16 +903,50 @@ export function GoalApp() {
                 onRenameMap={setRenameGoalMapCandidate}
                 onDeleteMap={setDeleteGoalMapCandidate}
               />
+              {focusRootId && (
+                <nav className="map-breadcrumb" aria-label="目标层级路径">
+                  <button
+                    type="button"
+                    className="breadcrumb-item"
+                    onClick={() => {
+                      queuePendingEditSave();
+                      setFocusRootId(null);
+                      setSelectedId(activeGoalMap.id);
+                    }}
+                  >
+                    {goalMapCenterTitle(activeGoalMap)}
+                  </button>
+                  {focusedPath.map((goal, index) => (
+                    <React.Fragment key={goal.id}>
+                      <ChevronRight aria-hidden="true" />
+                      <button
+                        type="button"
+                        tabIndex={index === focusedPath.length - 1 ? -1 : undefined}
+                        className={`breadcrumb-item${index === focusedPath.length - 1 ? " active" : ""}`}
+                        onClick={() => {
+                          if (index >= focusedPath.length - 1) return;
+                          queuePendingEditSave();
+                          setFocusRootId(goal.id);
+                          setSelectedId(goal.id);
+                        }}
+                        aria-current={index === focusedPath.length - 1 ? "page" : undefined}
+                      >
+                        {goal.title}
+                      </button>
+                    </React.Fragment>
+                  ))}
+                </nav>
+              )}
               <MapActions
                 activeGoalMap={activeGoalMap}
                 mapCenterSelected={selectedId === mapCenterId && !selectedGoalFull}
                 selectedGoal={selectedGoalFull}
                 saving={saving}
-                canAddSibling={Boolean(selectedParent)}
+                canAddSibling={Boolean(selectedGoalFull)}
                 canResetPosition={hasCustomMapPosition(selectedGoalFull, mapContextId)}
                 onAddTopGoal={openCreateTopGoalDialog}
                 onAddSubgoal={() => openCreateQuickGoalDialog("subgoal")}
-                onAddSibling={() => openCreateQuickGoalDialog("sibling")}
+                onAddSibling={openCreateSiblingGoalDialog}
                 onRenameMap={() => activeGoalMap && setRenameGoalMapCandidate(activeGoalMap)}
                 onRename={() => selectedGoalFull && setRenameOpen(true)}
                 onResetPosition={resetSelectedMapPosition}
@@ -1076,12 +973,15 @@ export function GoalApp() {
               selectedId={selectedId}
               importanceOverrides={importancePreview}
               progressOverrides={progressPreview}
-              positionOverrides={mapPositionPreview}
+              positionOverrides={activeMapPositionPreview}
               mapContextId={mapContextId}
               centerId={mapCenterId}
-              centerTitle={goalMapCenterTitle(activeGoalMap)}
-              emptyLabel={visibleTree.length === 0 ? "这张目标地图还没有目标" : ""}
+              centerTitle={mapCenterTitle}
+              centerGoal={focusGoal}
+              emptyLabel={mapEmptyLabel}
               onSelect={selectGoal}
+              onDrill={drillGoal}
+              onAscend={ascendGoal}
               onPreviewPosition={previewMapPosition}
               onCommitPosition={saveMapPosition}
             />
@@ -1103,6 +1003,8 @@ export function GoalApp() {
           aria-label={stackedLayout ? "调整上方地图窗口高度" : "调整右侧窗口宽度"}
           aria-orientation={stackedLayout ? "horizontal" : "vertical"}
           aria-valuenow={stackedLayout ? mapPaneHeight : detailWidth}
+          aria-valuemin={stackedLayout ? 320 : 340}
+          aria-valuemax={stackedLayout ? 720 : 560}
           tabIndex={0}
           onPointerDown={startPanelResize}
           onKeyDown={(event) => {
@@ -1362,6 +1264,28 @@ function MapScopeList({
   );
 }
 
+export function mapAddActionAvailability({
+  mapCenterSelected,
+  hasActiveGoalMap,
+  hasSelectedGoal,
+  canAddSibling,
+  saving
+}: {
+  mapCenterSelected: boolean;
+  hasActiveGoalMap: boolean;
+  hasSelectedGoal: boolean;
+  canAddSibling: boolean;
+  saving: boolean;
+}) {
+  const subgoalDisabled = saving || (mapCenterSelected ? !hasActiveGoalMap : !hasSelectedGoal);
+  const siblingDisabled = saving || !hasSelectedGoal || !canAddSibling;
+  return {
+    subgoalDisabled,
+    siblingDisabled,
+    subgoalUsesTopGoal: mapCenterSelected
+  };
+}
+
 function MapActions({
   activeGoalMap,
   mapCenterSelected,
@@ -1396,6 +1320,13 @@ function MapActions({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const disabled = saving || !selectedGoal;
   const mapDisabled = saving || !activeGoalMap;
+  const addActions = mapAddActionAvailability({
+    mapCenterSelected,
+    hasActiveGoalMap: Boolean(activeGoalMap),
+    hasSelectedGoal: Boolean(selectedGoal),
+    canAddSibling,
+    saving
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -1421,8 +1352,25 @@ function MapActions({
   if (mapCenterSelected) {
     return (
       <div className="map-actions">
-        <button type="button" className="icon-button" title="添加顶层目标" aria-label="添加顶层目标" disabled={mapDisabled} onClick={onAddTopGoal}>
+        <button
+          type="button"
+          className="icon-button"
+          title="添加子目标"
+          aria-label="添加子目标"
+          disabled={addActions.subgoalDisabled}
+          onClick={addActions.subgoalUsesTopGoal ? onAddTopGoal : onAddSubgoal}
+        >
           <ListPlus />
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          title="添加同级目标"
+          aria-label="添加同级目标"
+          disabled={addActions.siblingDisabled}
+          onClick={onAddSibling}
+        >
+          <CirclePlus />
         </button>
         <div className="menu-wrap" ref={menuWrapRef}>
           <button
@@ -1442,6 +1390,7 @@ function MapActions({
             <div className="quick-menu" role="menu">
               <button
                 type="button"
+                role="menuitem"
                 className="menu-item"
                 disabled={mapDisabled}
                 onClick={() => {
@@ -1461,10 +1410,10 @@ function MapActions({
 
   return (
     <div className="map-actions">
-      <button type="button" className="icon-button" title="添加子目标" aria-label="添加子目标" disabled={disabled} onClick={onAddSubgoal}>
+      <button type="button" className="icon-button" title="添加子目标" aria-label="添加子目标" disabled={addActions.subgoalDisabled} onClick={onAddSubgoal}>
         <ListPlus />
       </button>
-      <button type="button" className="icon-button" title="添加同级目标" aria-label="添加同级目标" disabled={disabled || !canAddSibling} onClick={onAddSibling}>
+      <button type="button" className="icon-button" title="添加同级目标" aria-label="添加同级目标" disabled={addActions.siblingDisabled} onClick={onAddSibling}>
         <CirclePlus />
       </button>
       <div className="menu-wrap" ref={menuWrapRef}>
@@ -1484,6 +1433,7 @@ function MapActions({
           <div className="quick-menu" role="menu">
             <button
               type="button"
+              role="menuitem"
               className="menu-item"
               disabled={disabled}
               onClick={() => {
@@ -1496,6 +1446,7 @@ function MapActions({
             </button>
             <button
               type="button"
+              role="menuitem"
               className="menu-item"
               disabled={disabled || !canResetPosition}
               onClick={() => {
@@ -1508,6 +1459,7 @@ function MapActions({
             </button>
             <button
               type="button"
+              role="menuitem"
               className="menu-item danger-menu-item"
               disabled={disabled}
               onClick={() => {
@@ -1848,175 +1800,6 @@ function RenameGoalDialogBody({
   );
 }
 
-type GoalscapeSectorRole = "primary" | "descendant";
-
-type GoalscapeNodeLayout = {
-  node: GoalNode;
-  parentId: string;
-  depth: number;
-  treeDepth: number;
-  visibleDepth: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  color: string;
-  progress: number;
-  importance: number;
-  variant: number;
-  treeDistance: number;
-  perspectiveScale: number;
-  opacity: number;
-  zIndex: number;
-  linkParentId: string;
-  sectorStartAngle: number;
-  sectorEndAngle: number;
-  sectorMidAngle: number;
-  sectorRole: GoalscapeSectorRole;
-  childCount?: number;
-};
-
-export type GoalscapeOrbit = {
-  depth: number;
-  cx: number;
-  cy: number;
-  rx: number;
-  ry: number;
-};
-
-export const goalscapeCenter = { x: 600, y: 380, width: 142, height: 120 };
-
-const goalscapeViewBox = { width: 1200, height: 760 };
-
-export function goalscapeOrbitForDepth(depth: number, visibleDepth = 2): GoalscapeOrbit {
-  const safeDepth = Math.max(1, Math.round(depth));
-  const safeVisibleDepth = Math.max(1, Math.round(visibleDepth));
-  const inner = { rx: 170, ry: 120 };
-  const edge = { rx: 470, ry: 300 };
-  const ratio =
-    safeVisibleDepth === 1
-      ? 0.5
-      : clamp((Math.min(safeDepth, safeVisibleDepth) - 1) / (safeVisibleDepth - 1), 0, 1);
-
-  return {
-    depth: safeDepth,
-    cx: goalscapeCenter.x,
-    cy: goalscapeCenter.y,
-    rx: inner.rx + (edge.rx - inner.rx) * ratio,
-    ry: inner.ry + (edge.ry - inner.ry) * ratio
-  };
-}
-
-export function constrainGoalscapePositionToOrbit(position: MapPosition, orbit: GoalscapeOrbit): MapPosition {
-  const clamped = clampGoalscapePosition(position);
-  const deltaX = clamped.x - orbit.cx;
-  const deltaY = clamped.y - orbit.cy;
-
-  if (Math.hypot(deltaX, deltaY) < 0.001) {
-    return { x: orbit.cx, y: orbit.cy - orbit.ry };
-  }
-
-  const scale = 1 / Math.sqrt(deltaX ** 2 / orbit.rx ** 2 + deltaY ** 2 / orbit.ry ** 2);
-  return {
-    x: orbit.cx + deltaX * scale,
-    y: orbit.cy + deltaY * scale
-  };
-}
-
-export function goalscapeNodeDensity(progress: number) {
-  return 0.12 + 0.68 * (clamp(progress, 0, 100) / 100);
-}
-
-export function goalscapeStarlightCoreRadius(baseRadius: number, progress: number) {
-  return baseRadius * (0.2 + 0.8 * (clamp(progress, 0, 100) / 100));
-}
-
-function goalscapeChildNodeSize(
-  parentSize: Pick<GoalscapeNodeLayout, "width" | "height">,
-  childIndex: number,
-  depth = 2,
-  densityScale = 1,
-  focusScale = 1
-) {
-  const depthScale = clamp(0.8 - Math.max(0, depth - 2) * 0.075, 0.58, 0.8);
-  const siblingTaper = 1 - Math.min(childIndex, 4) * 0.015;
-  const scale = clamp(depthScale * siblingTaper * densityScale * focusScale, 0.42, 1.08);
-  const minWidth = depth === 1 ? 82 : depth === 2 ? 68 : depth === 3 ? 54 : 46;
-  const minHeight = depth === 1 ? 66 : depth === 2 ? 54 : depth === 3 ? 44 : 36;
-  return {
-    width: Math.round(clamp(parentSize.width * scale, minWidth, parentSize.width * 1.08)),
-    height: Math.round(clamp(parentSize.height * scale, minHeight, parentSize.height * 1.08))
-  };
-}
-
-function goalscapeNodeVisualMetrics(layout: Pick<GoalscapeNodeLayout, "width" | "height" | "depth">) {
-  const iconMin = layout.depth === 1 ? 28 : layout.depth === 2 ? 22 : 17;
-  const iconMax = layout.depth === 1 ? 32 : layout.depth === 2 ? 26 : 22;
-  const titleMin = layout.depth === 1 ? 16 : layout.depth === 2 ? 12 : 10;
-  const titleMax = layout.depth === 1 ? 18 : layout.depth === 2 ? 13 : 12;
-  const iconSize = Math.round(clamp(layout.width * 0.26, iconMin, iconMax));
-  const titleSize = Math.round(clamp(layout.width * (layout.depth === 1 ? 0.145 : 0.14), titleMin, titleMax));
-  const progressSize = Math.round(clamp(layout.width * 0.095, layout.depth >= 3 ? 8 : 10, 12));
-  return {
-    iconSize,
-    iconGlyphSize: Math.round(iconSize * 0.58),
-    iconY: layout.depth === 1 ? layout.height * 0.48 : layout.depth === 2 ? layout.height * 0.46 : layout.height * 0.44,
-    titleY: layout.depth === 1 ? layout.height * 0.03 : layout.depth === 2 ? layout.height * 0.06 : layout.height * 0.08,
-    titleLineGap: layout.depth === 1 ? Math.round(titleSize * 1.18) : Math.round(titleSize * 1.14),
-    titleSize,
-    progressSize,
-    progressY: layout.height * (layout.depth === 1 ? 0.42 : layout.depth === 2 ? 0.44 : 0.46),
-    coreRadius: clamp(layout.width * 0.095, layout.depth === 1 ? 10 : layout.depth === 2 ? 7 : 5, layout.depth === 1 ? 12 : 9)
-  };
-}
-
-export function goalscapeProgressFillGeometry(centerY: number, height: number, progress: number) {
-  const safeProgress = clamp(progress, 0, 100);
-  const fillHeight = height * (safeProgress / 100);
-  const bottom = centerY + height / 2;
-  return {
-    y: bottom - fillHeight,
-    height: fillHeight,
-    surfaceY: bottom - fillHeight
-  };
-}
-
-export type GoalscapeCenterPearlTint = {
-  primary: string;
-  secondary: string;
-  tertiary: string;
-  iridescent: string;
-  energy: string;
-  glow: string;
-  isRoot: boolean;
-};
-
-export function goalscapeCenterPearlTint(centerId: string, goal?: GoalNode | null): GoalscapeCenterPearlTint {
-  if (centerId === "root" || !goal) {
-    return {
-      primary: "#e0e7ff",
-      secondary: "#a7f3d0",
-      tertiary: "#bae6fd",
-      iridescent: "#ddd6fe",
-      energy: "#fbbf24",
-      glow: "#fff7ed",
-      isRoot: true
-    };
-  }
-
-  const base = goalscapeNodeColor(goal, domainBaseColor(goal.domain || goal.title));
-  return {
-    primary: blend(base, "#ffffff", 0.72),
-    secondary: blend(base, "#ffffff", 0.88),
-    tertiary: blend(base, "#12233e", 0.12),
-    iridescent: blend(base, "#fbbf24", 0.22),
-    energy: blend(base, "#fbbf24", 0.45),
-    glow: blend(base, "#fff7ed", 0.55),
-    isRoot: false
-  };
-}
-
-export const goalscapeCenterPearlSize = { width: 128, height: 108, variant: 0 };
 const goalscapeAstrolabeOuterRadius = 86;
 const goalscapeAstrolabeInnerRadius = 72;
 
@@ -2096,600 +1879,6 @@ function GoalscapeCenterAstrolabe({ cx, cy }: { cx: number; cy: number }) {
   );
 }
 
-function goalscapeNodeColor(goal: GoalNode, fallback: string) {
-  return normalizeHexColor(goal.color) || domainBaseColor(goal.domain || goal.title) || fallback;
-}
-
-const goalscapeMaxVisibleDepth = 4;
-const goalscapeMinOrbitGap = 90;
-const goalscapeCollapseMinWidth = 52;
-const goalscapeCollapseMinHeight = 40;
-const goalscapeFocusSectorMidAngle = -35;
-const goalscapeFocusPathWeightScale = 2.4;
-const goalscapeFocusSiblingWeightScale = 0.55;
-
-type GoalscapeTreeStats = {
-  maxDepth: number;
-  counts: Map<number, number>;
-};
-
-type GoalscapeSector = {
-  startAngle: number;
-  endAngle: number;
-};
-
-const goalscapeFullSector: GoalscapeSector = { startAngle: -90, endAngle: 270 };
-
-type GoalscapeFocusContext = {
-  activeSelectionId?: string;
-  selectedPathIds: Set<string>;
-  selectedDescendantIds: Set<string>;
-  selectedSubtreeIds: Set<string>;
-  maxTreeDepth: number;
-};
-
-function goalscapeSectorMidAngle(sector: GoalscapeSector) {
-  return (sector.startAngle + sector.endAngle) / 2;
-}
-
-function goalscapeSectorSpan(sector: GoalscapeSector) {
-  return Math.max(0.001, sector.endAngle - sector.startAngle);
-}
-
-function collectGoalscapeTreeStats(goals: GoalNode[], depth = 1, stats: GoalscapeTreeStats = { maxDepth: 0, counts: new Map() }) {
-  for (const goal of goals) {
-    stats.maxDepth = Math.max(stats.maxDepth, depth);
-    stats.counts.set(depth, (stats.counts.get(depth) ?? 0) + 1);
-    collectGoalscapeTreeStats(goal.children || [], depth + 1, stats);
-  }
-  return stats;
-}
-
-function goalscapeOrbitCircumference(orbit: Pick<GoalscapeOrbit, "rx" | "ry">) {
-  return Math.PI * (3 * (orbit.rx + orbit.ry) - Math.sqrt((3 * orbit.rx + orbit.ry) * (orbit.rx + 3 * orbit.ry)));
-}
-
-function goalscapeOrbitCapacity(depth: number, visibleDepth: number) {
-  const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
-  return Math.max(1, Math.floor(goalscapeOrbitCircumference(orbit) / goalscapeMinOrbitGap));
-}
-
-function goalscapeVisibleDepth(stats: GoalscapeTreeStats) {
-  if (stats.maxDepth === 0) return 3;
-
-  let visibleDepth = Math.min(goalscapeMaxVisibleDepth, Math.max(3, stats.maxDepth));
-  while (visibleDepth > 3) {
-    let overflowDepth = 0;
-    for (let depth = 1; depth <= visibleDepth; depth += 1) {
-      const count = stats.counts.get(depth) ?? 0;
-      if (count > goalscapeOrbitCapacity(depth, visibleDepth)) {
-        overflowDepth = depth;
-        break;
-      }
-    }
-    if (overflowDepth === 0) return visibleDepth;
-    if (overflowDepth <= 3) return 3;
-    visibleDepth = overflowDepth - 1;
-  }
-
-  return Math.max(3, visibleDepth);
-}
-
-function goalscapeRingDensityScale(count: number, depth: number, visibleDepth: number) {
-  const capacity = goalscapeOrbitCapacity(depth, visibleDepth);
-  const pressure = Math.max(1, count) / capacity;
-  if (pressure <= 0.72) return 1;
-  return clamp(1 - (pressure - 0.72) * 0.28, 0.7, 1);
-}
-
-function goalscapeSubtreeLeafCount(goal: GoalNode): number {
-  const children = goal.children || [];
-  if (children.length === 0) return 1;
-  return children.reduce((sum, child) => sum + goalscapeSubtreeLeafCount(child), 0);
-}
-
-function countGoalscapeDescendants(goal: GoalNode): number {
-  return (goal.children || []).reduce((sum, child) => sum + 1 + countGoalscapeDescendants(child), 0);
-}
-
-function goalscapePointOnOrbit(angle: number, depth: number, visibleDepth: number): MapPosition {
-  const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
-  return goalscapePointOnSpecificOrbit(angle, orbit);
-}
-
-function goalscapePointOnSpecificOrbit(angle: number, orbit: GoalscapeOrbit): MapPosition {
-  const radians = (angle * Math.PI) / 180;
-  const deltaX = Math.cos(radians);
-  const deltaY = Math.sin(radians);
-  const scale = 1 / Math.sqrt(deltaX ** 2 / orbit.rx ** 2 + deltaY ** 2 / orbit.ry ** 2);
-  return {
-    x: orbit.cx + deltaX * scale,
-    y: orbit.cy + deltaY * scale
-  };
-}
-
-function goalscapeAngleForPosition(position: MapPosition) {
-  return (Math.atan2(position.y - goalscapeCenter.y, position.x - goalscapeCenter.x) * 180) / Math.PI;
-}
-
-function goalscapeAngleInSector(angle: number, sector: GoalscapeSector) {
-  const candidates = [angle - 720, angle - 360, angle, angle + 360, angle + 720];
-  return candidates.find((candidate) => candidate >= sector.startAngle && candidate <= sector.endAngle);
-}
-
-function clampGoalscapeAngleToSector(angle: number, sector: GoalscapeSector, padding = 0) {
-  if (goalscapeSectorSpan(sector) >= 359.5) return angle;
-
-  const safePadding = Math.min(Math.max(0, padding), goalscapeSectorSpan(sector) / 2.5);
-  const range = {
-    startAngle: sector.startAngle + safePadding,
-    endAngle: sector.endAngle - safePadding
-  };
-  const inside = goalscapeAngleInSector(angle, range);
-  if (inside !== undefined) return inside;
-
-  return [angle - 720, angle - 360, angle, angle + 360, angle + 720]
-    .map((candidate) => ({
-      angle: clamp(candidate, range.startAngle, range.endAngle),
-      distance:
-        candidate < range.startAngle
-          ? range.startAngle - candidate
-          : candidate > range.endAngle
-            ? candidate - range.endAngle
-            : 0
-    }))
-    .sort((a, b) => a.distance - b.distance)[0].angle;
-}
-
-function constrainGoalscapePositionToSectorOrbit(
-  position: MapPosition,
-  orbit: GoalscapeOrbit,
-  sector: GoalscapeSector,
-  padding = 4
-): MapPosition {
-  const orbitPosition = constrainGoalscapePositionToOrbit(position, orbit);
-  const angle = clampGoalscapeAngleToSector(goalscapeAngleForPosition(orbitPosition), sector, padding);
-  return goalscapePointOnSpecificOrbit(angle, orbit);
-}
-
-function goalscapeWeightedSpans(weights: number[], totalSpan: number, minSpan: number) {
-  if (weights.length === 0) return [];
-  const totalWeight = weights.reduce((sum, weight) => sum + Math.max(0, weight), 0) || weights.length;
-  const rawSpans = weights.map((weight) => (totalSpan * Math.max(0, weight || 1)) / totalWeight);
-  const floor = Math.max(0, Math.min(minSpan, totalSpan / weights.length));
-  const floored = rawSpans.map((span) => span < floor);
-  const floorTotal = floored.filter(Boolean).length * floor;
-  if (floorTotal >= totalSpan) return Array.from({ length: weights.length }, () => totalSpan / weights.length);
-
-  const remainingRaw = rawSpans.reduce((sum, span, index) => sum + (floored[index] ? 0 : span), 0);
-  const remainingSpan = totalSpan - floorTotal;
-  return rawSpans.map((span, index) => (floored[index] ? floor : (span / remainingRaw) * remainingSpan));
-}
-
-function goalscapeSectorWeights(goals: GoalNode[], focusContext: GoalscapeFocusContext) {
-  const hasSelectedPathSibling = Boolean(
-    focusContext.activeSelectionId && goals.some((goal) => focusContext.selectedPathIds.has(goal.id))
-  );
-
-  return goals.map((goal) => {
-    const base = goalscapeSubtreeLeafCount(goal);
-    if (!hasSelectedPathSibling) return base;
-    return base * (focusContext.selectedPathIds.has(goal.id) ? goalscapeFocusPathWeightScale : goalscapeFocusSiblingWeightScale);
-  });
-}
-
-function goalscapeSectorsForSiblings(goals: GoalNode[], parentSector: GoalscapeSector, focusContext: GoalscapeFocusContext) {
-  const result = new Map<string, GoalscapeSector>();
-  if (goals.length === 0) return result;
-
-  if (goals.length === 1) {
-    result.set(goals[0].id, parentSector);
-    return result;
-  }
-
-  const spans = goalscapeWeightedSpans(
-    goalscapeSectorWeights(goals, focusContext),
-    goalscapeSectorSpan(parentSector),
-    Math.min(40, goalscapeSectorSpan(parentSector) / goals.length)
-  );
-  let cursor = parentSector.startAngle;
-  goals.forEach((goal, index) => {
-    const span = spans[index] ?? goalscapeSectorSpan(parentSector) / goals.length;
-    result.set(goal.id, { startAngle: cursor, endAngle: cursor + span });
-    cursor += span;
-  });
-  return result;
-}
-
-function rotateGoalscapeSector(sector: GoalscapeSector, delta: number): GoalscapeSector {
-  return {
-    startAngle: sector.startAngle + delta,
-    endAngle: sector.endAngle + delta
-  };
-}
-
-function buildGoalscapeSectorIndex(goals: GoalNode[], focusContext: GoalscapeFocusContext) {
-  const sectors = new Map<string, GoalscapeSector>();
-  const visit = (nodes: GoalNode[], parentSector: GoalscapeSector) => {
-    const siblingSectors = goalscapeSectorsForSiblings(nodes, parentSector, focusContext);
-    for (const node of nodes) {
-      const sector = siblingSectors.get(node.id) || parentSector;
-      sectors.set(node.id, sector);
-      visit(node.children || [], sector);
-    }
-  };
-
-  visit(goals, goalscapeFullSector);
-  const selectedSector = focusContext.activeSelectionId ? sectors.get(focusContext.activeSelectionId) : undefined;
-  if (!selectedSector) return sectors;
-
-  const delta = goalscapeFocusSectorMidAngle - goalscapeSectorMidAngle(selectedSector);
-  return new Map(Array.from(sectors.entries()).map(([id, sector]) => [id, rotateGoalscapeSector(sector, delta)]));
-}
-
-function buildGoalscapeDescendantSet(goal: GoalNode | undefined) {
-  if (!goal) return undefined;
-  const descendants = new Set<string>();
-  const visit = (nodes: GoalNode[]) => {
-    for (const node of nodes) {
-      descendants.add(node.id);
-      visit(node.children || []);
-    }
-  };
-  visit(goal.children || []);
-  return descendants;
-}
-
-function buildGoalscapeSelectedPathIds(goals: GoalNode[], selectedId: string | undefined) {
-  const path = new Set<string>();
-  if (!selectedId || selectedId === "root" || !findGoalById(goals, selectedId)) return path;
-
-  const parents = buildParentMap(goals);
-  let current: string | undefined = selectedId;
-  while (current && current !== "root") {
-    path.add(current);
-    current = parents.get(current);
-  }
-  return path;
-}
-
-function buildGoalscapeSubtreeSet(goal: GoalNode | undefined, descendants: Set<string> | undefined) {
-  const subtree = new Set<string>();
-  if (!goal) return subtree;
-  subtree.add(goal.id);
-  for (const descendant of descendants || []) subtree.add(descendant);
-  return subtree;
-}
-
-function buildGoalscapeFocusContext(goals: GoalNode[], selectedId: string | undefined, maxTreeDepth: number): GoalscapeFocusContext {
-  const selectedGoal = selectedId && selectedId !== "root" ? findGoalById(goals, selectedId) : undefined;
-  const selectedDescendantIds = buildGoalscapeDescendantSet(selectedGoal) || new Set<string>();
-  return {
-    activeSelectionId: selectedGoal?.id,
-    selectedPathIds: buildGoalscapeSelectedPathIds(goals, selectedGoal?.id),
-    selectedDescendantIds,
-    selectedSubtreeIds: buildGoalscapeSubtreeSet(selectedGoal, selectedDescendantIds),
-    maxTreeDepth
-  };
-}
-
-function countGoalscapeRenderDepths(goals: GoalNode[], treeDepth = 1, counts = new Map<number, number>()) {
-  for (const goal of goals) {
-    counts.set(treeDepth, (counts.get(treeDepth) ?? 0) + 1);
-    countGoalscapeRenderDepths(goal.children || [], treeDepth + 1, counts);
-  }
-  return counts;
-}
-
-function goalscapeSelectionEmphasis(goalId: string, focusContext: GoalscapeFocusContext) {
-  if (!focusContext.activeSelectionId) {
-    return {
-      treeDistance: 0,
-      scale: 1,
-      perspectiveScale: 1,
-      opacity: 1,
-      zIndexBoost: 0,
-      inwardShift: 0,
-      inSelectedSubtree: false,
-      inSelectedPath: false
-    };
-  }
-
-  const inSelectedSubtree = focusContext.selectedSubtreeIds.has(goalId);
-  const inSelectedPath = focusContext.selectedPathIds.has(goalId);
-  if (inSelectedSubtree) {
-    const isSelectedNode = goalId === focusContext.activeSelectionId;
-    return {
-      treeDistance: 0,
-      scale: isSelectedNode ? 1.18 : 1.14,
-      perspectiveScale: isSelectedNode ? 1.08 : 1.05,
-      opacity: 1,
-      zIndexBoost: isSelectedNode ? 120 : 90,
-      inwardShift: isSelectedNode ? 0.3 : 0.18,
-      inSelectedSubtree,
-      inSelectedPath
-    };
-  }
-
-  if (inSelectedPath) {
-    return {
-      treeDistance: 1,
-      scale: 0.78,
-      perspectiveScale: 0.9,
-      opacity: 0.82,
-      zIndexBoost: 30,
-      inwardShift: 0.04,
-      inSelectedSubtree,
-      inSelectedPath
-    };
-  }
-
-  return {
-    treeDistance: 2,
-    scale: 0.62,
-    perspectiveScale: 0.82,
-    opacity: 0.76,
-    zIndexBoost: -30,
-    inwardShift: 0,
-    inSelectedSubtree,
-    inSelectedPath
-  };
-}
-
-function goalscapeShiftTowardCenter(position: MapPosition, amount: number): MapPosition {
-  if (amount <= 0) return position;
-  return {
-    x: position.x + (goalscapeCenter.x - position.x) * amount,
-    y: position.y + (goalscapeCenter.y - position.y) * amount
-  };
-}
-
-function shouldCollapseGoalscapeChildren(
-  layout: Pick<GoalscapeNodeLayout, "node" | "depth" | "treeDepth" | "width" | "height">,
-  visibleDepth: number
-) {
-  const children = layout.node.children || [];
-  if (children.length === 0) return false;
-
-  if (layout.treeDepth >= visibleDepth) return true;
-  if (children.length > goalscapeOrbitCapacity(layout.treeDepth + 1, visibleDepth)) return true;
-  return layout.width < goalscapeCollapseMinWidth || layout.height < goalscapeCollapseMinHeight;
-}
-
-function isGoalscapeOutermostLeaf(goal: GoalNode, treeDepth: number, focusContext: GoalscapeFocusContext) {
-  return focusContext.maxTreeDepth > 1 && treeDepth === focusContext.maxTreeDepth && (goal.children || []).length === 0;
-}
-
-function shouldRenderGoalscapeNode(goal: GoalNode, treeDepth: number, focusContext: GoalscapeFocusContext) {
-  if (!isGoalscapeOutermostLeaf(goal, treeDepth, focusContext)) return true;
-  return Boolean(focusContext.activeSelectionId && focusContext.selectedSubtreeIds.has(goal.id));
-}
-
-function addGoalscapeHiddenChildCount(layout: GoalscapeNodeLayout, hiddenGoal: GoalNode) {
-  layout.childCount = (layout.childCount ?? 0) + 1 + countGoalscapeDescendants(hiddenGoal);
-}
-
-const goalscapeTopNodeBaseSize = { width: 118, height: 92 };
-
-function goalscapeTopNodeSize(densityScale: number, focusScale: number) {
-  const scale = clamp(densityScale * focusScale, 0.54, 1.12);
-  return {
-    width: Math.round(clamp(goalscapeTopNodeBaseSize.width * scale, 58, goalscapeTopNodeBaseSize.width * 1.12)),
-    height: Math.round(clamp(goalscapeTopNodeBaseSize.height * scale, 48, goalscapeTopNodeBaseSize.height * 1.12))
-  };
-}
-
-export function buildGoalscapeLayout(
-  goals: GoalNode[],
-  importanceOverrides: ImportanceOverrides,
-  progressOverrides: ProgressOverrides,
-  positionOverrides: MapPositionOverrides = {},
-  mapContextId = "root",
-  selectedId?: string
-) {
-  const stats = collectGoalscapeTreeStats(goals);
-  const focusContext = buildGoalscapeFocusContext(goals, selectedId, stats.maxDepth);
-  const renderDepthCounts = countGoalscapeRenderDepths(goals);
-  const visibleDepth = goalscapeVisibleDepth(stats);
-  const topImportance = normalizedImportance(goals, importanceOverrides);
-  const sectorIndex = buildGoalscapeSectorIndex(goals, focusContext);
-  const layouts: GoalscapeNodeLayout[] = [];
-
-  const appendChildren = (parentLayout: GoalscapeNodeLayout, parentSector: GoalscapeSector) => {
-    const children = parentLayout.node.children || [];
-    if (children.length === 0) return;
-
-    if (shouldCollapseGoalscapeChildren(parentLayout, visibleDepth)) {
-      parentLayout.childCount = countGoalscapeDescendants(parentLayout.node);
-      return;
-    }
-
-    const childImportance = normalizedImportance(children, importanceOverrides);
-    children.forEach((child, childIndex) => {
-      const treeDepth = parentLayout.treeDepth + 1;
-      if (!shouldRenderGoalscapeNode(child, treeDepth, focusContext)) {
-        addGoalscapeHiddenChildCount(parentLayout, child);
-        return;
-      }
-
-      const depth = treeDepth;
-      const sector = sectorIndex.get(child.id) || parentSector;
-      const sectorRole: GoalscapeSectorRole = "descendant";
-      const childAngle = goalscapeSectorMidAngle(sector);
-      const childOrbit = goalscapeOrbitForDepth(depth, visibleDepth);
-      const fallback = goalscapePointOnOrbit(childAngle, depth, visibleDepth);
-      const emphasis = goalscapeSelectionEmphasis(child.id, focusContext);
-      const childPosition = goalscapeShiftTowardCenter(constrainGoalscapePositionToSectorOrbit(
-        goalMapPosition(child, fallback, positionOverrides, mapContextId),
-        childOrbit,
-        sector
-      ), emphasis.inwardShift);
-      const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? children.length, depth, visibleDepth);
-      const childSize = goalscapeChildNodeSize(parentLayout, childIndex, depth, densityScale, emphasis.scale);
-      const childColor = goalscapeNodeColor(child, parentLayout.color);
-      const childLayout: GoalscapeNodeLayout = {
-        node: child,
-        parentId: parentLayout.node.id,
-        depth,
-        treeDepth,
-        visibleDepth,
-        x: childPosition.x,
-        y: childPosition.y,
-        width: childSize.width,
-        height: childSize.height,
-        color: childColor,
-        progress: weightedGoalProgress(child, importanceOverrides, progressOverrides),
-        importance: childImportance[child.id] ?? 0,
-        variant: layouts.length + childIndex,
-        treeDistance: focusContext.activeSelectionId ? emphasis.treeDistance : treeDepth,
-        perspectiveScale: emphasis.perspectiveScale,
-        opacity: emphasis.opacity,
-        zIndex: Math.round(1000 - depth * 10 + emphasis.zIndexBoost),
-        linkParentId: parentLayout.node.id,
-        sectorStartAngle: sector.startAngle,
-        sectorEndAngle: sector.endAngle,
-        sectorMidAngle: childAngle,
-        sectorRole
-      };
-
-      layouts.push(childLayout);
-      appendChildren(childLayout, sector);
-    });
-  };
-
-  goals.forEach((goal, index) => {
-    const treeDepth = 1;
-    if (!shouldRenderGoalscapeNode(goal, treeDepth, focusContext)) return;
-
-    const depth = treeDepth;
-    const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
-    const sector = sectorIndex.get(goal.id) || goalscapeFullSector;
-    const sectorRole: GoalscapeSectorRole = "primary";
-    const angle = goalscapeSectorMidAngle(sector);
-    const fallback = goalscapePointOnOrbit(angle, depth, visibleDepth);
-    const emphasis = goalscapeSelectionEmphasis(goal.id, focusContext);
-    const position = goalscapeShiftTowardCenter(constrainGoalscapePositionToSectorOrbit(
-      goalMapPosition(goal, fallback, positionOverrides, mapContextId),
-      orbit,
-      sector
-    ), emphasis.inwardShift);
-    const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? goals.length, depth, visibleDepth);
-    const size = goalscapeTopNodeSize(densityScale, emphasis.scale);
-    const color = goalscapeNodeColor(goal, "#64748b");
-    const importance = topImportance[goal.id] ?? 0;
-    const layout: GoalscapeNodeLayout = {
-      node: goal,
-      parentId: "root",
-      depth,
-      treeDepth,
-      visibleDepth,
-      x: position.x,
-      y: position.y,
-      width: size.width,
-      height: size.height,
-      color,
-      progress: weightedGoalProgress(goal, importanceOverrides, progressOverrides),
-      importance,
-      variant: index,
-      treeDistance: focusContext.activeSelectionId ? emphasis.treeDistance : treeDepth,
-      perspectiveScale: emphasis.perspectiveScale,
-      opacity: emphasis.opacity,
-      zIndex: Math.round(1000 - depth * 10 + emphasis.zIndexBoost),
-      linkParentId: "root",
-      sectorStartAngle: sector.startAngle,
-      sectorEndAngle: sector.endAngle,
-      sectorMidAngle: angle,
-      sectorRole
-    };
-
-    layouts.push(layout);
-    appendChildren(layout, sector);
-  });
-
-  return layouts;
-}
-
-function goalscapeBlobPath(x: number, y: number, width: number, height: number, variant: number) {
-  const rx = width / 2;
-  const ry = height / 2;
-  const wobble = ((variant % 5) - 2) * 0.025;
-  return [
-    `M ${(x - rx * 0.12).toFixed(1)} ${(y - ry).toFixed(1)}`,
-    `C ${(x + rx * 0.62).toFixed(1)} ${(y - ry * (1.16 + wobble)).toFixed(1)} ${(x + rx * 1.08).toFixed(1)} ${(y - ry * 0.46).toFixed(1)} ${(x + rx * 0.96).toFixed(1)} ${(y + ry * 0.08).toFixed(1)}`,
-    `C ${(x + rx * 0.9).toFixed(1)} ${(y + ry * 0.72).toFixed(1)} ${(x + rx * 0.28).toFixed(1)} ${(y + ry * 1.04).toFixed(1)} ${(x - rx * 0.18).toFixed(1)} ${(y + ry * 0.92).toFixed(1)}`,
-    `C ${(x - rx * 0.82).toFixed(1)} ${(y + ry * 0.82).toFixed(1)} ${(x - rx * 1.06).toFixed(1)} ${(y + ry * 0.22).toFixed(1)} ${(x - rx * 0.9).toFixed(1)} ${(y - ry * 0.36).toFixed(1)}`,
-    `C ${(x - rx * 0.72).toFixed(1)} ${(y - ry * 0.86).toFixed(1)} ${(x - rx * 0.42).toFixed(1)} ${(y - ry * 1.02).toFixed(1)} ${(x - rx * 0.12).toFixed(1)} ${(y - ry).toFixed(1)}`,
-    "Z"
-  ].join(" ");
-}
-
-function goalscapeConnectionPath(from: { x: number; y: number }, to: { x: number; y: number }) {
-  const midX = (from.x + to.x) / 2;
-  const midY = (from.y + to.y) / 2;
-  return `M ${from.x} ${from.y} C ${midX} ${from.y}, ${midX} ${midY}, ${to.x} ${to.y}`;
-}
-
-function goalscapeSectorBandPath(layout: GoalscapeNodeLayout) {
-  const span = Math.min(goalscapeSectorSpan({ startAngle: layout.sectorStartAngle, endAngle: layout.sectorEndAngle }), 359.5);
-  const startAngle = layout.sectorStartAngle;
-  const endAngle = layout.sectorStartAngle + span;
-  const outer = goalscapeOrbitForDepth(layout.depth, layout.visibleDepth);
-  const inner =
-    layout.depth === 1
-      ? { depth: 0, cx: goalscapeCenter.x, cy: goalscapeCenter.y, rx: 104, ry: 76 }
-      : goalscapeOrbitForDepth(layout.depth - 1, layout.visibleDepth);
-  const startOuter = goalscapePointOnSpecificOrbit(startAngle, outer);
-  const endOuter = goalscapePointOnSpecificOrbit(endAngle, outer);
-  const endInner = goalscapePointOnSpecificOrbit(endAngle, inner);
-  const startInner = goalscapePointOnSpecificOrbit(startAngle, inner);
-  const largeArc = span > 180 ? 1 : 0;
-
-  return [
-    `M ${startInner.x.toFixed(1)} ${startInner.y.toFixed(1)}`,
-    `L ${startOuter.x.toFixed(1)} ${startOuter.y.toFixed(1)}`,
-    `A ${outer.rx.toFixed(1)} ${outer.ry.toFixed(1)} 0 ${largeArc} 1 ${endOuter.x.toFixed(1)} ${endOuter.y.toFixed(1)}`,
-    `L ${endInner.x.toFixed(1)} ${endInner.y.toFixed(1)}`,
-    `A ${inner.rx.toFixed(1)} ${inner.ry.toFixed(1)} 0 ${largeArc} 0 ${startInner.x.toFixed(1)} ${startInner.y.toFixed(1)}`,
-    "Z"
-  ].join(" ");
-}
-
-function goalscapeSectorOpacity(layout: GoalscapeNodeLayout) {
-  return clamp(0.18 - Math.max(0, layout.depth - 1) * 0.035, 0.075, 0.18);
-}
-
-function goalscapeLabelLines(title: string, maxChars: number, maxLines: number) {
-  const chars = Array.from(title.replace(/\s+/g, ""));
-  if (chars.length <= maxChars) return [title];
-
-  const lines: string[] = [];
-  for (let index = 0; index < chars.length && lines.length < maxLines; index += maxChars) {
-    lines.push(chars.slice(index, index + maxChars).join(""));
-  }
-  if (chars.length > maxChars * maxLines) {
-    const last = lines[lines.length - 1] || "";
-    lines[lines.length - 1] = `${Array.from(last).slice(0, Math.max(1, maxChars - 3)).join("")}...`;
-  }
-  return lines;
-}
-
-function goalIconComponent(goal: GoalNode) {
-  const text = `${goal.title} ${titleFromLink(goal.domain)}`;
-  if (text.includes("家庭")) return Home;
-  if (text.includes("社交") || text.includes("朋友") || text.includes("人脉")) return Users;
-  if (text.includes("健康") || text.includes("身体")) return Leaf;
-  if (text.includes("幸福") || text.includes("生活")) return Heart;
-  if (text.includes("职业")) return Briefcase;
-  if (text.includes("外部") || text.includes("网站") || text.includes("展示")) return Monitor;
-  if (text.includes("交付") || text.includes("行动")) return ClipboardCheck;
-  if (text.includes("能力") || text.includes("学习")) return GraduationCap;
-  if (text.includes("机会") || text.includes("投资")) return Star;
-  if (text.includes("知识") || text.includes("认知") || text.includes("体系")) return BookOpen;
-  if (text.includes("信息") || text.includes("博客") || text.includes("文章")) return FileText;
-  if (text.includes("个人") || text.includes("成长")) return User;
-  return Network;
-}
-
 function GoalscapeBridge({
   from,
   to,
@@ -2735,8 +1924,11 @@ const GoalMap = React.memo(function GoalMap({
   mapContextId,
   centerId,
   centerTitle,
+  centerGoal,
   emptyLabel,
   onSelect,
+  onDrill,
+  onAscend,
   onPreviewPosition,
   onCommitPosition
 }: {
@@ -2748,18 +1940,21 @@ const GoalMap = React.memo(function GoalMap({
   mapContextId: string;
   centerId: string;
   centerTitle: string;
+  centerGoal?: GoalNode | null;
   emptyLabel: string;
   onSelect: (id: string) => void;
+  onDrill: (id: string) => void;
+  onAscend: () => void;
   onPreviewPosition: (id: string, position: MapPosition) => void;
   onCommitPosition: (id: string, position: MapPosition) => void;
 }) {
   const layouts = useMemo(
-    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, selectedId),
-    [goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, selectedId]
+    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId),
+    [goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId]
   );
-  const family = useMemo(() => selectedFamily(goals, selectedId), [goals, selectedId]);
   const centerNodeId = centerId;
   const centerDisplayTitle = centerTitle;
+  const centerVisualMode = goalscapeCenterVisualMode(centerNodeId, centerGoal);
   const visibleLayouts = useMemo(
     () => [...layouts].sort((a, b) => a.zIndex - b.zIndex || a.depth - b.depth || a.node.id.localeCompare(b.node.id)),
     [layouts]
@@ -2771,18 +1966,7 @@ const GoalMap = React.memo(function GoalMap({
     () => Array.from(new Set(visibleLayouts.map((layout) => layout.depth))).sort((a, b) => a - b),
     [visibleLayouts]
   );
-  const visibleSectorBands = useMemo(
-    () =>
-      [...layouts].sort(
-        (a, b) =>
-          a.depth - b.depth ||
-          goalscapeSectorSpan({ startAngle: b.sectorStartAngle, endAngle: b.sectorEndAngle }) -
-            goalscapeSectorSpan({ startAngle: a.sectorStartAngle, endAngle: a.sectorEndAngle }) ||
-          a.node.id.localeCompare(b.node.id)
-      ),
-    [layouts]
-  );
-  const centerPearlTint = useMemo(() => goalscapeCenterPearlTint(centerNodeId, null), [centerNodeId]);
+  const centerPearlTint = useMemo(() => goalscapeCenterPearlTint(centerNodeId, centerGoal), [centerNodeId, centerGoal]);
   const centerPearlPath = useMemo(
     () =>
       goalscapeBlobPath(
@@ -2795,6 +1979,32 @@ const GoalMap = React.memo(function GoalMap({
     []
   );
   const centerLabel = useMemo(() => goalscapeLabelLines(centerDisplayTitle, 5, 2), [centerDisplayTitle]);
+  const centerGoalVisual = useMemo(() => {
+    if (centerVisualMode !== "goal" || !centerGoal) return null;
+    const width = goalscapeTopNodeBaseSize.width;
+    const height = goalscapeTopNodeBaseSize.height;
+    const color = goalscapeNodeColor(centerGoal, "#64748b");
+    const progress = weightedGoalProgress(centerGoal, importanceOverrides, progressOverrides);
+    const metrics = goalscapeNodeVisualMetrics({ width, height, depth: 1 });
+    const label = goalscapeLabelLines(centerGoal.title, goalscapeLabelMaxChars({ width, depth: 1 }, metrics), 2);
+    return {
+      goal: centerGoal,
+      x: goalscapeCenter.x,
+      y: goalscapeCenter.y,
+      width,
+      height,
+      variant: 0,
+      color,
+      progress,
+      metrics,
+      label,
+      Icon: goalIconComponent(centerGoal),
+      path: goalscapeBlobPath(goalscapeCenter.x, goalscapeCenter.y, width, height, 0),
+      haloPath: goalscapeBlobPath(goalscapeCenter.x, goalscapeCenter.y, width + 20, height + 18, 0),
+      rimPath: goalscapeBlobPath(goalscapeCenter.x, goalscapeCenter.y, width - 12, height - 10, 2),
+      progressFill: goalscapeProgressFillGeometry(goalscapeCenter.y, height, progress)
+    };
+  }, [centerGoal, centerVisualMode, importanceOverrides, progressOverrides]);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{
     id: string;
@@ -2803,11 +2013,11 @@ const GoalMap = React.memo(function GoalMap({
     nodeStart: MapPosition;
     current: MapPosition;
     orbit: GoalscapeOrbit;
-    sector: GoalscapeSector;
     moved: boolean;
     frame: number | null;
   } | null>(null);
   const suppressClickRef = useRef<string | null>(null);
+  const lastNodeClickRef = useRef<{ id: string; time: number } | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
 
   const pointFromPointer = useCallback((event: PointerEvent | React.PointerEvent<SVGGElement>) => {
@@ -2825,13 +2035,12 @@ const GoalMap = React.memo(function GoalMap({
     if (!drag || event.pointerId !== drag.pointerId) return;
     const point = pointFromPointer(event);
     if (!point) return;
-    const next = constrainGoalscapePositionToSectorOrbit(
+    const next = constrainGoalscapePositionToOrbit(
       {
         x: drag.nodeStart.x + point.x - drag.pointerStart.x,
         y: drag.nodeStart.y + point.y - drag.pointerStart.y
       },
-      drag.orbit,
-      drag.sector
+      drag.orbit
     );
     drag.current = next;
     if (Math.hypot(next.x - drag.nodeStart.x, next.y - drag.nodeStart.y) > 3) drag.moved = true;
@@ -2882,7 +2091,6 @@ const GoalMap = React.memo(function GoalMap({
       nodeStart: { x: layout.x, y: layout.y },
       current: { x: layout.x, y: layout.y },
       orbit: goalscapeOrbitForDepth(layout.depth, layout.visibleDepth),
-      sector: { startAngle: layout.sectorStartAngle, endAngle: layout.sectorEndAngle },
       moved: false,
       frame: null
     };
@@ -2893,23 +2101,52 @@ const GoalMap = React.memo(function GoalMap({
   }, [finishDrag, moveDrag, pointFromPointer]);
 
   const selectOnKey = useCallback((event: React.KeyboardEvent<SVGGElement>, id: string) => {
+    if (event.key === "Enter" && event.shiftKey) {
+      event.preventDefault();
+      onDrill(id);
+      return;
+    }
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       onSelect(id);
     }
-  }, [onSelect]);
+  }, [onDrill, onSelect]);
+
+  const centerGroupClassName = centerGoalVisual
+    ? `goalscape-center goalscape-center-goal goalscape-node depth-1${selectedId === centerNodeId ? " active" : ""}`
+    : selectedId === centerNodeId
+      ? "goalscape-center active"
+      : "goalscape-center";
+  const centerGroupStyle = centerGoalVisual
+    ? ({
+        "--center-glow": centerPearlTint.glow,
+        "--node-color": centerGoalVisual.color,
+        "--node-icon-size": `${centerGoalVisual.metrics.iconSize}px`,
+        "--node-icon-glyph-size": `${centerGoalVisual.metrics.iconGlyphSize}px`,
+        "--node-title-size": `${centerGoalVisual.metrics.titleSize}px`,
+        "--node-depth-scale": 1
+      } as React.CSSProperties & {
+        "--center-glow": string;
+        "--node-color": string;
+        "--node-icon-size": string;
+        "--node-icon-glyph-size": string;
+        "--node-title-size": string;
+        "--node-depth-scale": number;
+      })
+    : ({ "--center-glow": centerPearlTint.glow } as React.CSSProperties & { "--center-glow": string });
+  const CenterGoalIcon = centerGoalVisual?.Icon ?? Network;
 
   return (
     <svg
       ref={svgRef}
-      className={`goal-map goalscape-map${layouts.length > 20 ? " dense" : ""}${selectedId !== centerId ? " focused" : ""}`}
+      className={`goal-map goalscape-map${centerVisualMode === "goal" ? " focused" : ""}${layouts.length > 20 ? " dense" : ""}`}
       viewBox="0 0 1200 760"
       role="img"
       aria-labelledby="map-title map-desc"
       onClick={() => onSelect(centerId)}
     >
       <title id="map-title">{centerDisplayTitle}目标地图</title>
-      <desc id="map-desc">Pearl goals are arranged in circular sectors. Selecting a goal emphasizes its subtree in place.</desc>
+      <desc id="map-desc">Pearl goals are arranged on concentric orbital paths. Selecting a goal highlights it in place.</desc>
       <defs>
         {/* Glow level filters for starlight cores */}
         <filter id="goalscape-glow-level-0" x="-50%" y="-50%" width="200%" height="200%">
@@ -3007,6 +2244,23 @@ const GoalMap = React.memo(function GoalMap({
           <stop offset="0%" stopColor={centerPearlTint.iridescent} stopOpacity="0.42" />
           <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
         </radialGradient>
+        {centerGoalVisual && (
+          <React.Fragment key="goalscape-center-goal-defs">
+            <clipPath id="goalscape-center-goal-clip">
+              <path d={centerGoalVisual.path} />
+            </clipPath>
+            <linearGradient id="goalscape-center-goal-bottle" x1="18%" y1="5%" x2="86%" y2="96%">
+              <stop offset="0%" stopColor="rgba(255, 255, 255, 0.96)" />
+              <stop offset="52%" stopColor={blend(centerGoalVisual.color, "#ffffff", 0.88)} />
+              <stop offset="100%" stopColor={blend(centerGoalVisual.color, "#ffffff", 0.72)} />
+            </linearGradient>
+            <linearGradient id="goalscape-center-goal-liquid" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor={blend(centerGoalVisual.color, "#ffffff", 0.38)} />
+              <stop offset="58%" stopColor={centerGoalVisual.color} />
+              <stop offset="100%" stopColor={blend(centerGoalVisual.color, "#12233e", 0.18)} />
+            </linearGradient>
+          </React.Fragment>
+        )}
         {visibleLayouts.map((layout, index) => {
           const nodePath = goalscapeBlobPath(layout.x, layout.y, layout.width, layout.height, layout.variant);
           return (
@@ -3028,27 +2282,6 @@ const GoalMap = React.memo(function GoalMap({
           );
         })}
       </defs>
-
-      <g className="goalscape-sectors" aria-hidden="true">
-        {visibleSectorBands.map((layout) => (
-          <path
-            key={`${layout.node.id}-sector`}
-            className="goalscape-sector-band"
-            data-depth={layout.depth}
-            data-role={layout.sectorRole}
-            d={goalscapeSectorBandPath(layout)}
-            style={
-              {
-                "--sector-color": layout.color,
-                "--sector-opacity": goalscapeSectorOpacity(layout)
-              } as React.CSSProperties & {
-                "--sector-color": string;
-                "--sector-opacity": number;
-              }
-            }
-          />
-        ))}
-      </g>
 
       <g className="goalscape-orbits" aria-hidden="true">
         {visibleOrbitDepths.map((depth) => {
@@ -3080,116 +2313,208 @@ const GoalMap = React.memo(function GoalMap({
       </g>
 
       <g
-        className={selectedId === centerNodeId ? "goalscape-center active" : "goalscape-center"}
+        className={centerGroupClassName}
         role="button"
         tabIndex={0}
         focusable="true"
-        style={{ "--center-glow": centerPearlTint.glow } as React.CSSProperties & { "--center-glow": string }}
+        style={centerGroupStyle}
         onClick={(event) => {
           event.stopPropagation();
+          onAscend();
           onSelect(centerId);
         }}
-        onKeyDown={(event) => selectOnKey(event, centerId)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          onAscend();
+          onSelect(centerId);
+        }}
         aria-label={selectedId !== centerId ? `${centerDisplayTitle}，点击返回地图中心` : centerDisplayTitle}
       >
-        <GoalscapeCenterAstrolabe cx={goalscapeCenter.x} cy={goalscapeCenter.y} />
-
-        <g className="goalscape-center-visual">
-          <path
-            className="goalscape-center-glow"
-            d={goalscapeBlobPath(
-              goalscapeCenter.x,
-              goalscapeCenter.y,
-              goalscapeCenterPearlSize.width + 18,
-              goalscapeCenterPearlSize.height + 14,
-              goalscapeCenterPearlSize.variant
+        {centerGoalVisual ? (
+          <g className="goalscape-node-visual goalscape-center-goal-visual">
+            <path className="goalscape-node-halo" d={centerGoalVisual.haloPath} />
+            <path
+              className="goalscape-node-shape"
+              d={centerGoalVisual.path}
+              fill="url(#goalscape-center-goal-bottle)"
+              fillOpacity={goalscapeNodeDensity(centerGoalVisual.progress)}
+              strokeOpacity={0.4 + 0.6 * (centerGoalVisual.progress / 100)}
+            />
+            <rect
+              className="goalscape-node-progress-fill"
+              x={centerGoalVisual.x - centerGoalVisual.width / 2 - 4}
+              y={centerGoalVisual.progressFill.y}
+              width={centerGoalVisual.width + 8}
+              height={centerGoalVisual.progressFill.height}
+              clipPath="url(#goalscape-center-goal-clip)"
+              fill="url(#goalscape-center-goal-liquid)"
+              opacity={0.18 + 0.38 * (centerGoalVisual.progress / 100)}
+            />
+            {centerGoalVisual.progress > 0 && centerGoalVisual.progress < 100 && (
+              <line
+                className="goalscape-node-progress-surface"
+                x1={centerGoalVisual.x - centerGoalVisual.width * 0.34}
+                x2={centerGoalVisual.x + centerGoalVisual.width * 0.34}
+                y1={centerGoalVisual.progressFill.surfaceY}
+                y2={centerGoalVisual.progressFill.surfaceY}
+                clipPath="url(#goalscape-center-goal-clip)"
+              />
             )}
-            fill="none"
-            stroke="var(--center-glow, #fff7ed)"
-            strokeWidth="5"
-            filter="url(#goalscape-hub-glow)"
-            opacity="0.82"
-          />
-
-          <path
-            className="goalscape-center-glass"
-            d={centerPearlPath}
-            fill="url(#goalscape-center-pearl-fill)"
-            stroke="rgba(255, 255, 255, 0.58)"
-            strokeWidth="1.6"
-          />
-
-          <path
-            className="goalscape-center-iridescent"
-            d={centerPearlPath}
-            fill="url(#goalscape-center-pearl-iridescent)"
-            pointerEvents="none"
-          />
-
-          <ellipse
-            className="goalscape-center-shine-primary"
-            cx={goalscapeCenter.x - 22}
-            cy={goalscapeCenter.y - 28}
-            rx="34"
-            ry="18"
-            fill="rgba(255, 255, 255, 0.52)"
-            transform={`rotate(-18 ${goalscapeCenter.x - 22} ${goalscapeCenter.y - 28})`}
-            pointerEvents="none"
-          />
-          <path
-            className="goalscape-center-shine-edge"
-            d={`M ${goalscapeCenter.x - 48} ${goalscapeCenter.y + 34} A 52 52 0 0 0 ${goalscapeCenter.x + 48} ${goalscapeCenter.y + 34} A 44 44 0 0 1 ${goalscapeCenter.x - 48} ${goalscapeCenter.y + 34} Z`}
-            fill="rgba(255, 255, 255, 0.12)"
-            pointerEvents="none"
-          />
-          <ellipse
-            className="goalscape-center-shine-env"
-            cx={goalscapeCenter.x + 24}
-            cy={goalscapeCenter.y + 18}
-            rx="16"
-            ry="10"
-            fill={centerPearlTint.tertiary}
-            opacity="0.22"
-            transform={`rotate(24 ${goalscapeCenter.x + 24} ${goalscapeCenter.y + 18})`}
-            pointerEvents="none"
-          />
-
-          <path
-            className="goalscape-center-rim"
-            d={goalscapeBlobPath(
-              goalscapeCenter.x,
-              goalscapeCenter.y,
-              goalscapeCenterPearlSize.width - 14,
-              goalscapeCenterPearlSize.height - 12,
-              goalscapeCenterPearlSize.variant + 2
+            <circle
+              cx={centerGoalVisual.x}
+              cy={centerGoalVisual.y}
+              r={goalscapeStarlightCoreRadius(centerGoalVisual.metrics.coreRadius, centerGoalVisual.progress)}
+              className="goal-starlight-core"
+              fill={centerGoalVisual.color}
+              filter={`url(#goalscape-glow-level-${Math.min(5, Math.floor(centerGoalVisual.progress / 20))})`}
+            />
+            {centerGoalVisual.progress === 100 && (
+              <>
+                <ellipse
+                  cx={centerGoalVisual.x}
+                  cy={centerGoalVisual.y}
+                  rx={centerGoalVisual.width * 0.72}
+                  ry={centerGoalVisual.height * 0.28}
+                  transform={`rotate(-15 ${centerGoalVisual.x} ${centerGoalVisual.y})`}
+                  className="goal-saturn-ring"
+                />
+                <path
+                  d={`M ${centerGoalVisual.x} ${centerGoalVisual.y - 12} Q ${centerGoalVisual.x} ${centerGoalVisual.y} ${centerGoalVisual.x + 12} ${centerGoalVisual.y} Q ${centerGoalVisual.x} ${centerGoalVisual.y} ${centerGoalVisual.x} ${centerGoalVisual.y + 12} Q ${centerGoalVisual.x} ${centerGoalVisual.y} ${centerGoalVisual.x - 12} ${centerGoalVisual.y} Q ${centerGoalVisual.x} ${centerGoalVisual.y} ${centerGoalVisual.x} ${centerGoalVisual.y - 12} Z`}
+                  className="goal-supernova-sparkle"
+                />
+              </>
             )}
-            fill="none"
-            stroke="rgba(255, 255, 255, 0.52)"
-            strokeWidth="1.2"
-            pointerEvents="none"
-          />
+            <path className="goalscape-node-glass" d={centerGoalVisual.path} />
+            <path
+              className="goalscape-node-rim"
+              d={centerGoalVisual.rimPath}
+              strokeOpacity={0.4 + 0.5 * (centerGoalVisual.progress / 100)}
+            />
+            <foreignObject
+              x={centerGoalVisual.x - centerGoalVisual.metrics.iconSize / 2}
+              y={centerGoalVisual.y - centerGoalVisual.metrics.iconY}
+              width={centerGoalVisual.metrics.iconSize}
+              height={centerGoalVisual.metrics.iconSize}
+              className="goalscape-icon-object"
+            >
+              <div className="goalscape-icon-wrap">
+                <CenterGoalIcon className="goalscape-node-icon" aria-hidden="true" />
+              </div>
+            </foreignObject>
+            <text
+              className="goalscape-node-title domain"
+              x={centerGoalVisual.x}
+              y={centerGoalVisual.y + centerGoalVisual.metrics.titleY}
+            >
+              {centerGoalVisual.label.map((line, lineIndex) => (
+                <tspan key={line + lineIndex} x={centerGoalVisual.x} dy={lineIndex === 0 ? 0 : centerGoalVisual.metrics.titleLineGap}>
+                  {line}
+                </tspan>
+              ))}
+            </text>
+          </g>
+        ) : (
+          <>
+            <GoalscapeCenterAstrolabe cx={goalscapeCenter.x} cy={goalscapeCenter.y} />
 
-          <text
-            className="goalscape-center-title"
-            x={goalscapeCenter.x}
-            y={goalscapeCenter.y + (centerLabel.length > 1 ? -6 : 6)}
-          >
-            {centerLabel.map((line, lineIndex) => (
-              <tspan key={`${line}-${lineIndex}`} x={goalscapeCenter.x} dy={lineIndex === 0 ? 0 : 20}>
-                {line}
-              </tspan>
-            ))}
-          </text>
-        </g>
+            <g className="goalscape-center-visual">
+              <path
+                className="goalscape-center-glow"
+                d={goalscapeBlobPath(
+                  goalscapeCenter.x,
+                  goalscapeCenter.y,
+                  goalscapeCenterPearlSize.width + 18,
+                  goalscapeCenterPearlSize.height + 14,
+                  goalscapeCenterPearlSize.variant
+                )}
+                fill="none"
+                stroke="var(--center-glow, #fff7ed)"
+                strokeWidth="5"
+                filter="url(#goalscape-hub-glow)"
+                opacity="0.82"
+              />
+
+              <path
+                className="goalscape-center-glass"
+                d={centerPearlPath}
+                fill="url(#goalscape-center-pearl-fill)"
+                stroke="rgba(255, 255, 255, 0.58)"
+                strokeWidth="1.6"
+              />
+
+              <path
+                className="goalscape-center-iridescent"
+                d={centerPearlPath}
+                fill="url(#goalscape-center-pearl-iridescent)"
+                pointerEvents="none"
+              />
+
+              <ellipse
+                className="goalscape-center-shine-primary"
+                cx={goalscapeCenter.x - 22}
+                cy={goalscapeCenter.y - 28}
+                rx="34"
+                ry="18"
+                fill="rgba(255, 255, 255, 0.52)"
+                transform={`rotate(-18 ${goalscapeCenter.x - 22} ${goalscapeCenter.y - 28})`}
+                pointerEvents="none"
+              />
+              <path
+                className="goalscape-center-shine-edge"
+                d={`M ${goalscapeCenter.x - 48} ${goalscapeCenter.y + 34} A 52 52 0 0 0 ${goalscapeCenter.x + 48} ${goalscapeCenter.y + 34} A 44 44 0 0 1 ${goalscapeCenter.x - 48} ${goalscapeCenter.y + 34} Z`}
+                fill="rgba(255, 255, 255, 0.12)"
+                pointerEvents="none"
+              />
+              <ellipse
+                className="goalscape-center-shine-env"
+                cx={goalscapeCenter.x + 24}
+                cy={goalscapeCenter.y + 18}
+                rx="16"
+                ry="10"
+                fill={centerPearlTint.tertiary}
+                opacity="0.22"
+                transform={`rotate(24 ${goalscapeCenter.x + 24} ${goalscapeCenter.y + 18})`}
+                pointerEvents="none"
+              />
+
+              <path
+                className="goalscape-center-rim"
+                d={goalscapeBlobPath(
+                  goalscapeCenter.x,
+                  goalscapeCenter.y,
+                  goalscapeCenterPearlSize.width - 14,
+                  goalscapeCenterPearlSize.height - 12,
+                  goalscapeCenterPearlSize.variant + 2
+                )}
+                fill="none"
+                stroke="rgba(255, 255, 255, 0.52)"
+                strokeWidth="1.2"
+                pointerEvents="none"
+              />
+
+              <text
+                className="goalscape-center-title"
+                x={goalscapeCenter.x}
+                y={goalscapeCenter.y + (centerLabel.length > 1 ? -6 : 6)}
+              >
+                {centerLabel.map((line, lineIndex) => (
+                  <tspan key={`${line}-${lineIndex}`} x={goalscapeCenter.x} dy={lineIndex === 0 ? 0 : 20}>
+                    {line}
+                  </tspan>
+                ))}
+              </text>
+            </g>
+          </>
+        )}
       </g>
 
       {visibleLayouts.map((layout, index) => {
         const active = selectedId === layout.node.id;
-        const related = !family || family.has(layout.node.id);
         const depthTone = layout.perspectiveScale >= 0.98 ? " front" : layout.opacity <= 0.58 ? " back" : "";
         const Icon = goalIconComponent(layout.node);
         const visualMetrics = goalscapeNodeVisualMetrics(layout);
-        const label = goalscapeLabelLines(layout.node.title, layout.depth === 1 ? 5 : 6, 2);
+        const label = goalscapeLabelLines(layout.node.title, goalscapeLabelMaxChars(layout, visualMetrics), 2);
         const bottleGradientId = `goalscape-bottle-gradient-${index}`;
         const liquidGradientId = `goalscape-liquid-gradient-${index}`;
         const clipPathId = `goalscape-node-clip-${index}`;
@@ -3203,39 +2528,48 @@ const GoalMap = React.memo(function GoalMap({
         return (
           <g
             key={layout.node.id}
-            className={`goalscape-node depth-${layout.depth}${depthTone}${active ? " active" : ""}${related ? "" : " dim"}${draggingId === layout.node.id ? " dragging" : ""}`}
+            className={`goalscape-node depth-${layout.depth}${depthTone}${active ? " active" : ""}${draggingId === layout.node.id ? " dragging" : ""}`}
             role="button"
             tabIndex={0}
             focusable="true"
-            data-sector-role={layout.sectorRole}
             aria-label={`${layout.node.title}，进度 ${layout.progress}%${childCount ? `，折叠 ${childCount} 个后代` : ""}`}
-            style={
-              {
-                "--node-color": layout.color,
-                "--node-icon-size": `${visualMetrics.iconSize}px`,
-                "--node-icon-glyph-size": `${visualMetrics.iconGlyphSize}px`,
-                "--node-title-size": `${visualMetrics.titleSize}px`,
-                "--node-progress-size": `${visualMetrics.progressSize}px`,
-                "--node-depth-scale": layout.perspectiveScale,
-                opacity: layout.opacity
-              } as React.CSSProperties & {
-                "--node-color": string;
-                "--node-icon-size": string;
-                "--node-icon-glyph-size": string;
-                "--node-title-size": string;
-                "--node-progress-size": string;
-                "--node-depth-scale": number;
+              style={
+                {
+                  "--node-color": layout.color,
+                  "--node-icon-size": `${visualMetrics.iconSize}px`,
+                  "--node-icon-glyph-size": `${visualMetrics.iconGlyphSize}px`,
+                  "--node-title-size": `${visualMetrics.titleSize}px`,
+                  "--node-depth-scale": layout.perspectiveScale,
+                  opacity: layout.opacity
+                } as React.CSSProperties & {
+                  "--node-color": string;
+                  "--node-icon-size": string;
+                  "--node-icon-glyph-size": string;
+                  "--node-title-size": string;
+                  "--node-depth-scale": number;
+                }
               }
-            }
             onPointerDown={(event) => startNodeDrag(event, layout)}
             onClick={(event) => {
               if (suppressClickRef.current === layout.node.id) {
                 suppressClickRef.current = null;
+                lastNodeClickRef.current = null;
                 event.preventDefault();
                 event.stopPropagation();
                 return;
               }
               event.stopPropagation();
+              const now = window.performance.now();
+              const lastClick = lastNodeClickRef.current;
+              // Single source of truth for drill: a second click on the same node within
+              // 360ms drills in, a single click selects. (Replaces the old onDoubleClick,
+              // which fired onDrill a second time.) Reset after drill so a 3rd click can't re-fire.
+              if (lastClick?.id === layout.node.id && now - lastClick.time <= 360) {
+                lastNodeClickRef.current = null;
+                onDrill(layout.node.id);
+                return;
+              }
+              lastNodeClickRef.current = { id: layout.node.id, time: now };
               onSelect(layout.node.id);
             }}
             onKeyDown={(event) => selectOnKey(event, layout.node.id)}
@@ -3261,7 +2595,7 @@ const GoalMap = React.memo(function GoalMap({
                 height={progressFill.height}
                 clipPath={`url(#${clipPathId})`}
                 fill={`url(#${liquidGradientId})`}
-                opacity={0.26 + 0.5 * (layout.progress / 100)}
+                opacity={0.18 + 0.38 * (layout.progress / 100)}
               />
               {layout.progress > 0 && layout.progress < 100 && (
                 <line
@@ -3329,9 +2663,6 @@ const GoalMap = React.memo(function GoalMap({
                     {line}
                   </tspan>
                 ))}
-              </text>
-              <text className="goalscape-node-progress" x={layout.x} y={layout.y + visualMetrics.progressY}>
-                {layout.progress}%
               </text>
               {childCount > 0 && (
                 <g className="goalscape-node-badge" aria-hidden="true">
