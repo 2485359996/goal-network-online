@@ -3,6 +3,7 @@
 import {
   BookOpen,
   Briefcase,
+  ChartPie,
   CheckCircle2,
   CirclePlus,
   ChevronLeft,
@@ -57,6 +58,7 @@ import {
   nextThemePreference,
   readStoredTheme,
   resolvedTheme,
+  safeLocalStorage,
   writeStoredTheme,
   type ThemePreference
 } from "./theme";
@@ -75,14 +77,9 @@ import {
   formatEmpty,
   goalMapCenterTitle,
   goalPath,
-  hexToRgb,
   mediaQueryMatches,
-  normalizeHexColor,
   normalizedImportance,
   parentGoal,
-  percentValue,
-  priorityWeight,
-  progressValue,
   rebalanceImportance,
   shouldApplyGoalsResponse,
   shouldShowFirstGoalMapCta,
@@ -94,9 +91,11 @@ import {
   type ProgressOverrides
 } from "./goalUtils";
 import {
+  buildSunburstLayout,
   buildGoalscapeLayout,
   clampGoalscapePosition,
   constrainGoalscapePositionToOrbit,
+  DEFAULT_SUNBURST_VISIBLE_DEPTH,
   goalHasMapPosition,
   goalIconComponent,
   goalMapPosition,
@@ -119,7 +118,12 @@ import {
   hasCustomMapPosition,
   hasMapPositionOverride,
   mapPositionPreviewForContext,
+  nextSunburstVisibleDepth,
   pruneSavedMapPositionPreviews,
+  sunburstCenterRadius,
+  sunburstArcPath,
+  sunburstProgressArcPath,
+  sunburstProgressEdgePath,
   withMapPositionPreview,
   withoutMapPositionPreview,
   type GoalscapeCenterPearlTint,
@@ -127,7 +131,8 @@ import {
   type GoalscapeOrbit,
   type MapPosition,
   type MapPositionOverrides,
-  type MapPositionPreviewOverrides
+  type MapPositionPreviewOverrides,
+  type SunburstSegmentLayout
 } from "./goalscapeLayout";
 
 // Re-export the goal-data helpers that the goalscape layout test imports from "./main".
@@ -140,9 +145,11 @@ export {
 } from "./goalUtils";
 // Re-export the goalscape geometry/layout API consumed by the layout test from "./main".
 export {
+  buildSunburstLayout,
   buildGoalscapeLayout,
   clampGoalscapePosition,
   constrainGoalscapePositionToOrbit,
+  DEFAULT_SUNBURST_VISIBLE_DEPTH,
   goalHasMapPosition,
   goalscapeCenter,
   goalscapeCenterPearlSize,
@@ -152,7 +159,11 @@ export {
   goalscapeProgressFillGeometry,
   goalscapeStarlightCoreRadius,
   mapPositionPreviewForContext,
+  nextSunburstVisibleDepth,
   pruneSavedMapPositionPreviews,
+  sunburstArcPath,
+  sunburstProgressArcPath,
+  sunburstProgressEdgePath,
   withMapPositionPreview,
   withoutMapPositionPreview
 } from "./goalscapeLayout";
@@ -165,8 +176,116 @@ const emptyGoals: GoalsResponse = {
 };
 
 const ACTIVE_GOAL_MAP_STORAGE_KEY = "goal-network.activeGoalMapId";
+export const GOAL_PRESENTATION_STORAGE_KEY = "goal-network.presentationByGoalMapId";
+const FLOATING_AI_ASSISTANT_POSITION_STORAGE_KEY = "goal-network.floatingAiAssistantPosition";
+const FLOATING_AI_ASSISTANT_SIZE = 56;
+const FLOATING_AI_ASSISTANT_MARGIN = 16;
+export const SUNBURST_VIEW_BOX = { x: 100, y: -14, width: 1000, height: 788 } as const;
+type SunburstDepthControlPoint = { x: number; y: number };
+type SunburstDepthControlTriangle = readonly [SunburstDepthControlPoint, SunburstDepthControlPoint, SunburstDepthControlPoint];
+type FloatingAiAssistantPosition = { x: number; y: number };
+export const SUNBURST_DEPTH_CONTROL_GEOMETRY = {
+  arcPath: "M 950 88 C 990 117 1018 162 1036 224",
+  increaseTriangle: [
+    { x: 1004, y: 118 },
+    { x: 1030, y: 124 },
+    { x: 1024, y: 150 }
+  ],
+  decreaseTriangle: [
+    { x: 1001.3, y: 166.9 },
+    { x: 984.4, y: 163 },
+    { x: 988.3, y: 146 }
+  ]
+} as const satisfies {
+  arcPath: string;
+  increaseTriangle: SunburstDepthControlTriangle;
+  decreaseTriangle: SunburstDepthControlTriangle;
+};
 
 const STACKED_LAYOUT_QUERY = "(max-width: 1120px)";
+
+export type GoalPresentationMode = "sphere" | "sunburst";
+
+function parseGoalPresentationMap(value: string | null): Record<string, GoalPresentationMode> {
+  if (!value) return {};
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const result: Record<string, GoalPresentationMode> = {};
+    for (const [goalMapId, mode] of Object.entries(parsed)) {
+      if (mode === "sphere" || mode === "sunburst") result[goalMapId] = mode;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+export function readGoalPresentationMode(goalMapId: string, storage = safeLocalStorage()): GoalPresentationMode {
+  if (!goalMapId || !storage) return "sphere";
+
+  try {
+    return parseGoalPresentationMap(storage.getItem(GOAL_PRESENTATION_STORAGE_KEY))[goalMapId] ?? "sphere";
+  } catch {
+    return "sphere";
+  }
+}
+
+export function writeGoalPresentationMode(goalMapId: string, mode: GoalPresentationMode, storage = safeLocalStorage()) {
+  if (!goalMapId || !storage) return;
+
+  try {
+    const current = parseGoalPresentationMap(storage.getItem(GOAL_PRESENTATION_STORAGE_KEY));
+    storage.setItem(GOAL_PRESENTATION_STORAGE_KEY, JSON.stringify({ ...current, [goalMapId]: mode }));
+  } catch {
+    // Ignore unavailable localStorage; the server schema remains unchanged.
+  }
+}
+
+function clampFloatingAiAssistantPosition(position: FloatingAiAssistantPosition, size = FLOATING_AI_ASSISTANT_SIZE) {
+  if (typeof window === "undefined") return position;
+  const maxX = Math.max(FLOATING_AI_ASSISTANT_MARGIN, window.innerWidth - size - FLOATING_AI_ASSISTANT_MARGIN);
+  const maxY = Math.max(FLOATING_AI_ASSISTANT_MARGIN, window.innerHeight - size - FLOATING_AI_ASSISTANT_MARGIN);
+  return {
+    x: clamp(Math.round(position.x), FLOATING_AI_ASSISTANT_MARGIN, maxX),
+    y: clamp(Math.round(position.y), FLOATING_AI_ASSISTANT_MARGIN, maxY)
+  };
+}
+
+function defaultFloatingAiAssistantPosition(size = FLOATING_AI_ASSISTANT_SIZE) {
+  if (typeof window === "undefined") return { x: FLOATING_AI_ASSISTANT_MARGIN, y: FLOATING_AI_ASSISTANT_MARGIN };
+  return clampFloatingAiAssistantPosition({
+    x: window.innerWidth - size - 28,
+    y: window.innerHeight - size - 28
+  }, size);
+}
+
+function readFloatingAiAssistantPosition(size = FLOATING_AI_ASSISTANT_SIZE) {
+  const storage = safeLocalStorage();
+  if (!storage) return null;
+
+  try {
+    const raw = storage.getItem(FLOATING_AI_ASSISTANT_POSITION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<FloatingAiAssistantPosition>;
+    if (!Number.isFinite(parsed.x) || !Number.isFinite(parsed.y)) return null;
+    return clampFloatingAiAssistantPosition({ x: Number(parsed.x), y: Number(parsed.y) }, size);
+  } catch {
+    return null;
+  }
+}
+
+function writeFloatingAiAssistantPosition(position: FloatingAiAssistantPosition) {
+  const storage = safeLocalStorage();
+  if (!storage) return;
+
+  try {
+    storage.setItem(FLOATING_AI_ASSISTANT_POSITION_STORAGE_KEY, JSON.stringify(position));
+  } catch {
+    // Drag position is a convenience preference only.
+  }
+}
 
 const statusLabels: Record<GoalStatus, string> = {
   active: "推进中",
@@ -229,6 +348,8 @@ export function GoalApp() {
   const [progressPreview, setProgressPreview] = useState<ProgressOverrides>({});
   const [mapPositionPreview, setMapPositionPreview] = useState<MapPositionPreviewOverrides>({});
   const [focusRootId, setFocusRootId] = useState<string | null>(null);
+  const [presentationMode, setPresentationMode] = useState<GoalPresentationMode>("sphere");
+  const [sunburstVisibleDepth, setSunburstVisibleDepth] = useState(DEFAULT_SUNBURST_VISIBLE_DEPTH);
   const [scopeListCollapsed, setScopeListCollapsed] = useState(true);
   const [deleteCandidate, setDeleteCandidate] = useState<GoalNode | null>(null);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -357,6 +478,10 @@ export function GoalApp() {
   const mapGoals = focusGoal ? focusGoal.children ?? [] : visibleTree;
   const mapContextId = focusGoal ? focusGoal.id : activeGoalMap?.id || "root";
   const mapCenterId = focusGoal ? focusGoal.id : activeGoalMap?.id || "root";
+  const floatingAiGoal = useMemo(
+    () => selectedGoalFull ?? (selectedId === mapCenterId ? visibleTree[0] : undefined),
+    [mapCenterId, selectedGoalFull, selectedId, visibleTree]
+  );
   const mapCenterTitle = focusGoal ? focusGoal.title : goalMapCenterTitle(activeGoalMap);
   const mapEmptyLabel = loading
     ? ""
@@ -394,6 +519,17 @@ export function GoalApp() {
     const centerId = activeGoalMap?.id || "root";
     if (selectedId !== centerId && !selectedGoal) setSelectedId(centerId);
   }, [activeGoalMap, selectedGoal, selectedId]);
+
+  useEffect(() => {
+    if (!activeGoalMapId) {
+      setPresentationMode("sphere");
+      setSunburstVisibleDepth(DEFAULT_SUNBURST_VISIBLE_DEPTH);
+      return;
+    }
+
+    setPresentationMode(readGoalPresentationMode(activeGoalMapId));
+    setSunburstVisibleDepth(DEFAULT_SUNBURST_VISIBLE_DEPTH);
+  }, [activeGoalMapId]);
 
   useEffect(() => {
     if (!focusRootId) return;
@@ -575,6 +711,17 @@ export function GoalApp() {
     return pendingSaveQueueRef.current;
   }, [saveGoal]);
 
+  const selectPresentationMode = useCallback((mode: GoalPresentationMode) => {
+    if (mode === presentationMode) return;
+    queuePendingEditSave();
+    setPresentationMode(mode);
+    if (activeGoalMapId) writeGoalPresentationMode(activeGoalMapId, mode);
+    if (mode === "sunburst") {
+      setFocusRootId(null);
+      setMapPositionPreview({});
+    }
+  }, [activeGoalMapId, presentationMode, queuePendingEditSave]);
+
   const selectGoal = useCallback((id: string) => {
     if (id === selectedId) return;
     queuePendingEditSave();
@@ -590,9 +737,9 @@ export function GoalApp() {
   const ascendGoal = useCallback(() => {
     if (!focusRootId) return;
     const parentId = buildParentMap(visibleTree).get(focusRootId);
-    setFocusRootId(parentId && parentId !== "root" && parentId !== mapCenterId ? parentId : null);
+    setFocusRootId(parentId && parentId !== "root" ? parentId : null);
     setSelectedId(focusRootId);
-  }, [focusRootId, mapCenterId, visibleTree]);
+  }, [focusRootId, visibleTree]);
 
   const createGoal = async (input: GoalCreateInput): Promise<boolean> => {
     return runWrite(async () => {
@@ -888,7 +1035,11 @@ export function GoalApp() {
       {(notice || error) && <div className={error ? "banner error" : "banner"}>{error || notice}</div>}
 
       <main ref={workspaceRef} className={`map-workspace${resizingClass}`} style={workspaceStyle}>
-        <section ref={mapPaneRef} className={`map-pane ${scopeListCollapsed ? "scope-collapsed" : "scope-open"}`} aria-label="Goalscape 风格目标地图">
+        <section
+          ref={mapPaneRef}
+          className={`map-pane ${scopeListCollapsed ? "scope-collapsed" : "scope-open"}${presentationMode === "sunburst" ? " sunburst-active" : ""}`}
+          aria-label="Goalscape 风格目标地图"
+        >
           {!shouldShowFirstGoalMapCta(goals.goalMaps, loading) && activeGoalMap && (
             <div className="map-pane-toolbar" aria-label="Map tools">
               <MapScopeList
@@ -903,7 +1054,7 @@ export function GoalApp() {
                 onRenameMap={setRenameGoalMapCandidate}
                 onDeleteMap={setDeleteGoalMapCandidate}
               />
-              {focusRootId && (
+              {focusRootId && presentationMode === "sphere" && (
                 <nav className="map-breadcrumb" aria-label="目标层级路径">
                   <button
                     type="button"
@@ -937,13 +1088,14 @@ export function GoalApp() {
                   ))}
                 </nav>
               )}
+              <PresentationModeToggle mode={presentationMode} onChange={selectPresentationMode} />
               <MapActions
                 activeGoalMap={activeGoalMap}
                 mapCenterSelected={selectedId === mapCenterId && !selectedGoalFull}
                 selectedGoal={selectedGoalFull}
                 saving={saving}
                 canAddSibling={Boolean(selectedGoalFull)}
-                canResetPosition={hasCustomMapPosition(selectedGoalFull, mapContextId)}
+                canResetPosition={presentationMode === "sphere" && hasCustomMapPosition(selectedGoalFull, mapContextId)}
                 onAddTopGoal={openCreateTopGoalDialog}
                 onAddSubgoal={() => openCreateQuickGoalDialog("subgoal")}
                 onAddSibling={openCreateSiblingGoalDialog}
@@ -967,7 +1119,7 @@ export function GoalApp() {
                 开始你的第一个目标
               </button>
             </div>
-          ) : activeGoalMap ? (
+          ) : activeGoalMap && presentationMode === "sphere" ? (
             <GoalMap
               goals={mapGoals}
               selectedId={selectedId}
@@ -984,6 +1136,18 @@ export function GoalApp() {
               onAscend={ascendGoal}
               onPreviewPosition={previewMapPosition}
               onCommitPosition={saveMapPosition}
+            />
+          ) : activeGoalMap && presentationMode === "sunburst" ? (
+            <SunburstGoalMap
+              goals={visibleTree}
+              selectedId={selectedId}
+              centerId={mapCenterId}
+              centerTitle={goalMapCenterTitle(activeGoalMap)}
+              importanceOverrides={importancePreview}
+              progressOverrides={progressPreview}
+              visibleDepth={sunburstVisibleDepth}
+              onSelect={selectGoal}
+              onVisibleDepthChange={setSunburstVisibleDepth}
             />
           ) : null}
             {!loading && activeGoalMap && visibleTree.length === 0 && (
@@ -1004,7 +1168,7 @@ export function GoalApp() {
           aria-orientation={stackedLayout ? "horizontal" : "vertical"}
           aria-valuenow={stackedLayout ? mapPaneHeight : detailWidth}
           aria-valuemin={stackedLayout ? 320 : 340}
-          aria-valuemax={stackedLayout ? 720 : 560}
+          aria-valuemax={stackedLayout ? clampMapPaneHeight(Number.MAX_SAFE_INTEGER) : clampDetailWidth(Number.MAX_SAFE_INTEGER)}
           tabIndex={0}
           onPointerDown={startPanelResize}
           onKeyDown={(event) => {
@@ -1048,9 +1212,9 @@ export function GoalApp() {
           onPreviewImportance={previewImportance}
           onPreviewProgress={previewProgress}
           onDraftChange={registerPendingEdit}
-          onOpenAi={openAiAssistant}
         />
       </main>
+      <FloatingAiAssistantButton goal={floatingAiGoal} open={aiOpen} onOpen={openAiAssistant} />
       {aiOpen && activeAiGoal && (
         <AiAssistantDialog
           goal={activeAiGoal}
@@ -1127,6 +1291,116 @@ export function GoalApp() {
     </div>
   );
 }
+
+const FloatingAiAssistantButton = React.memo(function FloatingAiAssistantButton({
+  goal,
+  open,
+  onOpen
+}: {
+  goal: GoalNode | undefined;
+  open: boolean;
+  onOpen: (goal: GoalNode) => void;
+}) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    origin: FloatingAiAssistantPosition;
+    moved: boolean;
+    size: number;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
+  const [position, setPosition] = useState<FloatingAiAssistantPosition | null>(null);
+
+  useEffect(() => {
+    const size = buttonRef.current?.offsetWidth || FLOATING_AI_ASSISTANT_SIZE;
+    setPosition(readFloatingAiAssistantPosition(size) ?? defaultFloatingAiAssistantPosition(size));
+  }, []);
+
+  useEffect(() => {
+    const handleResize = () => {
+      const size = buttonRef.current?.offsetWidth || FLOATING_AI_ASSISTANT_SIZE;
+      setPosition((current) => (current ? clampFloatingAiAssistantPosition(current, size) : current));
+    };
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  if (!goal) return null;
+
+  const finishDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    dragRef.current = null;
+
+    if (!drag.moved) return;
+    const nextPosition = clampFloatingAiAssistantPosition({
+      x: drag.origin.x + event.clientX - drag.startX,
+      y: drag.origin.y + event.clientY - drag.startY
+    }, drag.size);
+    suppressClickRef.current = true;
+    setPosition(nextPosition);
+    writeFloatingAiAssistantPosition(nextPosition);
+  };
+
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      className={open ? "floating-ai-assistant active" : "floating-ai-assistant"}
+      style={position ? { left: `${position.x}px`, top: `${position.y}px`, right: "auto", bottom: "auto" } : undefined}
+      title={`AI 助手：${goal.title}`}
+      aria-label={`AI 助手：${goal.title}`}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        // Clear stale suppression so a click after a pointercancel-ended drag isn't swallowed.
+        suppressClickRef.current = false;
+        const rect = event.currentTarget.getBoundingClientRect();
+        dragRef.current = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          origin: { x: rect.left, y: rect.top },
+          moved: false,
+          size: rect.width || FLOATING_AI_ASSISTANT_SIZE
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const deltaX = event.clientX - drag.startX;
+        const deltaY = event.clientY - drag.startY;
+        if (!drag.moved && Math.hypot(deltaX, deltaY) < 4) return;
+        drag.moved = true;
+        event.preventDefault();
+        setPosition(clampFloatingAiAssistantPosition({
+          x: drag.origin.x + deltaX,
+          y: drag.origin.y + deltaY
+        }, drag.size));
+      }}
+      onPointerUp={finishDrag}
+      onPointerCancel={finishDrag}
+      onClick={(event) => {
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false;
+          event.preventDefault();
+          return;
+        }
+        onOpen(goal);
+      }}
+    >
+      <Sparkles aria-hidden="true" />
+    </button>
+  );
+});
 
 function MapScopeList({
   goalMaps,
@@ -1261,6 +1535,37 @@ function MapScopeList({
         </div>
       )}
     </aside>
+  );
+}
+
+function PresentationModeToggle({
+  mode,
+  onChange
+}: {
+  mode: GoalPresentationMode;
+  onChange: (mode: GoalPresentationMode) => void;
+}) {
+  return (
+    <div className="presentation-toggle" role="group" aria-label="目标呈现方式">
+      <button
+        type="button"
+        className={mode === "sphere" ? "presentation-option active" : "presentation-option"}
+        aria-pressed={mode === "sphere"}
+        onClick={() => onChange("sphere")}
+      >
+        <Network aria-hidden="true" />
+        <span>目标圆球</span>
+      </button>
+      <button
+        type="button"
+        className={mode === "sunburst" ? "presentation-option active" : "presentation-option"}
+        aria-pressed={mode === "sunburst"}
+        onClick={() => onChange("sunburst")}
+      >
+        <ChartPie aria-hidden="true" />
+        <span>目标旭日图</span>
+      </button>
+    </div>
   );
 }
 
@@ -1915,6 +2220,311 @@ function GoalscapeBridge({
   );
 }
 
+function sunburstPoint(radius: number, angle: number) {
+  const radians = ((angle - 90) * Math.PI) / 180;
+  return {
+    x: goalscapeCenter.x + radius * Math.cos(radians),
+    y: goalscapeCenter.y + radius * Math.sin(radians)
+  };
+}
+
+function sunburstSegmentLabel(segment: SunburstSegmentLayout) {
+  const angle = (segment.startAngle + segment.endAngle) / 2;
+  const radius = (segment.innerRadius + segment.outerRadius) / 2;
+  const point = sunburstPoint(radius, angle);
+  const lines = goalscapeLabelLines(segment.node.title, segment.depth <= 2 ? 8 : 6, 1);
+  return {
+    x: point.x,
+    y: point.y,
+    lines
+  };
+}
+
+function trianglePath(points: SunburstDepthControlTriangle) {
+  return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y} L ${points[2].x} ${points[2].y} Z`;
+}
+
+export function sunburstDepthControlState(visibleDepth: number, maxDepth: number) {
+  const safeMaxDepth = Math.max(1, Math.round(maxDepth));
+  const currentDepth = clamp(Math.round(visibleDepth), 1, safeMaxDepth);
+  const decreaseDepth = nextSunburstVisibleDepth(currentDepth, safeMaxDepth, -1);
+  const increaseDepth = nextSunburstVisibleDepth(currentDepth, safeMaxDepth, 1);
+
+  return {
+    canDecrease: decreaseDepth < currentDepth,
+    canIncrease: increaseDepth > currentDepth,
+    decreaseDepth,
+    increaseDepth
+  };
+}
+
+const SunburstGoalMap = React.memo(function SunburstGoalMap({
+  goals,
+  selectedId,
+  centerId,
+  centerTitle,
+  importanceOverrides,
+  progressOverrides,
+  visibleDepth,
+  onSelect,
+  onVisibleDepthChange
+}: {
+  goals: GoalNode[];
+  selectedId: string;
+  centerId: string;
+  centerTitle: string;
+  importanceOverrides: ImportanceOverrides;
+  progressOverrides: ProgressOverrides;
+  visibleDepth: number;
+  onSelect: (id: string) => void;
+  onVisibleDepthChange: React.Dispatch<React.SetStateAction<number>>;
+}) {
+  const layout = useMemo(
+    () => buildSunburstLayout(goals, importanceOverrides, progressOverrides, visibleDepth),
+    [goals, importanceOverrides, progressOverrides, visibleDepth]
+  );
+  const centerGoal = layout.center.node;
+  const centerDisplayTitle = centerGoal?.title || centerTitle;
+  const centerProgress = centerGoal ? weightedGoalProgress(centerGoal, importanceOverrides, progressOverrides) : averageProgress(goals, importanceOverrides, progressOverrides);
+  const centerProgressRadius = sunburstCenterRadius - 5;
+  const centerProgressCircumference = 2 * Math.PI * centerProgressRadius;
+  const centerProgressDashOffset = centerProgressCircumference * (1 - clamp(centerProgress, 0, 100) / 100);
+  const CenterIcon = centerGoal ? goalIconComponent(centerGoal) : ChartPie;
+  const centerSelected = centerGoal ? selectedId === centerGoal.id : selectedId === centerId;
+  const controlState = sunburstDepthControlState(layout.visibleDepth, layout.maxDepth);
+
+  const changeVisibleDepth = useCallback(
+    (delta: 1 | -1) => {
+      onVisibleDepthChange((current) => nextSunburstVisibleDepth(current, layout.maxDepth, delta));
+    },
+    [layout.maxDepth, onVisibleDepthChange]
+  );
+
+  const selectSegment = useCallback(
+    (segment: SunburstSegmentLayout) => {
+      if (segment.collapsed) {
+        changeVisibleDepth(1);
+        return;
+      }
+      onSelect(segment.node.id);
+    },
+    [changeVisibleDepth, onSelect]
+  );
+
+  const handleSegmentKey = useCallback(
+    (event: React.KeyboardEvent<SVGGElement>, segment: SunburstSegmentLayout) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      selectSegment(segment);
+    },
+    [selectSegment]
+  );
+
+  const handleDepthControlKey = useCallback(
+    (event: React.KeyboardEvent<SVGGElement>, delta: 1 | -1, disabled: boolean) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      if (disabled) return;
+      changeVisibleDepth(delta);
+    },
+    [changeVisibleDepth]
+  );
+
+  return (
+    <svg
+      className="goal-map sunburst-map"
+      viewBox={`${SUNBURST_VIEW_BOX.x} ${SUNBURST_VIEW_BOX.y} ${SUNBURST_VIEW_BOX.width} ${SUNBURST_VIEW_BOX.height}`}
+      role="img"
+      aria-labelledby="sunburst-title sunburst-desc"
+      onClick={() => onSelect(centerGoal?.id || centerId)}
+    >
+      <title id="sunburst-title">{centerDisplayTitle}目标旭日图</title>
+      <desc id="sunburst-desc">目标按同级重要性分配角度，子目标沿父目标扇区向外展开。</desc>
+      <defs>
+        <filter id="sunburst-selected-glow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="7" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+        <radialGradient id="sunburst-sky-glow" gradientUnits="userSpaceOnUse" cx="600" cy="380" r="392">
+          <stop offset="0%" stopColor="var(--sun-sky, rgba(255, 244, 224, 0.22))" />
+          <stop offset="62%" stopColor="var(--sun-sky-fade, rgba(255, 244, 224, 0.05))" />
+          <stop offset="100%" stopColor="transparent" />
+        </radialGradient>
+        <radialGradient id="sunburst-core-glow" gradientUnits="userSpaceOnUse" cx="600" cy="380" r="120">
+          <stop offset="0%" stopColor="var(--sun-core-hi, rgba(255, 250, 240, 0.96))" />
+          <stop offset="46%" stopColor="var(--sun-core-mid, rgba(255, 242, 220, 0.42))" />
+          <stop offset="100%" stopColor="transparent" />
+        </radialGradient>
+        <filter id="sunburst-aura-blur" x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="12" />
+        </filter>
+      </defs>
+
+      <circle className="sunburst-sky-wash" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r="392" fill="url(#sunburst-sky-glow)" aria-hidden="true" />
+      <circle className="sunburst-background-ring" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r="392" aria-hidden="true" />
+
+      <g
+        className={centerSelected ? "sunburst-center active" : "sunburst-center"}
+        role="button"
+        tabIndex={0}
+        focusable="true"
+        aria-label={`${centerDisplayTitle}，进度 ${centerProgress}%`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect(centerGoal?.id || centerId);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          onSelect(centerGoal?.id || centerId);
+        }}
+      >
+        <title>{centerDisplayTitle}</title>
+        <circle className="sunburst-center-aura" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={sunburstCenterRadius + 16} aria-hidden="true" />
+        <circle
+          cx={goalscapeCenter.x}
+          cy={goalscapeCenter.y}
+          r={sunburstCenterRadius - 10}
+          className="sunburst-center-core"
+          fillOpacity={0.44 + 0.42 * (centerProgress / 100)}
+          style={
+            {
+              "--center-color": layout.center.color,
+              "--center-progress": centerProgress / 100
+            } as React.CSSProperties & { "--center-color": string; "--center-progress": number }
+          }
+        />
+        <circle className="sunburst-center-coreglow" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={sunburstCenterRadius - 10} fill="url(#sunburst-core-glow)" aria-hidden="true" />
+        <circle className="sunburst-center-progress-track" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={centerProgressRadius} aria-hidden="true" />
+        <circle
+          className="sunburst-center-progress-ring"
+          cx={goalscapeCenter.x}
+          cy={goalscapeCenter.y}
+          r={centerProgressRadius}
+          strokeDasharray={centerProgressCircumference.toFixed(2)}
+          strokeDashoffset={centerProgressDashOffset.toFixed(2)}
+          transform={`rotate(-90 ${goalscapeCenter.x} ${goalscapeCenter.y})`}
+          aria-hidden="true"
+        />
+        <foreignObject x={goalscapeCenter.x - 18} y={goalscapeCenter.y - 38} width="36" height="36" className="sunburst-center-icon-object">
+          <div className="sunburst-center-icon">
+            <CenterIcon aria-hidden="true" />
+          </div>
+        </foreignObject>
+        <text className="sunburst-center-title" x={goalscapeCenter.x} y={goalscapeCenter.y + 16}>
+          {goalscapeLabelLines(centerDisplayTitle, 6, 2).map((line, index) => (
+            <tspan key={`${line}-${index}`} x={goalscapeCenter.x} dy={index === 0 ? 0 : 17}>
+              {line}
+            </tspan>
+          ))}
+        </text>
+        <text className="sunburst-center-progress-text" x={goalscapeCenter.x} y={goalscapeCenter.y + 66}>
+          {centerProgress}%
+        </text>
+      </g>
+
+      <g className="sunburst-segments">
+        {layout.segments.map((segment) => {
+          const active = selectedId === segment.node.id && !segment.collapsed;
+          const label = sunburstSegmentLabel(segment);
+          const depthClass = `depth-${Math.min(segment.depth, 6)}`;
+          const segmentPath = sunburstArcPath(segment);
+          const progressPath = segment.collapsed ? "" : sunburstProgressArcPath(segment);
+          const progressEdgePath = segment.collapsed ? "" : sunburstProgressEdgePath(segment);
+          return (
+            <g
+              key={segment.id}
+              className={`sunburst-segment ${depthClass}${active ? " active" : ""}${segment.collapsed ? " collapsed" : ""}`}
+              role="button"
+              tabIndex={0}
+              focusable="true"
+              aria-label={`${segment.node.title}，第 ${segment.depth} 层，进度 ${segment.progress}%${segment.collapsed ? `，折叠 ${segment.hiddenDescendantCount} 个目标` : ""}`}
+              style={
+                {
+                  "--segment-color": segment.color,
+                  "--segment-progress": segment.progress / 100,
+                  "--enter-delay": `${(segment.depth - 1) * 90 + ((segment.startAngle + 90) / 360) * 260}ms`
+                } as React.CSSProperties & {
+                  "--segment-color": string;
+                  "--segment-progress": number;
+                  "--enter-delay": string;
+                }
+              }
+              onClick={(event) => {
+                event.stopPropagation();
+                selectSegment(segment);
+              }}
+              onKeyDown={(event) => handleSegmentKey(event, segment)}
+            >
+              <title>{segment.collapsed ? `${segment.node.title}，${segment.hiddenDescendantCount} 个目标已折叠` : segment.node.title}</title>
+              <path className="sunburst-segment-shape" d={segmentPath} />
+              {progressPath && <path className="sunburst-segment-progress" d={progressPath} aria-hidden="true" />}
+              {progressEdgePath && <path className="sunburst-segment-progress-edge" d={progressEdgePath} aria-hidden="true" />}
+              {segment.progress === 100 && !segment.collapsed && <path className="sunburst-segment-complete" d={segmentPath} aria-hidden="true" />}
+              <path className="sunburst-segment-boundary" d={segmentPath} aria-hidden="true" />
+              {segment.labelVisible && !segment.collapsed && (
+                <text className="sunburst-segment-label" x={label.x} y={label.y}>
+                  {label.lines.map((line, index) => (
+                    <tspan key={`${segment.id}-${line}-${index}`} x={label.x} dy={index === 0 ? 0 : 13}>
+                      {line}
+                    </tspan>
+                  ))}
+                  <tspan className="sunburst-segment-percent" x={label.x} dy={13}>
+                    {segment.progress}%
+                  </tspan>
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </g>
+
+      {layout.maxDepth > 1 && (
+        <g className="sunburst-depth-control" aria-label="显示层级密度">
+          <path className="sunburst-depth-arc" d={SUNBURST_DEPTH_CONTROL_GEOMETRY.arcPath} aria-hidden="true" />
+          <g
+            className={controlState.canIncrease ? "sunburst-depth-button increase" : "sunburst-depth-button increase disabled"}
+            role="button"
+            tabIndex={controlState.canIncrease ? 0 : -1}
+            focusable={controlState.canIncrease ? "true" : "false"}
+            aria-disabled={!controlState.canIncrease}
+            aria-label={`放大到第 ${controlState.increaseDepth} 层`}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!controlState.canIncrease) return;
+              changeVisibleDepth(1);
+            }}
+            onKeyDown={(event) => handleDepthControlKey(event, 1, !controlState.canIncrease)}
+          >
+            <title>{`放大到第 ${controlState.increaseDepth} 层`}</title>
+            <path d={trianglePath(SUNBURST_DEPTH_CONTROL_GEOMETRY.increaseTriangle)} />
+          </g>
+          <g
+            className={controlState.canDecrease ? "sunburst-depth-button decrease" : "sunburst-depth-button decrease disabled"}
+            role="button"
+            tabIndex={controlState.canDecrease ? 0 : -1}
+            focusable={controlState.canDecrease ? "true" : "false"}
+            aria-disabled={!controlState.canDecrease}
+            aria-label={`缩小到第 ${controlState.decreaseDepth} 层`}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!controlState.canDecrease) return;
+              changeVisibleDepth(-1);
+            }}
+            onKeyDown={(event) => handleDepthControlKey(event, -1, !controlState.canDecrease)}
+          >
+            <title>{`缩小到第 ${controlState.decreaseDepth} 层`}</title>
+            <path d={trianglePath(SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle)} />
+          </g>
+        </g>
+      )}
+    </svg>
+  );
+});
+
 const GoalMap = React.memo(function GoalMap({
   goals,
   selectedId,
@@ -2016,6 +2626,7 @@ const GoalMap = React.memo(function GoalMap({
     moved: boolean;
     frame: number | null;
   } | null>(null);
+  const dragAbortRef = useRef<AbortController | null>(null);
   const suppressClickRef = useRef<string | null>(null);
   const lastNodeClickRef = useRef<{ id: string; time: number } | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -2054,28 +2665,29 @@ const GoalMap = React.memo(function GoalMap({
     }
   }, [onPreviewPosition, pointFromPointer]);
 
-  function finishDrag(event?: PointerEvent) {
+  const finishDrag = useCallback((event?: PointerEvent) => {
     const drag = dragRef.current;
     if (!drag || (event && event.pointerId !== drag.pointerId)) return;
     if (drag.frame !== null) window.cancelAnimationFrame(drag.frame);
     dragRef.current = null;
+    dragAbortRef.current?.abort();
+    dragAbortRef.current = null;
     setDraggingId(null);
-    window.removeEventListener("pointermove", moveDrag);
-    window.removeEventListener("pointerup", finishDrag);
-    window.removeEventListener("pointercancel", finishDrag);
     if (drag.moved) {
       suppressClickRef.current = drag.id;
       onPreviewPosition(drag.id, drag.current);
       onCommitPosition(drag.id, drag.current);
     }
-  }
+  }, [onCommitPosition, onPreviewPosition]);
 
+  // Detach the live drag listeners on unmount. Aborting the controller held in the ref removes
+  // whatever listeners the in-flight drag attached, regardless of handler identity — a []-deps
+  // cleanup closing over removeEventListener(moveDrag/finishDrag) would capture the first render's
+  // callbacks and silently fail to remove the ones a later render actually attached.
   useEffect(() => () => {
     const drag = dragRef.current;
     if (drag && drag.frame !== null) window.cancelAnimationFrame(drag.frame);
-    window.removeEventListener("pointermove", moveDrag);
-    window.removeEventListener("pointerup", finishDrag);
-    window.removeEventListener("pointercancel", finishDrag);
+    dragAbortRef.current?.abort();
   }, []);
 
   const startNodeDrag = useCallback((event: React.PointerEvent<SVGGElement>, layout: GoalscapeNodeLayout) => {
@@ -2084,6 +2696,8 @@ const GoalMap = React.memo(function GoalMap({
     if (!pointerStart) return;
     event.preventDefault();
     event.stopPropagation();
+    // Clear stale suppression so the next click after a pointercancel-ended drag isn't swallowed.
+    suppressClickRef.current = null;
     dragRef.current = {
       id: layout.node.id,
       pointerId: event.pointerId,
@@ -2095,9 +2709,11 @@ const GoalMap = React.memo(function GoalMap({
       frame: null
     };
     setDraggingId(layout.node.id);
-    window.addEventListener("pointermove", moveDrag);
-    window.addEventListener("pointerup", finishDrag);
-    window.addEventListener("pointercancel", finishDrag);
+    const controller = new AbortController();
+    dragAbortRef.current = controller;
+    window.addEventListener("pointermove", moveDrag, { signal: controller.signal });
+    window.addEventListener("pointerup", finishDrag, { signal: controller.signal });
+    window.addEventListener("pointercancel", finishDrag, { signal: controller.signal });
   }, [finishDrag, moveDrag, pointFromPointer]);
 
   const selectOnKey = useCallback((event: React.KeyboardEvent<SVGGElement>, id: string) => {
@@ -2332,6 +2948,10 @@ const GoalMap = React.memo(function GoalMap({
         aria-label={selectedId !== centerId ? `${centerDisplayTitle}，点击返回地图中心` : centerDisplayTitle}
       >
         {centerGoalVisual ? (
+          // SYNC: this focused-center body mirrors the per-node renderer below (search
+          // "goalscape-node-visual"). They intentionally duplicate the shape/liquid/core/rim/
+          // icon/title visuals — change one and you must mirror it in the other, or the center
+          // silently drifts from the map nodes. (Dedupe into a shared component is a follow-up.)
           <g className="goalscape-node-visual goalscape-center-goal-visual">
             <path className="goalscape-node-halo" d={centerGoalVisual.haloPath} />
             <path
@@ -2575,6 +3195,9 @@ const GoalMap = React.memo(function GoalMap({
             onKeyDown={(event) => selectOnKey(event, layout.node.id)}
           >
             {/* Inner group with isolated floating animation delay */}
+            {/* SYNC: this node-visual body mirrors the focused-center renderer above
+                (centerGoalVisual). Keep the shared shape/liquid/core/rim/icon/title visuals in
+                step across both, or the center node drifts from the map nodes. */}
             <g className="goalscape-node-visual" style={{ animationDelay: `${-index * 0.7}s` }}>
               <path className="goalscape-node-halo" d={goalscapeBlobPath(layout.x, layout.y, layout.width + 20, layout.height + 18, layout.variant)} />
               
@@ -2698,8 +3321,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   onSave,
   onPreviewImportance,
   onPreviewProgress,
-  onDraftChange,
-  onOpenAi
+  onDraftChange
 }: {
   selectedGoal: GoalNode | undefined;
   activeGoalMap?: GoalMap;
@@ -2713,7 +3335,6 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   onPreviewImportance: (goalId: string, value: number) => void;
   onPreviewProgress: (goalId: string, value: number) => void;
   onDraftChange: (goal: GoalNode, draft: EditDraft, dirty: boolean) => void;
-  onOpenAi: (goal: GoalNode) => void;
 }) {
   const rootImportance = useMemo(() => normalizedImportance(topGoals), [topGoals]);
   const selectedPath = useMemo(() => (selectedGoal ? goalPath(topGoals, selectedGoal.id) : []), [selectedGoal, topGoals]);
@@ -2748,7 +3369,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
           <span className="status-badge active">地图</span>
         </div>
 
-        <section>
+        <section className="detail-section">
           <h3>顶层目标</h3>
           <div className="child-list">
             {topGoals.map((goal) => (
@@ -2821,7 +3442,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         onSave={saveSelectedGoal}
       />
 
-      <section>
+      <section className="detail-section subgoal-section">
         <h3>子目标</h3>
         <div className="child-list">
           {selectedGoal.children.map((child) => (
@@ -2837,11 +3458,6 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
             </button>
           ))}
           {selectedGoal.children.length === 0 && <p className="muted-text">还没有子目标。</p>}
-        </div>
-        <div className="ai-entry-row">
-          <button type="button" className="icon-button" title="AI 助手" aria-label="AI 助手" disabled={saving} onClick={() => onOpenAi(selectedGoal)}>
-            <Sparkles />
-          </button>
         </div>
       </section>
     </aside>
@@ -2887,7 +3503,6 @@ const GoalEditForm = React.memo(function GoalEditForm({
   const baselineDraft = useMemo(() => draftFromGoal(goal, importance), [goal, importance]);
   const initialDraft = cachedDraft ?? baselineDraft;
   const [draft, setDraft] = useState<EditDraft>(() => initialDraft);
-  const [notesOpen, setNotesOpen] = useState(true);
   const primaryGoal = isPrimaryGoalNode(goal);
   const progressEditable = !primaryGoal && goal.children.length === 0;
 
@@ -2895,10 +3510,6 @@ const GoalEditForm = React.memo(function GoalEditForm({
     setDraft(initialDraft);
     onDraftChange(goal, initialDraft, Boolean(cachedDraft));
   }, [cachedDraft, goal, initialDraft, onDraftChange]);
-
-  useEffect(() => {
-    setNotesOpen(true);
-  }, [goal.id]);
 
   const updateDraft = (patch: Partial<EditDraft>) => {
     setDraft((current) => {
@@ -2949,21 +3560,11 @@ const GoalEditForm = React.memo(function GoalEditForm({
         )}
       </section>
 
-      <section className={notesOpen ? "editor-section notes-actions-drawer is-open" : "editor-section notes-actions-drawer is-collapsed"}>
+      <section className="editor-section notes-actions-drawer">
         <div className="drawer-head">
           <h3>{primaryGoal ? "备注" : "备注与行动"}</h3>
-          <button
-            type="button"
-            className="icon-button compact drawer-toggle"
-            title={notesOpen ? "折叠备注与行动" : "展开备注与行动"}
-            aria-label={notesOpen ? "折叠备注与行动" : "展开备注与行动"}
-            aria-expanded={notesOpen}
-            onClick={() => setNotesOpen((current) => !current)}
-          >
-            <ChevronRight className={notesOpen ? "drawer-chevron open" : "drawer-chevron"} />
-          </button>
         </div>
-        <div className="notes-actions-content" hidden={!notesOpen}>
+        <div className="notes-actions-content">
           <TextAreaBlock label="备注" value={draft.notes} hideLabel onChange={(value) => updateDraft({ notes: value })} />
           {!primaryGoal && <ActionCandidatesField actions={draft.actions} onChange={(actions) => updateDraft({ actions })} />}
         </div>

@@ -18,9 +18,12 @@ import {
   blend,
   clamp,
   domainBaseColor,
+  finitePosition,
+  goalThemeColorForIndex,
   hasOwn,
   normalizeHexColor,
   normalizedImportance,
+  resolveGoalThemeColor,
   titleFromLink,
   weightedGoalProgress,
   type ImportanceOverrides,
@@ -66,9 +69,49 @@ export const goalscapeCenter = { x: 600, y: 380, width: 142, height: 120 };
 
 const goalscapeViewBox = { width: 1200, height: 760 };
 
-function finitePosition(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
+export const DEFAULT_SUNBURST_VISIBLE_DEPTH = 4;
+export const sunburstCenterRadius = 110;
+const sunburstOuterRadius = 386;
+const sunburstCollapsedRingGap = 4;
+const sunburstCollapsedRingWidth = 8;
+// Smallest arc (in degrees) a child segment may shrink to. A child whose normalized importance
+// rounds to 0 would otherwise render as a zero-width, invisible and unclickable wedge.
+const sunburstMinSegmentAngle = 6;
+
+export type SunburstCenterLayout = {
+  id: string;
+  title: string;
+  depth: 1;
+  radius: number;
+  color: string;
+  progress: number;
+  node?: GoalNode;
+};
+
+export type SunburstSegmentLayout = {
+  id: string;
+  node: GoalNode;
+  parentId: string;
+  depth: number;
+  startAngle: number;
+  endAngle: number;
+  innerRadius: number;
+  outerRadius: number;
+  color: string;
+  progress: number;
+  importance: number;
+  labelVisible: boolean;
+  collapsed: boolean;
+  hiddenDescendantCount: number;
+};
+
+export type SunburstLayout = {
+  center: SunburstCenterLayout;
+  segments: SunburstSegmentLayout[];
+  maxDepth: number;
+  visibleDepth: number;
+  hasSyntheticRoot: boolean;
+};
 
 export function clampGoalscapePosition(position: MapPosition): MapPosition {
   return {
@@ -307,20 +350,6 @@ const goalscapeMinOrbitGap = 90;
 const goalscapeCollapseMinWidth = 52;
 const goalscapeCollapseMinHeight = 40;
 
-type GoalscapeTreeStats = {
-  maxDepth: number;
-  counts: Map<number, number>;
-};
-
-function collectGoalscapeTreeStats(goals: GoalNode[], depth = 1, stats: GoalscapeTreeStats = { maxDepth: 0, counts: new Map() }) {
-  for (const goal of goals) {
-    stats.maxDepth = Math.max(stats.maxDepth, depth);
-    stats.counts.set(depth, (stats.counts.get(depth) ?? 0) + 1);
-    collectGoalscapeTreeStats(goal.children || [], depth + 1, stats);
-  }
-  return stats;
-}
-
 function goalscapeOrbitCircumference(orbit: Pick<GoalscapeOrbit, "rx" | "ry">) {
   return Math.PI * (3 * (orbit.rx + orbit.ry) - Math.sqrt((3 * orbit.rx + orbit.ry) * (orbit.rx + 3 * orbit.ry)));
 }
@@ -328,11 +357,6 @@ function goalscapeOrbitCircumference(orbit: Pick<GoalscapeOrbit, "rx" | "ry">) {
 function goalscapeOrbitCapacity(depth: number, visibleDepth: number) {
   const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
   return Math.max(1, Math.floor(goalscapeOrbitCircumference(orbit) / goalscapeMinOrbitGap));
-}
-
-function goalscapeVisibleDepth(stats: GoalscapeTreeStats) {
-  void stats;
-  return goalscapeMaxRenderedTreeDepth;
 }
 
 function goalscapeRingDensityScale(count: number, depth: number, visibleDepth: number) {
@@ -344,6 +368,220 @@ function goalscapeRingDensityScale(count: number, depth: number, visibleDepth: n
 
 function countGoalscapeDescendants(goal: GoalNode): number {
   return (goal.children || []).reduce((sum, child) => sum + 1 + countGoalscapeDescendants(child), 0);
+}
+
+function countTreeDepth(goals: GoalNode[], depth = 1): number {
+  return goals.reduce((maxDepth, goal) => Math.max(maxDepth, depth, countTreeDepth(goal.children || [], depth + 1)), 0);
+}
+
+export function nextSunburstVisibleDepth(current: number, maxDepth: number, delta: 1 | -1) {
+  return clamp(Math.round(current) + delta, 1, Math.max(1, Math.round(maxDepth)));
+}
+
+function sunburstRingForDepth(depth: number, visibleDepth: number, hasSyntheticRoot: boolean) {
+  const visibleRingCount = Math.max(1, hasSyntheticRoot ? visibleDepth : visibleDepth - 1);
+  const ringIndex = Math.max(0, hasSyntheticRoot ? depth - 1 : depth - 2);
+  const ringWidth = (sunburstOuterRadius - sunburstCenterRadius) / visibleRingCount;
+  const innerRadius = sunburstCenterRadius + ringIndex * ringWidth;
+  return {
+    innerRadius,
+    outerRadius: innerRadius + Math.max(10, ringWidth - 6)
+  };
+}
+
+function sunburstLabelVisible(startAngle: number, endAngle: number, innerRadius: number, outerRadius: number) {
+  const angleSpan = Math.abs(endAngle - startAngle);
+  const radius = (innerRadius + outerRadius) / 2;
+  const arcLength = (angleSpan * Math.PI * radius) / 180;
+  return angleSpan >= 16 && arcLength >= 58 && outerRadius - innerRadius >= 20;
+}
+
+export function buildSunburstLayout(
+  goals: GoalNode[],
+  importanceOverrides: ImportanceOverrides,
+  progressOverrides: ProgressOverrides,
+  requestedVisibleDepth = DEFAULT_SUNBURST_VISIBLE_DEPTH
+): SunburstLayout {
+  const hasSyntheticRoot = goals.length !== 1;
+  const maxDepth = countTreeDepth(goals);
+  const visibleDepth = clamp(Math.round(requestedVisibleDepth), 1, Math.max(1, maxDepth || 1));
+  const centerGoal = hasSyntheticRoot ? undefined : goals[0];
+  const center: SunburstCenterLayout = centerGoal
+    ? {
+        id: centerGoal.id,
+        title: centerGoal.title,
+        depth: 1,
+        radius: sunburstCenterRadius,
+        color: resolveGoalThemeColor(centerGoal, goalThemeColorForIndex(0)),
+        progress: weightedGoalProgress(centerGoal, importanceOverrides, progressOverrides),
+        node: centerGoal
+      }
+    : {
+        id: "root",
+        title: "地图中心",
+        depth: 1,
+        radius: sunburstCenterRadius,
+        color: "#64748b",
+        progress: 0
+      };
+  const segments: SunburstSegmentLayout[] = [];
+
+  const appendSegments = (
+    children: GoalNode[],
+    depth: number,
+    parentId: string,
+    startAngle: number,
+    endAngle: number,
+    inheritedColor: string
+  ) => {
+    if (children.length === 0 || depth > visibleDepth) return;
+
+    const totalAngle = endAngle - startAngle;
+    const importanceById = normalizedImportance(children, importanceOverrides);
+    // Give every child at least a minimum clickable arc. Children whose importance rounds to 0
+    // would collapse to a zero-width wedge (invisible and unselectable); pull the shortfall from
+    // the siblings that have angle to spare so exact proportions are preserved whenever nothing is
+    // degenerate. The minimum is capped at an even share so many tiny siblings can't overflow.
+    const minAngle = children.length > 0 ? Math.min(sunburstMinSegmentAngle, totalAngle / children.length) : 0;
+    const rawSpans = children.map((child) => (totalAngle * (importanceById[child.id] ?? 0)) / 100);
+    const deficit = rawSpans.reduce((sum, span) => sum + Math.max(0, minAngle - span), 0);
+    const surplusTotal = rawSpans.reduce((sum, span) => sum + Math.max(0, span - minAngle), 0);
+    const adjustedSpans = rawSpans.map((span) => {
+      if (span <= minAngle) return minAngle;
+      if (surplusTotal <= 0) return span;
+      return span - deficit * ((span - minAngle) / surplusTotal);
+    });
+    let cursor = startAngle;
+
+    children.forEach((child, index) => {
+      const importance = importanceById[child.id] ?? 0;
+      const childEndAngle = index === children.length - 1 ? endAngle : cursor + adjustedSpans[index];
+      const ring = sunburstRingForDepth(depth, visibleDepth, hasSyntheticRoot);
+      const fallbackColor = parentId === "root" ? goalThemeColorForIndex(index) : inheritedColor;
+      const color = resolveGoalThemeColor(child, fallbackColor);
+      const segment: SunburstSegmentLayout = {
+        id: child.id,
+        node: child,
+        parentId,
+        depth,
+        startAngle: cursor,
+        endAngle: childEndAngle,
+        innerRadius: ring.innerRadius,
+        outerRadius: ring.outerRadius,
+        color,
+        progress: weightedGoalProgress(child, importanceOverrides, progressOverrides),
+        importance,
+        labelVisible: sunburstLabelVisible(cursor, childEndAngle, ring.innerRadius, ring.outerRadius),
+        collapsed: false,
+        hiddenDescendantCount: 0
+      };
+
+      segments.push(segment);
+
+      if ((child.children || []).length > 0) {
+        if (depth >= visibleDepth) {
+          const hiddenDescendantCount = countGoalscapeDescendants(child);
+          if (hiddenDescendantCount > 0) {
+            segments.push({
+              ...segment,
+              id: `${child.id}:collapsed`,
+              depth: depth + 1,
+              innerRadius: segment.outerRadius + sunburstCollapsedRingGap,
+              outerRadius: segment.outerRadius + sunburstCollapsedRingGap + sunburstCollapsedRingWidth,
+              labelVisible: false,
+              collapsed: true,
+              hiddenDescendantCount
+            });
+          }
+        } else {
+          appendSegments(child.children, depth + 1, child.id, cursor, childEndAngle, color);
+        }
+      }
+
+      cursor = childEndAngle;
+    });
+  };
+
+  if (centerGoal) {
+    appendSegments(centerGoal.children || [], 2, centerGoal.id, -90, 270, center.color);
+  } else {
+    appendSegments(goals, 1, "root", -90, 270, center.color);
+  }
+
+  return {
+    center,
+    segments,
+    maxDepth,
+    visibleDepth,
+    hasSyntheticRoot
+  };
+}
+
+function sunburstPolarPoint(radius: number, angle: number) {
+  const radians = ((angle - 90) * Math.PI) / 180;
+  return {
+    x: goalscapeCenter.x + radius * Math.cos(radians),
+    y: goalscapeCenter.y + radius * Math.sin(radians)
+  };
+}
+
+export function sunburstArcPath(segment: Pick<SunburstSegmentLayout, "startAngle" | "endAngle" | "innerRadius" | "outerRadius">) {
+  const startAngle = segment.startAngle;
+  const endAngle = segment.endAngle;
+  const span = Math.max(0, Math.min(359.99, Math.abs(endAngle - startAngle)));
+  const largeArc = span > 180 ? 1 : 0;
+  const outerStart = sunburstPolarPoint(segment.outerRadius, startAngle);
+  const outerEnd = sunburstPolarPoint(segment.outerRadius, endAngle);
+  const innerEnd = sunburstPolarPoint(segment.innerRadius, endAngle);
+  const innerStart = sunburstPolarPoint(segment.innerRadius, startAngle);
+
+  return [
+    `M ${outerStart.x.toFixed(2)} ${outerStart.y.toFixed(2)}`,
+    `A ${segment.outerRadius.toFixed(2)} ${segment.outerRadius.toFixed(2)} 0 ${largeArc} 1 ${outerEnd.x.toFixed(2)} ${outerEnd.y.toFixed(2)}`,
+    `L ${innerEnd.x.toFixed(2)} ${innerEnd.y.toFixed(2)}`,
+    `A ${segment.innerRadius.toFixed(2)} ${segment.innerRadius.toFixed(2)} 0 ${largeArc} 0 ${innerStart.x.toFixed(2)} ${innerStart.y.toFixed(2)}`,
+    "Z"
+  ].join(" ");
+}
+
+type SunburstProgressGeometryInput = Pick<
+  SunburstSegmentLayout,
+  "startAngle" | "endAngle" | "innerRadius" | "outerRadius" | "progress"
+>;
+
+function sunburstProgressRadius(segment: SunburstProgressGeometryInput) {
+  const progress = Number(segment.progress);
+  const safeProgress = Number.isFinite(progress) ? clamp(Math.round(progress), 0, 100) : 0;
+  return {
+    safeProgress,
+    radius: segment.innerRadius + (segment.outerRadius - segment.innerRadius) * (safeProgress / 100)
+  };
+}
+
+export function sunburstProgressArcPath(segment: SunburstProgressGeometryInput) {
+  const { safeProgress, radius } = sunburstProgressRadius(segment);
+  if (safeProgress <= 0) return "";
+  return sunburstArcPath({
+    startAngle: segment.startAngle,
+    endAngle: segment.endAngle,
+    innerRadius: segment.innerRadius,
+    outerRadius: radius
+  });
+}
+
+export function sunburstProgressEdgePath(segment: SunburstProgressGeometryInput) {
+  const { safeProgress, radius } = sunburstProgressRadius(segment);
+  if (safeProgress <= 0 || safeProgress >= 100) return "";
+
+  const span = Math.max(0, Math.min(359.99, Math.abs(segment.endAngle - segment.startAngle)));
+  const largeArc = span > 180 ? 1 : 0;
+  const start = sunburstPolarPoint(radius, segment.startAngle);
+  const end = sunburstPolarPoint(radius, segment.endAngle);
+
+  return [
+    `M ${start.x.toFixed(2)} ${start.y.toFixed(2)}`,
+    `A ${radius.toFixed(2)} ${radius.toFixed(2)} 0 ${largeArc} 1 ${end.x.toFixed(2)} ${end.y.toFixed(2)}`
+  ].join(" ");
 }
 
 function goalscapePointOnOrbit(angle: number, depth: number, visibleDepth: number): MapPosition {
@@ -429,9 +667,8 @@ export function buildGoalscapeLayout(
   selectedId?: string
 ) {
   void selectedId;
-  const stats = collectGoalscapeTreeStats(goals);
   const renderDepthCounts = countGoalscapeRenderDepths(goals);
-  const visibleDepth = goalscapeVisibleDepth(stats);
+  const visibleDepth = goalscapeMaxRenderedTreeDepth;
   const topImportance = normalizedImportance(goals, importanceOverrides);
   const layouts: GoalscapeNodeLayout[] = [];
 
@@ -458,7 +695,7 @@ export function buildGoalscapeLayout(
       );
       const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? children.length, depth, visibleDepth);
       const childSize = goalscapeChildNodeSize(parentLayout, childIndex, depth, densityScale, 1);
-      const childColor = goalscapeNodeColor(child, parentLayout.color);
+      const childColor = resolveGoalThemeColor(child, parentLayout.color);
       const childLayout: GoalscapeNodeLayout = {
         node: child,
         parentId: parentLayout.node.id,
@@ -495,7 +732,7 @@ export function buildGoalscapeLayout(
     const position = constrainGoalscapePositionToOrbit(goalMapPosition(goal, fallback, positionOverrides, mapContextId), orbit);
     const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? goals.length, depth, visibleDepth);
     const size = goalscapeTopNodeSize(densityScale, 1);
-    const color = goalscapeNodeColor(goal, "#64748b");
+    const color = resolveGoalThemeColor(goal, goalThemeColorForIndex(index));
     const importance = topImportance[goal.id] ?? 0;
     const layout: GoalscapeNodeLayout = {
       node: goal,

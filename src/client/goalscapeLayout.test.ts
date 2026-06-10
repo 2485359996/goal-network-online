@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { describe, expect, it, vi } from "vitest";
 import type { GoalNode } from "../shared/types";
 import {
+  buildSunburstLayout,
+  GOAL_PRESENTATION_STORAGE_KEY,
   buildGoalscapeLayout,
   clampGoalscapePosition,
   constrainGoalscapePositionToOrbit,
@@ -17,15 +20,42 @@ import {
   goalscapeProgressFillGeometry,
   goalscapeStarlightCoreRadius,
   pruneSavedMapPositionPreviews,
+  readGoalPresentationMode,
   shouldApplyGoalsResponse,
   shouldShowFirstGoalMapCta,
+  SUNBURST_DEPTH_CONTROL_GEOMETRY,
+  SUNBURST_VIEW_BOX,
+  nextSunburstVisibleDepth,
+  sunburstArcPath,
+  sunburstDepthControlState,
+  sunburstProgressArcPath,
+  sunburstProgressEdgePath,
   withMapPositionPreview,
   withoutMapPositionPreview,
+  writeGoalPresentationMode,
   weightedGoalProgress
 } from "./main";
+import { GOAL_THEME_COLORS } from "./goalUtils";
 
 function goal(id: string, title = id): GoalNode {
   return { id, goalMapId: "map-1", title, domain: "", color: "", priority: 1, clarity: 1, children: [] } as unknown as GoalNode;
+}
+
+function clientStyles() {
+  return readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+}
+
+function clientMainSource() {
+  return readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
+}
+
+function storageWith(value?: string) {
+  const values = new Map<string, string>();
+  if (value !== undefined) values.set(GOAL_PRESENTATION_STORAGE_KEY, value);
+  return {
+    getItem: vi.fn((key: string) => values.get(key) ?? null),
+    setItem: vi.fn((key: string, nextValue: string) => values.set(key, nextValue))
+  };
 }
 
 function distance(a: { x: number; y: number }, b: { x: number; y: number }) {
@@ -42,6 +72,89 @@ function angleFromCenter(point: { x: number; y: number }) {
 
 function angleDegreesFromCenter(point: { x: number; y: number }) {
   return (Math.atan2(point.y - goalscapeCenter.y, point.x - goalscapeCenter.x) * 180) / Math.PI;
+}
+
+function triangleCenter(points: readonly { x: number; y: number }[]) {
+  return {
+    x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+    y: points.reduce((sum, point) => sum + point.y, 0) / points.length
+  };
+}
+
+function triangleArea(points: readonly { x: number; y: number }[]) {
+  const [a, b, c] = points;
+  return Math.abs((a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y)) / 2);
+}
+
+function triangleTip(points: readonly { x: number; y: number }[]) {
+  let tip = points[0];
+  let longestOppositeSide = -Infinity;
+
+  points.forEach((point, index) => {
+    const a = points[(index + 1) % points.length];
+    const b = points[(index + 2) % points.length];
+    const oppositeSide = distance(a, b);
+    if (oppositeSide > longestOppositeSide) {
+      tip = point;
+      longestOppositeSide = oppositeSide;
+    }
+  });
+
+  return tip;
+}
+
+function triangleBounds(points: readonly { x: number; y: number }[]) {
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  return {
+    minX: Math.min(...xs),
+    maxX: Math.max(...xs),
+    minY: Math.min(...ys),
+    maxY: Math.max(...ys)
+  };
+}
+
+function vector(from: { x: number; y: number }, to: { x: number; y: number }) {
+  return {
+    x: to.x - from.x,
+    y: to.y - from.y
+  };
+}
+
+function directionAlignment(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return (a.x * b.x + a.y * b.y) / (Math.hypot(a.x, a.y) * Math.hypot(b.x, b.y));
+}
+
+function cubicPoint(
+  p0: { x: number; y: number },
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  p3: { x: number; y: number },
+  t: number
+) {
+  const u = 1 - t;
+  return {
+    x: u ** 3 * p0.x + 3 * u ** 2 * t * p1.x + 3 * u * t ** 2 * p2.x + t ** 3 * p3.x,
+    y: u ** 3 * p0.y + 3 * u ** 2 * t * p1.y + 3 * u * t ** 2 * p2.y + t ** 3 * p3.y
+  };
+}
+
+function xOnDepthControlArcAtY(y: number) {
+  const values = SUNBURST_DEPTH_CONTROL_GEOMETRY.arcPath.match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+  const [x0, y0, x1, y1, x2, y2, x3, y3] = values;
+  let best = cubicPoint({ x: x0, y: y0 }, { x: x1, y: y1 }, { x: x2, y: y2 }, { x: x3, y: y3 }, 0);
+  let bestDistance = Math.abs(best.y - y);
+
+  for (let step = 1; step <= 1000; step += 1) {
+    const point = cubicPoint({ x: x0, y: y0 }, { x: x1, y: y1 }, { x: x2, y: y2 }, { x: x3, y: y3 }, step / 1000);
+    const pointDistance = Math.abs(point.y - y);
+    if (pointDistance < bestDistance) {
+      best = point;
+      bestDistance = pointDistance;
+    }
+  }
+
+  return best.x;
 }
 
 function angularDistanceDegrees(a: number, b: number) {
@@ -156,6 +269,44 @@ describe("goalscape layout", () => {
     });
   });
 
+  it("keeps the main add action pointed at the selected goal when sibling creation is unavailable", () => {
+    expect(
+      mapAddActionAvailability({
+        mapCenterSelected: false,
+        hasActiveGoalMap: true,
+        hasSelectedGoal: true,
+        canAddSibling: false,
+        saving: false
+      })
+    ).toEqual({
+      subgoalDisabled: false,
+      siblingDisabled: true,
+      subgoalUsesTopGoal: false
+    });
+  });
+
+  it("reads presentation mode per goal map and falls back to sphere for unknown or damaged storage", () => {
+    expect(readGoalPresentationMode("map-1", storageWith())).toBe("sphere");
+    expect(readGoalPresentationMode("map-1", storageWith("{broken json"))).toBe("sphere");
+    expect(readGoalPresentationMode("map-3", storageWith(JSON.stringify({ "map-1": "sunburst", "map-2": "sphere" })))).toBe("sphere");
+    expect(readGoalPresentationMode("map-1", storageWith(JSON.stringify({ "map-1": "sunburst", "map-2": "sphere" })))).toBe("sunburst");
+  });
+
+  it("writes presentation mode without mixing goal map preferences", () => {
+    const storage = storageWith(JSON.stringify({ "map-1": "sunburst" }));
+
+    writeGoalPresentationMode("map-2", "sphere", storage);
+    writeGoalPresentationMode("map-3", "sunburst", storage);
+
+    expect(storage.setItem).toHaveBeenLastCalledWith(
+      GOAL_PRESENTATION_STORAGE_KEY,
+      JSON.stringify({ "map-1": "sunburst", "map-2": "sphere", "map-3": "sunburst" })
+    );
+    expect(readGoalPresentationMode("map-1", storage)).toBe("sunburst");
+    expect(readGoalPresentationMode("map-2", storage)).toBe("sphere");
+    expect(readGoalPresentationMode("map-3", storage)).toBe("sunburst");
+  });
+
   it("lays out top-level goals evenly around the full orbit from twelve o'clock", () => {
     const alpha = goal("alpha");
     const beta = { ...goal("beta"), children: [goal("beta-a"), goal("beta-b")] };
@@ -187,6 +338,23 @@ describe("goalscape layout", () => {
       expect(after).toBeDefined();
       expectAngleClose(angleDegreesFromCenter(after!), angleDegreesFromCenter(before!));
     }
+  });
+
+  it("assigns the seven theme colors to top-level goals and inherits them in the sphere map", () => {
+    const alphaChild = goal("alpha-child");
+    const roots = [
+      { ...goal("alpha"), children: [alphaChild] },
+      goal("beta"),
+      goal("gamma"),
+      goal("delta"),
+      goal("epsilon")
+    ];
+    const layouts = buildGoalscapeLayout(roots, {}, {});
+    const topLevelColors = roots.map((root) => layouts.find((layout) => layout.node.id === root.id)?.color);
+    const childLayout = layouts.find((layout) => layout.node.id === "alpha-child");
+
+    expect(topLevelColors).toEqual(GOAL_THEME_COLORS.slice(0, roots.length).map((item) => item.value));
+    expect(childLayout?.color).toBe(GOAL_THEME_COLORS[0].value);
   });
 
   it("fans child goals around the parent angle without sector fields", () => {
@@ -557,5 +725,218 @@ describe("goalscape layout", () => {
     expect(weightedGoalProgress(parent)).toBe(65);
     expect(weightedGoalProgress(parent, { light: 75, heavy: 25 }, { heavy: 100 })).toBe(40);
     expect(buildGoalscapeLayout([parent], {}, {})[0].progress).toBe(65);
+  });
+});
+
+describe("sunburst layout", () => {
+  it("allocates sibling angles by importance and keeps children inside the parent sector", () => {
+    const child = goal("heavy-child");
+    const light = { ...goal("light"), priority: 1 };
+    const heavy = { ...goal("heavy"), priority: 3, children: [child] };
+    const root = { ...goal("root"), children: [light, heavy] };
+    const layout = buildSunburstLayout([root], {}, {}, 4);
+    const lightSegment = layout.segments.find((segment) => segment.node.id === "light");
+    const heavySegment = layout.segments.find((segment) => segment.node.id === "heavy");
+    const childSegment = layout.segments.find((segment) => segment.node.id === "heavy-child");
+
+    expect(layout.center.node?.id).toBe("root");
+    expect(lightSegment).toBeDefined();
+    expect(heavySegment).toBeDefined();
+    expect(childSegment).toBeDefined();
+    expect(lightSegment!.depth).toBe(2);
+    expect(heavySegment!.depth).toBe(2);
+    expect(lightSegment!.startAngle).toBeCloseTo(-90);
+    expect(lightSegment!.endAngle).toBeCloseTo(0);
+    expect(heavySegment!.startAngle).toBeCloseTo(0);
+    expect(heavySegment!.endAngle).toBeCloseTo(270);
+    expect(childSegment!.startAngle).toBeGreaterThanOrEqual(heavySegment!.startAngle);
+    expect(childSegment!.endAngle).toBeLessThanOrEqual(heavySegment!.endAngle);
+  });
+
+  it("falls back to a synthetic map center when multiple top-level goals exist", () => {
+    const layout = buildSunburstLayout([goal("alpha"), goal("beta")], {}, {}, 4);
+
+    expect(layout.center.node).toBeUndefined();
+    expect(layout.hasSyntheticRoot).toBe(true);
+    expect(layout.segments.map((segment) => [segment.node.id, segment.depth])).toEqual([
+      ["alpha", 1],
+      ["beta", 1]
+    ]);
+  });
+
+  it("defaults to four visible layers and emits a thin collapsed outer ring for deeper goals", () => {
+    const level5 = goal("level-5");
+    const level4 = { ...goal("level-4"), children: [level5] };
+    const level3 = { ...goal("level-3"), children: [level4] };
+    const level2 = { ...goal("level-2"), children: [level3] };
+    const level1 = { ...goal("level-1"), children: [level2] };
+    const layout = buildSunburstLayout([level1], {}, {}, 4);
+    const visibleSegments = layout.segments.filter((segment) => !segment.collapsed);
+    const collapsedRing = layout.segments.find((segment) => segment.collapsed);
+
+    expect(layout.maxDepth).toBe(5);
+    expect(layout.visibleDepth).toBe(4);
+    expect(visibleSegments.map((segment) => segment.node.id)).toEqual(["level-2", "level-3", "level-4"]);
+    expect(collapsedRing).toBeDefined();
+    expect(collapsedRing!.node.id).toBe("level-4");
+    expect(collapsedRing!.depth).toBe(5);
+    expect(collapsedRing!.hiddenDescendantCount).toBe(1);
+    expect(collapsedRing!.outerRadius - collapsedRing!.innerRadius).toBeLessThanOrEqual(12);
+    expect(nextSunburstVisibleDepth(layout.visibleDepth, layout.maxDepth, 1)).toBe(5);
+    expect(nextSunburstVisibleDepth(layout.visibleDepth, layout.maxDepth, -1)).toBe(3);
+  });
+
+  it("uses a larger sunburst footprint for the visible rings", () => {
+    const level4 = goal("level-4");
+    const level3 = { ...goal("level-3"), children: [level4] };
+    const level2 = { ...goal("level-2"), children: [level3] };
+    const level1 = { ...goal("level-1"), children: [level2] };
+    const layout = buildSunburstLayout([level1], {}, {}, 4);
+    const outerMostSegment = layout.segments.find((segment) => segment.node.id === "level-4");
+
+    expect(layout.center.radius).toBeGreaterThanOrEqual(110);
+    expect(outerMostSegment?.outerRadius).toBeGreaterThanOrEqual(380);
+  });
+
+  it("uses a tighter sunburst viewport so the chart fills more of the pane", () => {
+    expect(SUNBURST_VIEW_BOX).toMatchObject({
+      x: 100,
+      width: 1000
+    });
+    expect(SUNBURST_VIEW_BOX.width / SUNBURST_VIEW_BOX.height).toBeLessThan(1.35);
+  });
+
+  it("keeps the sunburst depth triangles close enough to read as one control", () => {
+    const increaseCenter = triangleCenter(SUNBURST_DEPTH_CONTROL_GEOMETRY.increaseTriangle);
+    const decreaseCenter = triangleCenter(SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle);
+    const areaRatio =
+      triangleArea(SUNBURST_DEPTH_CONTROL_GEOMETRY.increaseTriangle) / triangleArea(SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle);
+
+    expect(distance(increaseCenter, decreaseCenter)).toBeLessThanOrEqual(42);
+    expect(distance(increaseCenter, decreaseCenter)).toBeGreaterThanOrEqual(30);
+    expect(decreaseCenter.x).toBeLessThan(increaseCenter.x - 20);
+    expect(decreaseCenter.y).toBeGreaterThan(increaseCenter.y);
+    expect(areaRatio).toBeGreaterThanOrEqual(2);
+    expect(areaRatio).toBeLessThanOrEqual(3.2);
+
+    expect(Math.abs(increaseCenter.x - decreaseCenter.x - (decreaseCenter.y - increaseCenter.y))).toBeLessThanOrEqual(1);
+
+    const decreaseTip = triangleTip(SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle);
+    const decreaseBaseCenter = triangleCenter(SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle.filter((point) => point !== decreaseTip));
+    expect(directionAlignment(vector(decreaseCenter, decreaseTip), vector(decreaseCenter, goalscapeCenter))).toBeGreaterThan(0.9);
+    expect(directionAlignment(vector(decreaseCenter, decreaseBaseCenter), vector(decreaseCenter, increaseCenter))).toBeGreaterThan(0.9);
+
+    const scale = Math.sqrt(
+      triangleArea(SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle) /
+        triangleArea(SUNBURST_DEPTH_CONTROL_GEOMETRY.increaseTriangle)
+    );
+    SUNBURST_DEPTH_CONTROL_GEOMETRY.increaseTriangle.forEach((point, index) => {
+      const decreasePoint = SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle[index];
+      expect(decreasePoint.x - decreaseCenter.x).toBeCloseTo((increaseCenter.x - point.x) * scale, 0);
+      expect(decreasePoint.y - decreaseCenter.y).toBeCloseTo((increaseCenter.y - point.y) * scale, 0);
+    });
+  });
+
+  it("keeps the sunburst depth arc visually between the two triangles", () => {
+    const increaseCenter = triangleCenter(SUNBURST_DEPTH_CONTROL_GEOMETRY.increaseTriangle);
+    const decreaseCenter = triangleCenter(SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle);
+    const increaseBounds = triangleBounds(SUNBURST_DEPTH_CONTROL_GEOMETRY.increaseTriangle);
+    const decreaseBounds = triangleBounds(SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle);
+
+    const upperGap = increaseBounds.minX - xOnDepthControlArcAtY(increaseCenter.y);
+    const lowerGap = xOnDepthControlArcAtY(decreaseCenter.y) - decreaseBounds.maxX;
+
+    expect(upperGap).toBeGreaterThanOrEqual(6);
+    expect(upperGap).toBeLessThanOrEqual(16);
+    expect(lowerGap).toBeGreaterThanOrEqual(6);
+    expect(lowerGap).toBeLessThanOrEqual(16);
+  });
+
+  it("keeps the sunburst depth control visually simple", () => {
+    expect("tickPaths" in SUNBURST_DEPTH_CONTROL_GEOMETRY).toBe(false);
+    expect("hitRadius" in SUNBURST_DEPTH_CONTROL_GEOMETRY).toBe(false);
+
+    const css = clientStyles();
+    expect(css).not.toContain(".sunburst-depth-tick");
+    expect(css).not.toContain(".sunburst-depth-hit-area");
+    expect(css).not.toContain("drop-shadow(0 6px 14px");
+  });
+
+  it("measures sunburst sizing against the visual canvas instead of the full toolbar pane", () => {
+    const css = clientStyles();
+
+    expect(css).toMatch(/\.map-canvas\s*\{[\s\S]*?container-type:\s*size;/);
+    expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?aspect-ratio:\s*1000 \/ 788;/);
+    expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?width:\s*min\(100cqw, calc\(100cqh \* 1\.269\), 1120px\);/);
+  });
+
+  it("omits decorative sunburst stripe overlays that compete with segment boundaries", () => {
+    const source = clientMainSource();
+    const css = clientStyles();
+
+    expect(source).not.toContain("sunburst-corona");
+    expect(source).not.toContain("sunburst-ray-overlay");
+    expect(source).not.toContain("sunburst-ray-sheen");
+    expect(css).not.toContain(".sunburst-corona");
+    expect(css).not.toContain(".sunburst-ray");
+    expect(css).not.toContain("sunburst-ray-overlay");
+    expect(css).not.toContain("--sun-ray");
+    expect(css).not.toContain("--sun-sheen");
+  });
+
+  it("uses the same seven theme colors and inherited child colors in the sunburst map", () => {
+    const roots = [
+      { ...goal("alpha"), children: [goal("alpha-child")] },
+      goal("beta"),
+      goal("gamma"),
+      goal("delta"),
+      goal("epsilon")
+    ];
+    const layout = buildSunburstLayout(roots, {}, {}, 4);
+    const topLevelColors = roots.map((root) => layout.segments.find((segment) => segment.node.id === root.id)?.color);
+    const childSegment = layout.segments.find((segment) => segment.node.id === "alpha-child");
+
+    expect(topLevelColors).toEqual(GOAL_THEME_COLORS.slice(0, roots.length).map((item) => item.value));
+    expect(childSegment?.color).toBe(GOAL_THEME_COLORS[0].value);
+  });
+
+  it("maps live progress previews to sunburst segments without changing importance angles", () => {
+    const light = { ...goal("light"), priority: 1, progress: 20 };
+    const heavy = { ...goal("heavy"), priority: 3, progress: 80 };
+    const root = { ...goal("root"), children: [light, heavy] };
+    const baseline = buildSunburstLayout([root], {}, {}, 4);
+    const previewed = buildSunburstLayout([root], {}, { heavy: 45 }, 4);
+    const baselineHeavy = baseline.segments.find((segment) => segment.node.id === "heavy");
+    const previewedHeavy = previewed.segments.find((segment) => segment.node.id === "heavy");
+
+    expect(previewedHeavy?.progress).toBe(45);
+    expect(previewedHeavy?.startAngle).toBeCloseTo(baselineHeavy!.startAngle);
+    expect(previewedHeavy?.endAngle).toBeCloseTo(baselineHeavy!.endAngle);
+  });
+
+  it("builds radial sunburst progress geometry for empty, partial, and complete segments", () => {
+    const segment = buildSunburstLayout([{ ...goal("root"), children: [goal("leaf")] }], {}, {}, 4).segments[0];
+    const fullPath = sunburstArcPath(segment);
+    const midRadius = segment.innerRadius + (segment.outerRadius - segment.innerRadius) * 0.5;
+    const midRadiusArc = `A ${midRadius.toFixed(2)} ${midRadius.toFixed(2)}`;
+
+    expect(sunburstProgressArcPath({ ...segment, progress: 0 })).toBe("");
+    expect(sunburstProgressArcPath({ ...segment, progress: 50 })).toContain(midRadiusArc);
+    expect(sunburstProgressArcPath({ ...segment, progress: 50 })).not.toBe(fullPath);
+    expect(sunburstProgressArcPath({ ...segment, progress: 100 })).toBe(fullPath);
+    expect(sunburstProgressEdgePath({ ...segment, progress: 50 })).toContain(midRadiusArc);
+    expect(sunburstProgressEdgePath({ ...segment, progress: 0 })).toBe("");
+    expect(sunburstProgressEdgePath({ ...segment, progress: 100 })).toBe("");
+  });
+
+  it("derives two step controls for shrinking and expanding the sunburst depth", () => {
+    expect(sunburstDepthControlState(4, 6)).toEqual({
+      canDecrease: true,
+      canIncrease: true,
+      decreaseDepth: 3,
+      increaseDepth: 5
+    });
+    expect(sunburstDepthControlState(1, 6)).toMatchObject({ canDecrease: false, decreaseDepth: 1 });
+    expect(sunburstDepthControlState(6, 6)).toMatchObject({ canIncrease: false, increaseDepth: 6 });
   });
 });

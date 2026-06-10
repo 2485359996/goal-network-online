@@ -90,6 +90,37 @@ export function normalizeHexColor(value: string | undefined) {
   return raw;
 }
 
+export const GOAL_THEME_COLORS = [
+  { value: "#0284c7", label: "蓝色" },
+  { value: "#6366f1", label: "靛紫" },
+  { value: "#10b981", label: "绿松" },
+  { value: "#f59e0b", label: "琥珀" },
+  { value: "#e11d48", label: "玫红" },
+  { value: "#0d9488", label: "青绿" },
+  { value: "#8b5cf6", label: "紫罗兰" }
+] as const;
+
+export function goalThemeColorForIndex(index: number) {
+  const safeIndex = Number.isFinite(index) ? Math.max(0, Math.floor(index)) : 0;
+  return GOAL_THEME_COLORS[safeIndex % GOAL_THEME_COLORS.length].value;
+}
+
+export function nextGoalThemeColor(goals: Array<Pick<GoalNode, "color">>) {
+  const usedColors = new Set(goals.map((goal) => normalizeHexColor(goal.color)).filter(Boolean));
+  const unusedColor = GOAL_THEME_COLORS.find((color) => !usedColors.has(color.value));
+  return unusedColor?.value ?? goalThemeColorForIndex(goals.length);
+}
+
+export function resolveGoalThemeColor(goal: Pick<GoalNode, "color" | "domain" | "title"> | undefined, fallback = "") {
+  const explicitColor = normalizeHexColor(goal?.color);
+  if (explicitColor) return explicitColor;
+
+  const fallbackColor = normalizeHexColor(fallback);
+  if (fallbackColor) return fallbackColor;
+
+  return domainBaseColor(goal?.domain || goal?.title || "");
+}
+
 export function filterGoalTree(goals: GoalNode[], showArchived: boolean): GoalNode[] {
   return goals
     .filter((goal) => showArchived || goal.status !== "archived")
@@ -247,16 +278,33 @@ export function rebalanceImportance(goals: GoalNode[], selectedId: string, nextI
 
   const selectedImportance = clamp(Math.round(nextImportance), 0, 100);
   const others = siblings.filter((goal) => goal.id !== selectedId);
-  const remaining = Math.max(0, 100 - selectedImportance);
-  const otherTotal = others.reduce((sum, goal) => sum + priorityWeight(goal.priority), 0);
   const overrides: ImportanceOverrides = { [selectedId]: selectedImportance };
+  if (others.length === 0) return overrides;
 
-  let allocated = 0;
+  // Distribute the remaining budget across the other siblings with the largest-remainder
+  // method so every share stays non-negative and the shares sum exactly to `remaining`. The
+  // old round-each-then-give-the-last-the-leftover approach could overshoot and hand the last
+  // sibling a negative value, which the server rejects (priority must be >= 0) and fails the save.
+  const remaining = Math.max(0, 100 - selectedImportance);
+  const weights = others.map((goal) => priorityWeight(goal.priority));
+  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0);
+  const exactValues = weights.map((weight) =>
+    weightTotal > 0 ? (weight / weightTotal) * remaining : remaining / others.length
+  );
+  const roundedValues = exactValues.map(Math.floor);
+  let leftover = remaining - roundedValues.reduce((sum, value) => sum + value, 0);
+  const byRemainder = exactValues
+    .map((value, index) => ({ index, remainder: value - Math.floor(value) }))
+    .sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+
+  for (const item of byRemainder) {
+    if (leftover <= 0) break;
+    roundedValues[item.index] += 1;
+    leftover -= 1;
+  }
+
   others.forEach((goal, index) => {
-    const exact = otherTotal > 0 ? (priorityWeight(goal.priority) / otherTotal) * remaining : remaining / Math.max(1, others.length);
-    const next = index === others.length - 1 ? remaining - allocated : Math.round(exact);
-    overrides[goal.id] = next;
-    allocated += next;
+    overrides[goal.id] = roundedValues[index];
   });
 
   return overrides;
