@@ -9,6 +9,7 @@ import {
 } from "../shared/aiContracts";
 import type { GoalActionCandidate, GoalCreateInput, GoalMap, GoalNode } from "../shared/types";
 import { goalContextFromNode } from "./AiAssistantDialog";
+import { GOAL_THEME_COLORS, nextGoalThemeColor, resolveGoalThemeColor } from "./goalUtils";
 import { useModalDialog } from "./useModalDialog";
 
 export type CreateGoalMode = "top" | "subgoal" | "sibling";
@@ -29,6 +30,7 @@ export type CreateGoalDraft = {
   horizon: string;
   priority: number;
   progress: number;
+  color: string;
   summary: string;
   successSignals: string[];
   actionCandidates: GoalActionCandidate[];
@@ -86,6 +88,15 @@ function defaultDomain(context: CreateGoalDialogContext, draftTitle?: string) {
   );
 }
 
+function defaultGoalThemeColor(context: CreateGoalDialogContext) {
+  if (context.parentGoal) return resolveGoalThemeColor(context.parentGoal, nextGoalThemeColor(context.siblings));
+  return nextGoalThemeColor(context.siblings);
+}
+
+function canChooseGoalThemeColor(context: CreateGoalDialogContext) {
+  return context.mode === "top" && !context.parentGoal;
+}
+
 export function buildInitialCreateGoalDraft(context: CreateGoalDialogContext): CreateGoalDraft {
   const source = context.sourceGoal ?? context.parentGoal;
   return {
@@ -94,6 +105,7 @@ export function buildInitialCreateGoalDraft(context: CreateGoalDialogContext): C
     horizon: source?.horizon || "medium",
     priority: 50,
     progress: 0,
+    color: defaultGoalThemeColor(context),
     summary: "",
     successSignals: [],
     actionCandidates: [],
@@ -139,11 +151,15 @@ export function createGoalPayloadFromDraft(context: CreateGoalDialogContext, dra
   if (successSignals.length) payload.successSignals = successSignals;
   if (actionCandidates.length) payload.actionCandidates = actionCandidates;
   if (reviewQuestions.length) payload.reviewQuestions = reviewQuestions;
+  payload.color = context.parentGoal
+    ? resolveGoalThemeColor(context.parentGoal, draft.color)
+    : resolveGoalThemeColor({ title, domain: payload.domain, color: draft.color }, nextGoalThemeColor(context.siblings));
 
   return payload;
 }
 
 export function buildCreateGoalAiRequest(context: CreateGoalDialogContext, draft: CreateGoalDraft): AiDraftGoalRequest {
+  const { color: _color, ...aiDraft } = draft;
   return {
     mode: context.mode,
     goalMap: {
@@ -155,7 +171,7 @@ export function buildCreateGoalAiRequest(context: CreateGoalDialogContext, draft
     siblings: context.siblings.map(goalContextFromNode),
     existingTitles: context.existingGoals.map((goal) => goal.title),
     domainCandidates: context.domainCandidates,
-    draft
+    draft: aiDraft
   };
 }
 
@@ -216,6 +232,8 @@ export function CreateGoalDialog({
   const [notice, setNotice] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
   const progressVisible = shouldShowCreateGoalProgress(context, draft);
+  const colorSelectable = canChooseGoalThemeColor(context);
+  const inheritedColor = colorSelectable ? "" : defaultGoalThemeColor(context);
   const busy = saving || generating || submitting;
   const canSubmit = !busy && canSubmitCreateGoalDraft(draft);
   const { dialogRef, onBackdropPointerDown, onBackdropClick } = useModalDialog<HTMLElement>({
@@ -369,6 +387,51 @@ export function CreateGoalDialog({
                 ))}
               </select>
             </label>
+            {colorSelectable ? (
+              <fieldset className="rename-field create-goal-color-field">
+                <legend className="field-label">主题色</legend>
+                <div className="create-goal-color-options">
+                  {GOAL_THEME_COLORS.map((color) => (
+                    <label
+                      key={color.value}
+                      className={draft.color === color.value ? "create-goal-color-option selected" : "create-goal-color-option"}
+                      title={color.label}
+                      aria-label={color.label}
+                      style={
+                        {
+                          "--goal-theme-color": color.value
+                        } as React.CSSProperties & { "--goal-theme-color": string }
+                      }
+                    >
+                      <input
+                        type="radio"
+                        name="create-goal-theme-color"
+                        value={color.value}
+                        checked={draft.color === color.value}
+                        disabled={busy}
+                        onChange={(event) => updateDraft({ color: event.target.value })}
+                      />
+                      <span className="create-goal-color-swatch" aria-hidden="true" />
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+            ) : (
+              <div className="rename-field create-goal-color-field inherited">
+                <span className="field-label">主题色</span>
+                <span
+                  className="create-goal-inherited-color"
+                  style={
+                    {
+                      "--goal-theme-color": inheritedColor
+                    } as React.CSSProperties & { "--goal-theme-color": string }
+                  }
+                >
+                  <span className="create-goal-color-swatch" aria-hidden="true" />
+                  <span>继承父级</span>
+                </span>
+              </div>
+            )}
             {progressVisible && (
               <label className="rename-field create-goal-progress-field">
                 <span className="field-label">进度</span>

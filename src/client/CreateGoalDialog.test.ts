@@ -9,6 +9,7 @@ import {
   shouldShowCreateGoalProgress,
   type CreateGoalDialogContext
 } from "./CreateGoalDialog";
+import { GOAL_THEME_COLORS } from "./goalUtils";
 
 const goalMap: GoalMap = { id: "map-1", name: "目标网络", sortOrder: 0 };
 
@@ -100,6 +101,51 @@ describe("CreateGoalDialog helpers", () => {
       goalMapId: "map-1",
       domain: "Career",
       priority: 60
+    });
+  });
+
+  it("defaults top-level goal color to the first unused theme color", () => {
+    const draft = buildInitialCreateGoalDraft(
+      context({
+        siblings: [
+          goalFixture({ id: "goal-one", title: "One", color: GOAL_THEME_COLORS[0].value }),
+          goalFixture({ id: "goal-two", title: "Two", color: GOAL_THEME_COLORS[1].value })
+        ]
+      })
+    );
+
+    expect(draft.color).toBe(GOAL_THEME_COLORS[2].value);
+  });
+
+  it("includes the selected theme color when creating top-level goals", () => {
+    const topContext = context();
+    const draft = {
+      ...buildInitialCreateGoalDraft(topContext),
+      title: "New top goal",
+      color: GOAL_THEME_COLORS[4].value
+    };
+
+    expect(createGoalPayloadFromDraft(topContext, draft)).toMatchObject({
+      color: GOAL_THEME_COLORS[4].value
+    });
+  });
+
+  it("inherits parent color for non-top goals and ignores draft color", () => {
+    const parent = goalFixture({ id: "goal-parent", title: "Parent", color: GOAL_THEME_COLORS[3].value });
+    const childContext = context({
+      mode: "subgoal",
+      parentGoal: parent,
+      sourceGoal: parent
+    });
+    const draft = {
+      ...buildInitialCreateGoalDraft(childContext),
+      title: "Child goal",
+      color: GOAL_THEME_COLORS[5].value
+    };
+
+    expect(createGoalPayloadFromDraft(childContext, draft)).toMatchObject({
+      parent: "Parent",
+      color: GOAL_THEME_COLORS[3].value
     });
   });
 

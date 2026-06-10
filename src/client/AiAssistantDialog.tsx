@@ -2,6 +2,7 @@ import { AlertCircle, CheckCircle2, Loader2, Sparkles, X } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
 import { isPrimaryGoalNode } from "../shared/goalRules";
 import type { ActionCreateInput, GoalCreateInput, GoalNode, GoalPatchInput } from "../shared/types";
+import { resolveGoalThemeColor } from "./goalUtils";
 import { useModalDialog } from "./useModalDialog";
 import {
   aiRouteContracts,
@@ -440,7 +441,7 @@ function createSubgoalInput(parent: GoalNode, suggestion: AiSubgoalSuggestion): 
     priority: suggestion.priority ?? 50,
     clarity: suggestion.clarity ?? 1,
     progress: 0,
-    color: parent.color,
+    color: resolveGoalThemeColor(parent),
     summary: suggestion.summary,
     successSignals: suggestion.successSignals,
     actionCandidates: normalizeAiActionCandidates(suggestion.actionCandidates ?? []),

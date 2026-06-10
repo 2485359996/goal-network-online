@@ -12,7 +12,7 @@ type ApplyThemeOptions = {
 
 const themePreferences: ThemePreference[] = ["system", "light", "dark"];
 
-function safeLocalStorage(): ThemeStorage | undefined {
+export function safeLocalStorage(): ThemeStorage | undefined {
   try {
     return globalThis.localStorage;
   } catch {

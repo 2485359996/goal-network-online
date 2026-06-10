@@ -19,6 +19,14 @@ function storageWith(value?: string) {
   };
 }
 
+function clientStyles() {
+  return readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+}
+
+function clientMainSource() {
+  return readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
+}
+
 describe("theme preference", () => {
   it("defaults unknown values to system", () => {
     expect(normalizeThemePreference(undefined)).toBe("system");
@@ -61,16 +69,38 @@ describe("theme preference", () => {
 
 describe("theme styles", () => {
   it("keeps the goalscape center title black in dark mode", () => {
-    const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+    const styles = clientStyles();
 
     expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.goalscape-center-title\s*{\s*fill:\s*#000000;/);
   });
 
   it("uses theme tokens for the notes and actions drawer colors", () => {
-    const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+    const styles = clientStyles();
 
     expect(styles).toMatch(/:root\[data-theme="dark"\]\s*{[\s\S]*--notes-actions-background:\s*rgba\(15,\s*23,\s*42,\s*0\.92\);/);
     expect(styles).toMatch(/\.notes-actions-drawer\s*{[\s\S]*background:\s*var\(--notes-actions-background\);/);
     expect(styles).not.toMatch(/\.detail-panel:has\(\.notes-actions-drawer\)\s+\.notes-actions-drawer\s*{[\s\S]*background:\s*rgba\(255,\s*255,\s*255,\s*0\.96\);/);
+  });
+});
+
+describe("floating AI assistant", () => {
+  it("mounts the AI entry outside the detail panel", () => {
+    const source = clientMainSource();
+
+    expect(source).toContain("const floatingAiGoal = useMemo");
+    expect(source).toContain("selectedGoalFull ?? (selectedId === mapCenterId ? visibleTree[0] : undefined)");
+    expect(source).toContain("<FloatingAiAssistantButton goal={floatingAiGoal}");
+    expect(source).not.toContain("onOpenAi");
+    expect(source).not.toContain("ai-entry-row");
+  });
+
+  it("styles the assistant as a draggable floating control below dialogs", () => {
+    const styles = clientStyles();
+
+    expect(styles).toMatch(/\.floating-ai-assistant\s*{[\s\S]*position:\s*fixed;/);
+    expect(styles).toMatch(/\.floating-ai-assistant\s*{[\s\S]*z-index:\s*40;/);
+    expect(styles).toMatch(/\.floating-ai-assistant\s*{[\s\S]*touch-action:\s*none;/);
+    expect(styles).toMatch(/\.dialog-backdrop\s*{[\s\S]*z-index:\s*50;/);
+    expect(styles).not.toMatch(/\.ai-entry-row/);
   });
 });

@@ -5,6 +5,8 @@ coverage/
 .next/
 .cache-pack/
 *.tsbuildinfo
+.claude/
+.impeccable/
 .env
 .env.*
 !.env.example
