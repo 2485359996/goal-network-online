@@ -145,6 +145,7 @@ class FakeQuery {
 
 class FakeSupabaseClient {
   tables: FakeTables;
+  rpcCalls: Array<{ name: string; args: Record<string, any> }> = [];
 
   constructor(tables: Partial<FakeTables> = {}) {
     this.tables = {
@@ -161,6 +162,13 @@ class FakeSupabaseClient {
     return new FakeQuery(this, table);
   }
 
+  async rpc(name: string, args: Record<string, any>) {
+    this.rpcCalls.push({ name, args });
+    if (name === "set_goal_map_positions") return this.setGoalMapPositionsRpc(args);
+    if (name === "clear_goal_map_positions") return this.clearGoalMapPositionsRpc(args);
+    return { data: null, error: new Error(`Unknown RPC: ${name}`) };
+  }
+
   insertRow(table: string, row: Record<string, any>) {
     const next = {
       id: row.id ?? `${table}-${this.tables[table].length + 1}`,
@@ -168,6 +176,81 @@ class FakeSupabaseClient {
     };
     this.tables[table].push(next);
     return next;
+  }
+
+  private setGoalMapPositionsRpc(args: Record<string, any>) {
+    const contextId = String(args.p_map_context_id ?? "").trim();
+    const byGoalId = new Map<string, { x: number; y: number }>();
+    for (const item of args.p_positions ?? []) {
+      const id = String(item.id ?? "").trim();
+      if (id) byGoalId.set(id, { x: Number(item.position.x), y: Number(item.position.y) });
+    }
+    const goalIds = Array.from(byGoalId.keys());
+    const rows = this.tables.goals.filter((row) => row.workspace_id === args.p_workspace_id && goalIds.includes(row.legacy_id));
+    const missingId = goalIds.find((id) => !rows.some((row) => row.legacy_id === id));
+    if (missingId) return { data: null, error: new Error(`Goal not found: ${missingId}`) };
+
+    for (const row of rows) {
+      row.map_positions = this.mergeMapPositions(row.map_positions, { [contextId]: byGoalId.get(row.legacy_id) });
+    }
+    if (rows.length) this.insertAuditAndSync(args, "goal.map_positions.set", rows[0].id, goalIds, rows.length);
+    return { data: { updatedCount: rows.length }, error: null };
+  }
+
+  private clearGoalMapPositionsRpc(args: Record<string, any>) {
+    const contextId = String(args.p_map_context_id ?? "").trim();
+    const goalIds: string[] = Array.from(
+      new Set<string>((args.p_ids ?? []).map((id: string) => String(id).trim()).filter(Boolean))
+    );
+    const rows = this.tables.goals.filter((row) => row.workspace_id === args.p_workspace_id && goalIds.includes(row.legacy_id));
+    const missingId = goalIds.find((id) => !rows.some((row) => row.legacy_id === id));
+    if (missingId) return { data: null, error: new Error(`Goal not found: ${missingId}`) };
+
+    const updatedRows = rows.filter((row) => {
+      const hasScopedPosition = Boolean(row.map_positions && Object.prototype.hasOwnProperty.call(row.map_positions, contextId));
+      const clearsLegacyRootPosition = contextId === "root" && (row.map_x !== null || row.map_y !== null);
+      return hasScopedPosition || clearsLegacyRootPosition;
+    });
+
+    for (const row of updatedRows) {
+      row.map_positions = this.mergeMapPositions(row.map_positions, { [contextId]: null });
+      if (contextId === "root") {
+        row.map_x = null;
+        row.map_y = null;
+      }
+    }
+    if (updatedRows.length) this.insertAuditAndSync(args, "goal.map_positions.clear", updatedRows[0].id, goalIds, updatedRows.length);
+    return { data: { updatedCount: updatedRows.length }, error: null };
+  }
+
+  private mergeMapPositions(current: any, patch: Record<string, any>) {
+    const next = { ...(current ?? {}) };
+    for (const [contextId, value] of Object.entries(patch)) {
+      if (value === null) delete next[contextId];
+      else next[contextId] = value;
+    }
+    return Object.keys(next).length ? next : null;
+  }
+
+  private insertAuditAndSync(args: Record<string, any>, action: string, entityId: string, ids: string[], updatedCount: number) {
+    this.insertRow("audit_events", {
+      workspace_id: args.p_workspace_id,
+      actor_user_id: args.p_actor_user_id,
+      action,
+      entity_type: "goal",
+      entity_id: entityId,
+      payload: {
+        ids,
+        mapContextId: args.p_map_context_id,
+        updatedCount
+      }
+    });
+    this.insertRow("sync_jobs", {
+      workspace_id: args.p_workspace_id,
+      kind: "github_export_pending",
+      status: "pending",
+      payload: { reason: action, entityId }
+    });
   }
 }
 
@@ -337,5 +420,131 @@ describe("SupabaseGoalStore goal creation", () => {
         relation_type: "parent"
       })
     );
+  });
+});
+
+describe("SupabaseGoalStore map positions", () => {
+  it("sets scoped map positions for multiple goals with one audit event", async () => {
+    const client = new FakeSupabaseClient({
+      goals: [
+        goalRow({
+          id: "db-parent",
+          legacy_id: "goal-parent",
+          title: "Parent",
+          map_positions: {
+            focus: { x: 300, y: 400 }
+          }
+        }),
+        goalRow({
+          id: "db-child",
+          legacy_id: "goal-child",
+          title: "Child",
+          map_positions: {
+            "map-2": { x: 700, y: 800 }
+          }
+        })
+      ]
+    });
+    const store = new SupabaseGoalStore(client as any, "workspace-1", "user-1");
+
+    await store.setGoalMapPositions(
+      [
+        { id: "goal-parent", position: { x: 100, y: 200 } },
+        { id: "goal-child", position: { x: 500, y: 600 } },
+        { id: "goal-child", position: { x: 510, y: 610 } }
+      ],
+      "map-1"
+    );
+
+    expect(client.rpcCalls).toHaveLength(1);
+    expect(client.rpcCalls[0]).toMatchObject({
+      name: "set_goal_map_positions",
+      args: {
+        p_workspace_id: "workspace-1",
+        p_actor_user_id: "user-1",
+        p_map_context_id: "map-1"
+      }
+    });
+    expect(client.tables.goals.find((row) => row.legacy_id === "goal-parent")?.map_positions).toEqual({
+      "map-1": { x: 100, y: 200 },
+      focus: { x: 300, y: 400 }
+    });
+    expect(client.tables.goals.find((row) => row.legacy_id === "goal-child")?.map_positions).toEqual({
+      "map-1": { x: 510, y: 610 },
+      "map-2": { x: 700, y: 800 }
+    });
+    expect(client.tables.audit_events).toHaveLength(1);
+    expect(client.tables.sync_jobs).toHaveLength(1);
+    expect(client.tables.audit_events[0]).toMatchObject({
+      action: "goal.map_positions.set",
+      payload: {
+        ids: ["goal-parent", "goal-child"],
+        mapContextId: "map-1",
+        updatedCount: 2
+      }
+    });
+  });
+
+  it("clears scoped map positions for multiple goals with one audit event", async () => {
+    const client = new FakeSupabaseClient({
+      goals: [
+        goalRow({
+          id: "db-parent",
+          legacy_id: "goal-parent",
+          title: "Parent",
+          map_positions: {
+            "map-1": { x: 100, y: 200 },
+            focus: { x: 300, y: 400 }
+          }
+        }),
+        goalRow({
+          id: "db-child",
+          legacy_id: "goal-child",
+          title: "Child",
+          map_positions: {
+            "map-1": { x: 500, y: 600 }
+          }
+        }),
+        goalRow({
+          id: "db-other",
+          legacy_id: "goal-other",
+          title: "Other",
+          map_positions: {
+            "map-2": { x: 700, y: 800 }
+          }
+        })
+      ]
+    });
+    const store = new SupabaseGoalStore(client as any, "workspace-1", "user-1");
+
+    await store.clearGoalMapPositions(["goal-parent", "goal-child", "goal-child"], "map-1");
+
+    expect(client.rpcCalls).toHaveLength(1);
+    expect(client.rpcCalls[0]).toMatchObject({
+      name: "clear_goal_map_positions",
+      args: {
+        p_workspace_id: "workspace-1",
+        p_actor_user_id: "user-1",
+        p_map_context_id: "map-1",
+        p_ids: ["goal-parent", "goal-child"]
+      }
+    });
+    expect(client.tables.goals.find((row) => row.legacy_id === "goal-parent")?.map_positions).toEqual({
+      focus: { x: 300, y: 400 }
+    });
+    expect(client.tables.goals.find((row) => row.legacy_id === "goal-child")?.map_positions).toBeNull();
+    expect(client.tables.goals.find((row) => row.legacy_id === "goal-other")?.map_positions).toEqual({
+      "map-2": { x: 700, y: 800 }
+    });
+    expect(client.tables.audit_events).toHaveLength(1);
+    expect(client.tables.sync_jobs).toHaveLength(1);
+    expect(client.tables.audit_events[0]).toMatchObject({
+      action: "goal.map_positions.clear",
+      payload: {
+        ids: ["goal-parent", "goal-child"],
+        mapContextId: "map-1",
+        updatedCount: 2
+      }
+    });
   });
 });

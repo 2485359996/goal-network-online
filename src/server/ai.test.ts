@@ -218,4 +218,146 @@ describe("AI routes", () => {
       response_format: { type: "json_object" }
     });
   });
+
+  it("parses JSON wrapped in code fences", async () => {
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: []
+    };
+
+    const result = await runAiProvider("improve-goal", request, {
+      env: {
+        AI_PROVIDER_URL: "https://provider.example/v1",
+        AI_PROVIDER_KEY: "test-key",
+        AI_PROVIDER_MODEL: "test-model"
+      },
+      readLocalEnv: () => ({}),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "```json\n{\"summary\": \"Better goal\"}\n```" } }]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    });
+
+    expect((result as { summary: string }).summary).toBe("Better goal");
+  });
+
+  it("extracts JSON object from content with surrounding text", async () => {
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: []
+    };
+
+    const result = await runAiProvider("improve-goal", request, {
+      env: {
+        AI_PROVIDER_URL: "https://provider.example/v1",
+        AI_PROVIDER_KEY: "test-key",
+        AI_PROVIDER_MODEL: "test-model"
+      },
+      readLocalEnv: () => ({}),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "Here is the result:\n{\"summary\": \"Better goal\"}\n\nDone." } }]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    });
+
+    expect((result as { summary: string }).summary).toBe("Better goal");
+  });
+
+  it("throws for completely invalid JSON content", async () => {
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: []
+    };
+
+    await expect(
+      runAiProvider("improve-goal", request, {
+        env: {
+          AI_PROVIDER_URL: "https://provider.example/v1",
+          AI_PROVIDER_KEY: "test-key",
+          AI_PROVIDER_MODEL: "test-model"
+        },
+        readLocalEnv: () => ({}),
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              choices: [{ message: { content: "not any json at all" } }]
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          )
+      })
+    ).rejects.toThrow("AI provider returned invalid JSON");
+  });
+
+  it("throws a timeout error when the request exceeds AI_REQUEST_TIMEOUT_MS", async () => {
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: []
+    };
+
+    await expect(
+      runAiProvider("improve-goal", request, {
+        env: {
+          AI_PROVIDER_URL: "https://provider.example/v1",
+          AI_PROVIDER_KEY: "test-key",
+          AI_PROVIDER_MODEL: "test-model",
+          AI_REQUEST_TIMEOUT_MS: "10"
+        },
+        readLocalEnv: () => ({}),
+        fetch: async (_url, init) => {
+          await new Promise<void>((_resolve, reject) => {
+            const signal = (init as RequestInit).signal;
+            if (!signal) return;
+            signal.addEventListener("abort", () => {
+              const err = new Error("The operation was aborted");
+              (err as NodeJS.ErrnoException).name = "AbortError";
+              reject(err);
+            });
+          });
+          throw new Error("should not reach here");
+        }
+      })
+    ).rejects.toThrow("AI provider request timed out");
+  });
+
+  it("throws with status code for provider 5xx errors", async () => {
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: []
+    };
+
+    await expect(
+      runAiProvider("improve-goal", request, {
+        env: {
+          AI_PROVIDER_URL: "https://provider.example/v1",
+          AI_PROVIDER_KEY: "test-key",
+          AI_PROVIDER_MODEL: "test-model"
+        },
+        readLocalEnv: () => ({}),
+        fetch: async () =>
+          new Response(JSON.stringify({}), { status: 503, headers: { "content-type": "application/json" } })
+      })
+    ).rejects.toThrow("AI provider error: 503");
+  });
+
 });

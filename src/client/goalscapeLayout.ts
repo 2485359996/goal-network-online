@@ -70,7 +70,7 @@ export const goalscapeCenter = { x: 600, y: 380, width: 142, height: 120 };
 const goalscapeViewBox = { width: 1200, height: 760 };
 
 export const DEFAULT_SUNBURST_VISIBLE_DEPTH = 4;
-export const sunburstCenterRadius = 110;
+export const sunburstCenterRadius = 86;
 const sunburstOuterRadius = 386;
 const sunburstCollapsedRingGap = 4;
 const sunburstCollapsedRingWidth = 8;
@@ -136,6 +136,18 @@ export function goalMapPosition(goal: GoalNode, fallback: MapPosition, overrides
   return hasMapPositionOverride(overrides, goal.id)
     ? clampGoalscapePosition(overrides[goal.id])
     : savedGoalMapPosition(goal, mapContextId) ?? fallback;
+}
+
+function previewGoalMapPosition(goalId: string, overrides: MapPositionOverrides) {
+  return hasMapPositionOverride(overrides, goalId) ? clampGoalscapePosition(overrides[goalId]) : undefined;
+}
+
+function goalscapeAngleDelta(from: MapPosition, to: MapPosition) {
+  return ((goalscapeAngleForPosition(to) - goalscapeAngleForPosition(from) + 540) % 360) - 180;
+}
+
+function goalscapePositionAfterAngleDelta(position: MapPosition, angleDelta: number, depth: number, visibleDepth: number) {
+  return goalscapePointOnOrbit(goalscapeAngleForPosition(position) + angleDelta, depth, visibleDepth);
 }
 
 export function goalHasMapPosition(goal: GoalNode | undefined, mapContextId: string, position: MapPosition) {
@@ -272,16 +284,10 @@ export function goalscapeChildNodeSize(
 }
 
 export function goalscapeNodeVisualMetrics(layout: Pick<GoalscapeNodeLayout, "width" | "height" | "depth">) {
-  const iconMin = layout.depth === 1 ? 30 : layout.depth === 2 ? 21 : 16;
-  const iconMax = layout.depth === 1 ? 34 : layout.depth === 2 ? 25 : 20;
   const titleMin = layout.depth === 1 ? 15 : layout.depth === 2 ? 11 : 9;
   const titleMax = layout.depth === 1 ? 18 : layout.depth === 2 ? 13 : 11;
-  const iconSize = Math.round(clamp(layout.width * 0.255, iconMin, iconMax));
   const titleSize = Math.round(clamp(layout.width * (layout.depth === 1 ? 0.14 : 0.135), titleMin, titleMax));
   return {
-    iconSize,
-    iconGlyphSize: Math.round(iconSize * 0.56),
-    iconY: layout.depth === 1 ? layout.height * 0.49 : layout.depth === 2 ? layout.height * 0.47 : layout.height * 0.45,
     titleY: layout.depth === 1 ? layout.height * 0.04 : layout.depth === 2 ? layout.height * 0.07 : layout.height * 0.09,
     titleLineGap: layout.depth === 1 ? Math.round(titleSize * 1.16) : Math.round(titleSize * 1.12),
     titleSize,
@@ -314,7 +320,7 @@ export function goalscapeCenterVisualMode(centerId: string, goal?: GoalNode | nu
   return centerId !== "root" && goal ? "goal" : "map";
 }
 
-export function goalscapeCenterPearlTint(centerId: string, goal?: GoalNode | null): GoalscapeCenterPearlTint {
+export function goalscapeCenterPearlTint(centerId: string, goal?: GoalNode | null, treeRootThemeColor = ""): GoalscapeCenterPearlTint {
   if (!goal || goalscapeCenterVisualMode(centerId, goal) === "map") {
     return {
       primary: "#e0e7ff",
@@ -327,7 +333,7 @@ export function goalscapeCenterPearlTint(centerId: string, goal?: GoalNode | nul
     };
   }
 
-  const base = goalscapeNodeColor(goal, domainBaseColor(goal.domain || goal.title));
+  const base = normalizeHexColor(treeRootThemeColor) || goalscapeNodeColor(goal, domainBaseColor(goal.domain || goal.title));
   return {
     primary: blend(base, "#ffffff", 0.72),
     secondary: blend(base, "#ffffff", 0.88),
@@ -400,19 +406,21 @@ export function buildSunburstLayout(
   goals: GoalNode[],
   importanceOverrides: ImportanceOverrides,
   progressOverrides: ProgressOverrides,
-  requestedVisibleDepth = DEFAULT_SUNBURST_VISIBLE_DEPTH
+  requestedVisibleDepth = DEFAULT_SUNBURST_VISIBLE_DEPTH,
+  treeRootThemeColor = ""
 ): SunburstLayout {
   const hasSyntheticRoot = goals.length !== 1;
   const maxDepth = countTreeDepth(goals);
   const visibleDepth = clamp(Math.round(requestedVisibleDepth), 1, Math.max(1, maxDepth || 1));
   const centerGoal = hasSyntheticRoot ? undefined : goals[0];
+  const forcedTreeRootThemeColor = normalizeHexColor(treeRootThemeColor);
   const center: SunburstCenterLayout = centerGoal
     ? {
         id: centerGoal.id,
         title: centerGoal.title,
         depth: 1,
         radius: sunburstCenterRadius,
-        color: resolveGoalThemeColor(centerGoal, goalThemeColorForIndex(0)),
+        color: forcedTreeRootThemeColor || resolveGoalThemeColor(centerGoal, goalThemeColorForIndex(0)),
         progress: weightedGoalProgress(centerGoal, importanceOverrides, progressOverrides),
         node: centerGoal
       }
@@ -457,8 +465,10 @@ export function buildSunburstLayout(
       const importance = importanceById[child.id] ?? 0;
       const childEndAngle = index === children.length - 1 ? endAngle : cursor + adjustedSpans[index];
       const ring = sunburstRingForDepth(depth, visibleDepth, hasSyntheticRoot);
-      const fallbackColor = parentId === "root" ? goalThemeColorForIndex(index) : inheritedColor;
-      const color = resolveGoalThemeColor(child, fallbackColor);
+      const color =
+        parentId === "root"
+          ? forcedTreeRootThemeColor || resolveGoalThemeColor(child, goalThemeColorForIndex(index))
+          : inheritedColor;
       const segment: SunburstSegmentLayout = {
         id: child.id,
         node: child,
@@ -658,21 +668,75 @@ export function goalscapeTopNodeSize(densityScale: number, focusScale: number) {
   };
 }
 
+export type GoalscapeBranchMapPositionPatch = {
+  id: string;
+  position: MapPosition;
+};
+
+export function goalscapeBranchMapPositionPatches(
+  goals: GoalNode[],
+  goalId: string,
+  positionOverrides: MapPositionOverrides = {},
+  mapContextId = "root"
+): GoalscapeBranchMapPositionPatch[] {
+  const visibleDepth = goalscapeMaxRenderedTreeDepth;
+  const patches: GoalscapeBranchMapPositionPatch[] = [];
+
+  const visit = (
+    goal: GoalNode,
+    index: number,
+    siblingCount: number,
+    depth: number,
+    parentBaseAngle: number,
+    inheritedAngleDelta: number | undefined,
+    ancestorInBranch: boolean
+  ) => {
+    const angle =
+      depth === 1
+        ? goalscapeTopLevelAngle(index, goals.length)
+        : goalscapeChildAngle(parentBaseAngle, index, siblingCount, depth === 2 ? (360 / Math.max(1, goals.length)) * 0.78 : 156);
+    const fallback = goalscapePointOnOrbit(angle, depth, visibleDepth);
+    const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
+    const basePosition = constrainGoalscapePositionToOrbit(savedGoalMapPosition(goal, mapContextId) ?? fallback, orbit);
+    const previewPosition = previewGoalMapPosition(goal.id, positionOverrides);
+    const constrainedPreviewPosition = previewPosition ? constrainGoalscapePositionToOrbit(previewPosition, orbit) : undefined;
+    const position =
+      inheritedAngleDelta !== undefined
+        ? goalscapePositionAfterAngleDelta(basePosition, inheritedAngleDelta, depth, visibleDepth)
+        : constrainedPreviewPosition ?? basePosition;
+    const angleDelta = inheritedAngleDelta ?? (constrainedPreviewPosition ? goalscapeAngleDelta(basePosition, position) : undefined);
+    const inBranch = ancestorInBranch || goal.id === goalId;
+
+    if (inBranch) patches.push({ id: goal.id, position: clampGoalscapePosition(position) });
+
+    const childBaseAngle = goalscapeAngleForPosition(basePosition);
+    const children = goal.children || [];
+    children.forEach((child, childIndex) => {
+      visit(child, childIndex, children.length, depth + 1, childBaseAngle, angleDelta, inBranch);
+    });
+  };
+
+  goals.forEach((goal, index) => visit(goal, index, goals.length, 1, -90, undefined, false));
+  return patches;
+}
+
 export function buildGoalscapeLayout(
   goals: GoalNode[],
   importanceOverrides: ImportanceOverrides,
   progressOverrides: ProgressOverrides,
   positionOverrides: MapPositionOverrides = {},
   mapContextId = "root",
-  selectedId?: string
+  selectedId?: string,
+  treeRootThemeColor = ""
 ) {
   void selectedId;
   const renderDepthCounts = countGoalscapeRenderDepths(goals);
   const visibleDepth = goalscapeMaxRenderedTreeDepth;
   const topImportance = normalizedImportance(goals, importanceOverrides);
   const layouts: GoalscapeNodeLayout[] = [];
+  const forcedTreeRootThemeColor = normalizeHexColor(treeRootThemeColor);
 
-  const appendChildren = (parentLayout: GoalscapeNodeLayout, followsPreviewedAncestor = false) => {
+  const appendChildren = (parentLayout: GoalscapeNodeLayout, inheritedAngleDelta?: number, parentBaseAngle = parentLayout.angle) => {
     const children = parentLayout.node.children || [];
     if (children.length === 0) return;
 
@@ -686,16 +750,21 @@ export function buildGoalscapeLayout(
       const treeDepth = parentLayout.treeDepth + 1;
       const depth = treeDepth;
       const parentLaneSpan = parentLayout.depth === 1 ? (360 / Math.max(1, goals.length)) * 0.78 : 156;
-      const childAngle = goalscapeChildAngle(parentLayout.angle, childIndex, children.length, parentLaneSpan);
-      const childOrbit = goalscapeOrbitForDepth(depth, visibleDepth);
+      const childAngle = goalscapeChildAngle(parentBaseAngle, childIndex, children.length, parentLaneSpan);
       const fallback = goalscapePointOnOrbit(childAngle, depth, visibleDepth);
-      const childPosition = constrainGoalscapePositionToOrbit(
-        followsPreviewedAncestor ? fallback : goalMapPosition(child, fallback, positionOverrides, mapContextId),
-        childOrbit
-      );
+      const childOrbit = goalscapeOrbitForDepth(depth, visibleDepth);
+      const basePosition = constrainGoalscapePositionToOrbit(savedGoalMapPosition(child, mapContextId) ?? fallback, childOrbit);
+      const previewPosition = previewGoalMapPosition(child.id, positionOverrides);
+      const constrainedPreviewPosition = previewPosition ? constrainGoalscapePositionToOrbit(previewPosition, childOrbit) : undefined;
+      const childPosition =
+        inheritedAngleDelta !== undefined
+          ? goalscapePositionAfterAngleDelta(basePosition, inheritedAngleDelta, depth, visibleDepth)
+          : constrainedPreviewPosition ?? basePosition;
+      const childAngleDelta = inheritedAngleDelta ?? (constrainedPreviewPosition ? goalscapeAngleDelta(basePosition, childPosition) : undefined);
+      const childBaseAngle = goalscapeAngleForPosition(basePosition);
       const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? children.length, depth, visibleDepth);
       const childSize = goalscapeChildNodeSize(parentLayout, childIndex, depth, densityScale, 1);
-      const childColor = resolveGoalThemeColor(child, parentLayout.color);
+      const childColor = parentLayout.color;
       const childLayout: GoalscapeNodeLayout = {
         node: child,
         parentId: parentLayout.node.id,
@@ -719,20 +788,25 @@ export function buildGoalscapeLayout(
       };
 
       layouts.push(childLayout);
-      appendChildren(childLayout, followsPreviewedAncestor || hasMapPositionOverride(positionOverrides, child.id));
+      appendChildren(childLayout, childAngleDelta, childBaseAngle);
     });
   };
 
   goals.forEach((goal, index) => {
     const treeDepth = 1;
     const depth = treeDepth;
-    const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
     const angle = goalscapeTopLevelAngle(index, goals.length);
     const fallback = goalscapePointOnOrbit(angle, depth, visibleDepth);
-    const position = constrainGoalscapePositionToOrbit(goalMapPosition(goal, fallback, positionOverrides, mapContextId), orbit);
+    const orbit = goalscapeOrbitForDepth(depth, visibleDepth);
+    const basePosition = constrainGoalscapePositionToOrbit(savedGoalMapPosition(goal, mapContextId) ?? fallback, orbit);
+    const previewPosition = previewGoalMapPosition(goal.id, positionOverrides);
+    const constrainedPreviewPosition = previewPosition ? constrainGoalscapePositionToOrbit(previewPosition, orbit) : undefined;
+    const position = constrainedPreviewPosition ?? basePosition;
+    const angleDelta = constrainedPreviewPosition ? goalscapeAngleDelta(basePosition, position) : undefined;
+    const baseAngle = goalscapeAngleForPosition(basePosition);
     const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? goals.length, depth, visibleDepth);
     const size = goalscapeTopNodeSize(densityScale, 1);
-    const color = resolveGoalThemeColor(goal, goalThemeColorForIndex(index));
+    const color = forcedTreeRootThemeColor || resolveGoalThemeColor(goal, goalThemeColorForIndex(index));
     const importance = topImportance[goal.id] ?? 0;
     const layout: GoalscapeNodeLayout = {
       node: goal,
@@ -757,7 +831,7 @@ export function buildGoalscapeLayout(
     };
 
     layouts.push(layout);
-    appendChildren(layout, hasMapPositionOverride(positionOverrides, goal.id));
+    appendChildren(layout, angleDelta, baseAngle);
   });
 
   return layouts;
