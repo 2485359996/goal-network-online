@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs";
+import { createElement } from "react";
+import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { GoalNode } from "../shared/types";
 import {
   buildSunburstLayout,
   GOAL_PRESENTATION_STORAGE_KEY,
+  GoalApp,
   buildGoalscapeLayout,
   clampGoalscapePosition,
   constrainGoalscapePositionToOrbit,
@@ -198,6 +201,10 @@ function layoutSnapshot(layouts: ReturnType<typeof buildGoalscapeLayout>) {
 }
 
 describe("goalscape layout", () => {
+  it("renders the goal app during server prerender without browser globals", () => {
+    expect(() => renderToString(createElement(GoalApp))).not.toThrow();
+  });
+
   it("filters the visible goal tree by the active goal map", () => {
     const mapOneChild = goal("map-1-child");
     const mapOne = { ...goal("map-1-root"), children: [mapOneChild] };

@@ -546,13 +546,15 @@ export function GoalApp() {
   }, [goals.flatGoals]);
 
   const clampDetailWidth = useCallback((value: number) => {
-    const workspaceWidth = workspaceRef.current?.getBoundingClientRect().width ?? window.innerWidth;
+    const workspaceWidth =
+      workspaceRef.current?.getBoundingClientRect().width ?? (typeof window === "undefined" ? 1080 : window.innerWidth);
     const maxWidth = Math.max(340, Math.min(560, workspaceWidth - 520));
     return clamp(Math.round(value), 340, maxWidth);
   }, []);
 
   const clampMapPaneHeight = useCallback((value: number) => {
-    const maxHeight = Math.max(320, Math.min(720, window.innerHeight - 220));
+    const viewportHeight = typeof window === "undefined" ? 940 : window.innerHeight;
+    const maxHeight = Math.max(320, Math.min(720, viewportHeight - 220));
     return clamp(Math.round(value), 320, maxHeight);
   }, []);
 
