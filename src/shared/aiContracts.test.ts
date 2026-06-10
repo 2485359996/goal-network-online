@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  aiFindingSchema,
+  aiWeeklyActionSchema,
   draftGoalRequestSchema,
   draftGoalResponseSchema,
   improveGoalRequestSchema,
@@ -87,5 +89,20 @@ describe("AI contracts", () => {
         markdown: "# Free-form content"
       }).success
     ).toBe(false);
+  });
+
+  it("finding severity defaults to info when omitted", () => {
+    const result = aiFindingSchema.safeParse({
+      title: "Stale goal",
+      detail: "No progress in 30 days"
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.severity).toBe("info");
+  });
+
+  it("weekly action schema requires description and accepts optional fields", () => {
+    expect(aiWeeklyActionSchema.safeParse({ description: "Review PRs" }).success).toBe(true);
+    expect(aiWeeklyActionSchema.safeParse({ description: "Review PRs", goal: "Delivery", due: "2025-01-13" }).success).toBe(true);
+    expect(aiWeeklyActionSchema.safeParse({ goal: "Delivery" }).success).toBe(false);
   });
 });

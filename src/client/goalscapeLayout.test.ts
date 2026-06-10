@@ -15,6 +15,7 @@ import {
   goalscapeCenter,
   goalscapeCenterPearlSize,
   goalscapeCenterVisualMode,
+  goalscapeBranchMapPositionPatches,
   goalHasMapPosition,
   mapAddActionAvailability,
   mapPositionPreviewForContext,
@@ -347,8 +348,8 @@ describe("goalscape layout", () => {
     }
   });
 
-  it("assigns the seven theme colors to top-level goals and inherits them in the sphere map", () => {
-    const alphaChild = goal("alpha-child");
+  it("assigns the seven theme colors to top-level goals and ignores child colors in the sphere map", () => {
+    const alphaChild = { ...goal("alpha-child"), color: "#10b981", domain: "personal" };
     const roots = [
       { ...goal("alpha"), children: [alphaChild] },
       goal("beta"),
@@ -362,6 +363,26 @@ describe("goalscape layout", () => {
 
     expect(topLevelColors).toEqual(GOAL_THEME_COLORS.slice(0, roots.length).map((item) => item.value));
     expect(childLayout?.color).toBe(GOAL_THEME_COLORS[0].value);
+  });
+
+  it("uses the real root theme color for a focused sphere branch", () => {
+    const realRootColor = "#e11d48";
+    const leaf = { ...goal("leaf"), color: "#0284c7" };
+    const focusedChild = { ...goal("focused-child"), color: "#10b981", children: [leaf] };
+    const focusedLayoutBuilder = buildGoalscapeLayout as (
+      goals: GoalNode[],
+      importanceOverrides: Record<string, number>,
+      progressOverrides: Record<string, number>,
+      positionOverrides: Record<string, { x: number; y: number }>,
+      mapContextId: string,
+      selectedId: string | undefined,
+      treeRootThemeColor: string
+    ) => ReturnType<typeof buildGoalscapeLayout>;
+
+    const layouts = focusedLayoutBuilder([focusedChild], {}, {}, {}, "focused-parent", undefined, realRootColor);
+
+    expect(layouts.find((layout) => layout.node.id === "focused-child")?.color).toBe(realRootColor);
+    expect(layouts.find((layout) => layout.node.id === "leaf")?.color).toBe(realRootColor);
   });
 
   it("fans child goals around the parent angle without sector fields", () => {
@@ -486,34 +507,32 @@ describe("goalscape layout", () => {
     expect(mapPositionPreviewForContext(pruned, "other")[saved.id]).toEqual({ x: 600, y: 690 });
   });
 
-  it("keeps a single parent's child fan centered after dragging the parent", () => {
+  it("moves descendants along their orbits after dragging the parent", () => {
     const parent = { ...goal("parent"), children: [goal("child-a"), goal("child-b"), goal("child-c")] };
     const baselineLayouts = buildGoalscapeLayout([parent], {}, {});
-    const draggedLayouts = buildGoalscapeLayout([parent], {}, {}, { parent: { x: 900, y: 510 } });
+    const draggedPosition = constrainGoalscapePositionToOrbit({ x: 900, y: 510 }, goalscapeOrbitForDepth(1));
+    const draggedLayouts = buildGoalscapeLayout([parent], {}, {}, { parent: draggedPosition });
     const baselineParent = baselineLayouts.find((layout) => layout.node.id === "parent");
     const draggedParent = draggedLayouts.find((layout) => layout.node.id === "parent");
 
     expect(baselineParent).toBeDefined();
     expect(draggedParent).toBeDefined();
     expect(angularDistanceDegrees(angleDegreesFromCenter(draggedParent!), angleDegreesFromCenter(baselineParent!))).toBeGreaterThan(20);
+    expect(ellipseValue(draggedParent!, goalscapeOrbitForDepth(draggedParent!.depth, draggedParent!.visibleDepth))).toBeCloseTo(1, 2);
 
-    for (const layouts of [baselineLayouts, draggedLayouts]) {
-      const parentLayout = layouts.find((layout) => layout.node.id === "parent");
-      expect(parentLayout).toBeDefined();
-      const parentAngle = angleDegreesFromCenter(parentLayout!);
-      const childDeltas = ["child-a", "child-b", "child-c"].map((id) => {
-        const layout = layouts.find((item) => item.node.id === id);
-        expect(layout).toBeDefined();
-        return relativeAngleDegrees(angleDegreesFromCenter(layout!), parentAngle);
-      });
+    const angleDelta = relativeAngleDegrees(angleDegreesFromCenter(draggedParent!), angleDegreesFromCenter(baselineParent!));
+    for (const id of ["child-a", "child-b", "child-c"]) {
+      const baselineChild = baselineLayouts.find((layout) => layout.node.id === id);
+      const draggedChild = draggedLayouts.find((layout) => layout.node.id === id);
+      expect(baselineChild).toBeDefined();
+      expect(draggedChild).toBeDefined();
 
-      expect(Math.abs(childDeltas[0])).toBeLessThan(0.25);
-      expect(Math.abs(childDeltas[1] + 30)).toBeLessThan(0.25);
-      expect(Math.abs(childDeltas[2] - 30)).toBeLessThan(0.25);
+      expect(ellipseValue(draggedChild!, goalscapeOrbitForDepth(draggedChild!.depth, draggedChild!.visibleDepth))).toBeCloseTo(1, 2);
+      expect(relativeAngleDegrees(angleDegreesFromCenter(draggedChild!), angleDegreesFromCenter(baselineChild!))).toBeCloseTo(angleDelta, 1);
     }
   });
 
-  it("keeps saved child positions attached to the dragged parent preview", () => {
+  it("moves saved child positions along their orbits with the dragged parent preview", () => {
     const parent = {
       ...goal("parent"),
       children: [
@@ -522,20 +541,50 @@ describe("goalscape layout", () => {
         { ...goal("child-c"), map_positions: { root: { x: 110, y: 380 } } }
       ]
     };
-    const draggedLayouts = buildGoalscapeLayout([parent], {}, {}, { parent: { x: 900, y: 510 } });
+    const baselineLayouts = buildGoalscapeLayout([parent], {}, {});
+    const draggedPosition = constrainGoalscapePositionToOrbit({ x: 900, y: 510 }, goalscapeOrbitForDepth(1));
+    const draggedLayouts = buildGoalscapeLayout([parent], {}, {}, { parent: draggedPosition });
+    const baselineParent = baselineLayouts.find((layout) => layout.node.id === "parent");
     const parentLayout = draggedLayouts.find((layout) => layout.node.id === "parent");
 
+    expect(baselineParent).toBeDefined();
     expect(parentLayout).toBeDefined();
-    const parentAngle = angleDegreesFromCenter(parentLayout!);
-    const childDeltas = ["child-a", "child-b", "child-c"].map((id) => {
-      const layout = draggedLayouts.find((item) => item.node.id === id);
-      expect(layout).toBeDefined();
-      return relativeAngleDegrees(angleDegreesFromCenter(layout!), parentAngle);
-    });
+    const angleDelta = relativeAngleDegrees(angleDegreesFromCenter(parentLayout!), angleDegreesFromCenter(baselineParent!));
+    for (const id of ["child-a", "child-b", "child-c"]) {
+      const baselineChild = baselineLayouts.find((layout) => layout.node.id === id);
+      const draggedChild = draggedLayouts.find((layout) => layout.node.id === id);
+      expect(baselineChild).toBeDefined();
+      expect(draggedChild).toBeDefined();
 
-    expect(Math.abs(childDeltas[0])).toBeLessThan(0.25);
-    expect(Math.abs(childDeltas[1] + 30)).toBeLessThan(0.25);
-    expect(Math.abs(childDeltas[2] - 30)).toBeLessThan(0.25);
+      expect(ellipseValue(draggedChild!, goalscapeOrbitForDepth(draggedChild!.depth, draggedChild!.visibleDepth))).toBeCloseTo(1, 2);
+      expect(relativeAngleDegrees(angleDegreesFromCenter(draggedChild!), angleDegreesFromCenter(baselineChild!))).toBeCloseTo(angleDelta, 1);
+    }
+  });
+
+  it("computes orbital map position patches for the entire dragged branch", () => {
+    const grandchild = goal("grandchild");
+    const child = { ...goal("child"), children: [grandchild] };
+    const parent = { ...goal("parent"), children: [child] };
+    const draggedPosition = constrainGoalscapePositionToOrbit({ x: 900, y: 510 }, goalscapeOrbitForDepth(1));
+    const baselinePatches = goalscapeBranchMapPositionPatches([parent], "parent", {}, "root");
+    const draggedPatches = goalscapeBranchMapPositionPatches([parent], "parent", { parent: draggedPosition }, "root");
+    const baselineById = new Map(baselinePatches.map((patch) => [patch.id, patch.position]));
+    const draggedById = new Map(draggedPatches.map((patch) => [patch.id, patch.position]));
+    const angleDelta = relativeAngleDegrees(angleDegreesFromCenter(draggedById.get("parent")!), angleDegreesFromCenter(baselineById.get("parent")!));
+
+    expect(draggedPatches.map((patch) => patch.id)).toEqual(["parent", "child", "grandchild"]);
+    for (const [id, depth] of [
+      ["child", 2],
+      ["grandchild", 3]
+    ] as const) {
+      const baselinePosition = baselineById.get(id);
+      const draggedPatch = draggedById.get(id);
+      expect(baselinePosition).toBeDefined();
+      expect(draggedPatch).toBeDefined();
+
+      expect(ellipseValue(draggedPatch!, goalscapeOrbitForDepth(depth))).toBeCloseTo(1, 2);
+      expect(relativeAngleDegrees(angleDegreesFromCenter(draggedPatch!), angleDegreesFromCenter(baselinePosition!))).toBeCloseTo(angleDelta, 0);
+    }
   });
 
   it("scopes saved map positions to the current focus context", () => {
@@ -733,6 +782,20 @@ describe("goalscape layout", () => {
     expect(weightedGoalProgress(parent, { light: 75, heavy: 25 }, { heavy: 100 })).toBe(40);
     expect(buildGoalscapeLayout([parent], {}, {})[0].progress).toBe(65);
   });
+
+  it("omits internal icon chrome from goalscape target spheres only", () => {
+    const source = clientMainSource();
+    const css = clientStyles();
+
+    expect(source).not.toContain("goalscape-icon-object");
+    expect(source).not.toContain("goalscape-icon-wrap");
+    expect(source).not.toContain("goalscape-node-icon");
+    expect(css).not.toContain(".goalscape-icon-object");
+    expect(css).not.toContain(".goalscape-icon-wrap");
+    expect(css).not.toContain(".goalscape-node-icon");
+    expect(source).toContain("sunburst-center-icon");
+    expect(css).toContain(".sunburst-center-icon");
+  });
 });
 
 describe("sunburst layout", () => {
@@ -771,6 +834,28 @@ describe("sunburst layout", () => {
     ]);
   });
 
+  it("centers a focused goal and renders its children as the first sunburst ring", () => {
+    const child = goal("focused-child");
+    const focusGoal = { ...goal("focused"), children: [child] };
+    const layout = buildSunburstLayout([focusGoal], {}, {}, 4);
+
+    expect(layout.center.node?.id).toBe("focused");
+    expect(layout.hasSyntheticRoot).toBe(false);
+    expect(layout.segments.map((segment) => [segment.node.id, segment.depth])).toEqual([["focused-child", 2]]);
+  });
+
+  it("wires the sunburst map to the shared drill focus state", () => {
+    const source = clientMainSource();
+
+    expect(source).toContain("const sunburstGoals = focusGoal ? [focusGoal] : visibleTree;");
+    expect(source).toContain('focusRootId && (presentationMode === "sphere" || presentationMode === "sunburst")');
+    expect(source).toMatch(/<SunburstGoalMap[\s\S]*?goals=\{sunburstGoals\}[\s\S]*?onDrill=\{drillGoal\}[\s\S]*?onAscend=\{ascendGoal\}/);
+    expect(source).toMatch(/const lastSegmentClickRef = useRef/);
+    expect(source).toContain("onDrill(segment.node.id)");
+    expect(source).toContain('if (event.key === "Enter" && event.shiftKey)');
+    expect(source).not.toMatch(/if \(mode === "sunburst"\) \{[\s\S]{0,160}?setFocusRootId\(null\)/);
+  });
+
   it("defaults to four visible layers and emits a thin collapsed outer ring for deeper goals", () => {
     const level5 = goal("level-5");
     const level4 = { ...goal("level-4"), children: [level5] };
@@ -801,7 +886,7 @@ describe("sunburst layout", () => {
     const layout = buildSunburstLayout([level1], {}, {}, 4);
     const outerMostSegment = layout.segments.find((segment) => segment.node.id === "level-4");
 
-    expect(layout.center.radius).toBeGreaterThanOrEqual(110);
+    expect(layout.center.radius).toBeGreaterThanOrEqual(80);
     expect(outerMostSegment?.outerRadius).toBeGreaterThanOrEqual(380);
   });
 
@@ -877,6 +962,13 @@ describe("sunburst layout", () => {
     expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?width:\s*min\(100cqw, calc\(100cqh \* 1\.269\), 1120px\);/);
   });
 
+  it("keeps the map toolbar floating over the canvas instead of reserving layout height", () => {
+    const css = clientStyles();
+
+    expect(css).toMatch(/\.map-pane-toolbar\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*var\(--map-pane-padding\) var\(--map-pane-padding\) auto var\(--map-pane-padding\);/);
+    expect(css).toMatch(/\.map-canvas\s*\{[\s\S]*?grid-row:\s*1 \/ -1;/);
+  });
+
   it("omits decorative sunburst stripe overlays that compete with segment boundaries", () => {
     const source = clientMainSource();
     const css = clientStyles();
@@ -891,9 +983,11 @@ describe("sunburst layout", () => {
     expect(css).not.toContain("--sun-sheen");
   });
 
-  it("uses the same seven theme colors and inherited child colors in the sunburst map", () => {
+  it("uses the same seven theme colors and ignores child colors in the sunburst map", () => {
+    const alphaGrandchild = { ...goal("alpha-grandchild"), color: "#f59e0b" };
+    const alphaChild = { ...goal("alpha-child"), color: "#10b981", children: [alphaGrandchild] };
     const roots = [
-      { ...goal("alpha"), children: [goal("alpha-child")] },
+      { ...goal("alpha"), children: [alphaChild] },
       goal("beta"),
       goal("gamma"),
       goal("delta"),
@@ -902,9 +996,11 @@ describe("sunburst layout", () => {
     const layout = buildSunburstLayout(roots, {}, {}, 4);
     const topLevelColors = roots.map((root) => layout.segments.find((segment) => segment.node.id === root.id)?.color);
     const childSegment = layout.segments.find((segment) => segment.node.id === "alpha-child");
+    const grandchildSegment = layout.segments.find((segment) => segment.node.id === "alpha-grandchild");
 
     expect(topLevelColors).toEqual(GOAL_THEME_COLORS.slice(0, roots.length).map((item) => item.value));
     expect(childSegment?.color).toBe(GOAL_THEME_COLORS[0].value);
+    expect(grandchildSegment?.color).toBe(GOAL_THEME_COLORS[0].value);
   });
 
   it("maps live progress previews to sunburst segments without changing importance angles", () => {

@@ -74,6 +74,12 @@ describe("theme styles", () => {
     expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.goalscape-center-title\s*{\s*fill:\s*#000000;/);
   });
 
+  it("keeps the sunburst center title black in dark mode", () => {
+    const styles = clientStyles();
+
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.sunburst-center-title\s*{\s*fill:\s*#000000;/);
+  });
+
   it("uses theme tokens for the notes and actions drawer colors", () => {
     const styles = clientStyles();
 

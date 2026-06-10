@@ -555,6 +555,52 @@ export class SupabaseGoalStore {
     return { ok: true, filePath: String(patch.file_path), message: "Goal updated" };
   }
 
+  async setGoalMapPositions(
+    positions: Array<{ id: string; position: { x: number; y: number } }>,
+    mapContextId: string
+  ): Promise<MarkdownWriteResult> {
+    const byGoalId = new Map<string, { x: number; y: number }>();
+    for (const item of positions) {
+      const id = item.id.trim();
+      if (!id) continue;
+      byGoalId.set(id, { x: Number(item.position.x), y: Number(item.position.y) });
+    }
+    const goalIds = Array.from(byGoalId.keys());
+    const contextId = mapContextId.trim();
+    if (!goalIds.length) throw new Error("Goal positions are required");
+    if (!contextId) throw new Error("Map context is required");
+
+    const result = await this.client.rpc("set_goal_map_positions", {
+      p_workspace_id: this.workspaceId,
+      p_actor_user_id: this.actorUserId,
+      p_map_context_id: contextId,
+      p_positions: goalIds.map((id) => ({
+        id,
+        position: byGoalId.get(id)!
+      }))
+    });
+    if (result.error) throw result.error;
+
+    return { ok: true, filePath: "", message: "Goal map positions saved" };
+  }
+
+  async clearGoalMapPositions(ids: string[], mapContextId: string): Promise<MarkdownWriteResult> {
+    const goalIds = Array.from(new Set(ids.map((id) => id.trim()).filter(Boolean)));
+    const contextId = mapContextId.trim();
+    if (!goalIds.length) throw new Error("Goal ids are required");
+    if (!contextId) throw new Error("Map context is required");
+
+    const result = await this.client.rpc("clear_goal_map_positions", {
+      p_workspace_id: this.workspaceId,
+      p_actor_user_id: this.actorUserId,
+      p_map_context_id: contextId,
+      p_ids: goalIds
+    });
+    if (result.error) throw result.error;
+
+    return { ok: true, filePath: "", message: "Goal map positions cleared" };
+  }
+
   async deleteGoal(id: string): Promise<MarkdownWriteResult> {
     const current = await goalByLegacyId(this.client, this.workspaceId, id);
     if (!current) throw new Error(`Goal not found: ${id}`);

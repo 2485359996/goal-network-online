@@ -43,6 +43,8 @@ const horizonOptions = [
   { value: "long", label: "长期" }
 ];
 
+const AI_CLIENT_TIMEOUT_MS = 60_000;
+
 function titleFromLink(value: string | undefined) {
   return String(value ?? "")
     .trim()
@@ -193,11 +195,25 @@ function mergeAiDraft(current: CreateGoalDraft, response: AiDraftGoalResponse): 
 }
 
 async function requestGoalDraft(context: CreateGoalDialogContext, draft: CreateGoalDraft): Promise<AiDraftGoalResponse> {
-  const response = await fetch("/api/ai/draft-goal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(buildCreateGoalAiRequest(context, draft))
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_CLIENT_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch("/api/ai/draft-goal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify(buildCreateGoalAiRequest(context, draft))
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("AI 请求超时，请重试");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (response.status === 501) throw new Error("AI 后端尚未配置");
   if (!response.ok) {
@@ -396,7 +412,6 @@ export function CreateGoalDialog({
                       key={color.value}
                       className={draft.color === color.value ? "create-goal-color-option selected" : "create-goal-color-option"}
                       title={color.label}
-                      aria-label={color.label}
                       style={
                         {
                           "--goal-theme-color": color.value
@@ -409,6 +424,7 @@ export function CreateGoalDialog({
                         value={color.value}
                         checked={draft.color === color.value}
                         disabled={busy}
+                        aria-label={color.label}
                         onChange={(event) => updateDraft({ color: event.target.value })}
                       />
                       <span className="create-goal-color-swatch" aria-hidden="true" />
