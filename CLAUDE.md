@@ -8,35 +8,34 @@ Package manager is **pnpm** (`pnpm@10.33.0`); the project is ESM (`"type": "modu
 - `pnpm build` — **`tsc --noEmit` then `next build`**; type errors fail the build (strict TS)
 - `pnpm start` — production server
 - `pnpm test` — run the full Vitest suite once
-- `pnpm import:vault` — one-time Obsidian-vault → Supabase import (`tsx scripts/import-vault.ts`)
+- `pnpm import:vault` — one-time historical data migration helper (`tsx scripts/import-vault.ts`)
 
 Run a single test file or filter by name:
 ```
-pnpm test src/server/markdown.test.ts
+pnpm test src/lib/stores/goals.test.ts
 pnpm exec vitest run -t "weighted progress"
 ```
 There is no `vitest.config.*`; Vitest runs on defaults. Tests are co-located `*.test.ts` next to the code.
 
-Required env (see `.env.example`): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `AI_PROVIDER_URL/KEY/MODEL`, `GITHUB_APP_*`. The vault import also needs `GOAL_NETWORK_VAULT`, `IMPORT_OWNER_USER_ID`.
+Required env (see `.env.example`): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `AI_PROVIDER_URL/KEY/MODEL`, `GITHUB_APP_*`. The optional historical migration helper also needs `GOAL_NETWORK_VAULT`, `IMPORT_OWNER_USER_ID`.
 
 ## Architecture
 
-This is the **cloud/online edition** of an Obsidian-based personal goal-network system ("目标网络"): Next.js 16 (App Router) + React 19 + Supabase (Postgres + Auth + Realtime + Storage) + TypeScript. It visualizes a personal goal tree as a floating "star map" (see PRODUCT.md / DESIGN.md for the design language — 天体/星图 metaphor; **do not** introduce dashboard-style charts or progress bars).
+This is the **cloud/online edition** of a personal goal-network system ("目标网络"): Next.js 16 (App Router) + React 19 + Supabase (Postgres + Auth + Realtime + Storage) + TypeScript. It visualizes a personal goal tree as a floating "star map" (see PRODUCT.md / DESIGN.md for the design language — 天体/星图 metaphor; **do not** introduce dashboard-style charts or progress bars).
 
-### Two parallel storage backends, one domain shape
+### Supabase runtime backend
 
-The central design fact: **two backends implement the same goal operations and emit/parse the same data shape**. They share the domain types in `src/shared/types.ts` and the Obsidian markdown format.
+The central design fact: **Supabase is the product backend**. Runtime goal operations go through API routes and `SupabaseGoalStore`; goals, relations, maps, actions, records, audit events, and sync jobs live in Postgres.
 
-1. **`SupabaseGoalStore`** (`src/lib/stores/goals.ts`) — the live backend. Every API route uses it. Goals are Postgres rows; the tree and cross-links live in a separate `goal_relations` table (`relation_type`: `parent` / `supports` / `depends_on` / `conflicts_with`). `buildGoalsResponse()` reassembles rows + relations into the nested `GoalsResponse`.
-2. **`VaultService`** (`src/server/markdown.ts`) — the Obsidian-vault backend. Reads/writes Markdown files with YAML frontmatter + structured `## ` sections under a vault root (`resolveVaultRoot()`). Hierarchy and links are `parent: '[[title]]'` frontmatter and `[[wikilinks]]`. Used by the import script and as the canonical file format.
+**`SupabaseGoalStore`** (`src/lib/stores/goals.ts`) is the live runtime store. Every API route uses it. Goals are Postgres rows; the tree and cross-links live in a separate `goal_relations` table (`relation_type`: `parent` / `supports` / `depends_on` / `conflicts_with`). `buildGoalsResponse()` reassembles rows + relations into the nested `GoalsResponse`.
 
-Both return the **identical `GoalsResponse`** the client consumes. `src/lib/github/export.ts` serializes Supabase goals back into this same Markdown and commits them to a GitHub repo — closing the loop so cloud and vault stay consistent. **When you change goal serialization, keep all three (`goals.ts`, `markdown.ts`, `github/export.ts`) in sync.**
+Historical migration/export helpers are not product architecture. Current backend changes should start from the Supabase store, API contracts, and database schema; update migration/export tooling only when the changed shape affects it.
 
 ### Domain rules
 
-- **Weighted progress rollup**: leaf goals carry their own `progress`; a parent's progress is the priority-weighted average of its children (`applyWeightedProgress`, implemented in both backends). **Primary root goals** (职业发展 / 个人成长 / 幸福生活 — `src/shared/goalRules.ts`) have no own progress.
+- **Weighted progress rollup**: leaf goals carry their own `progress`; a parent's progress is the priority-weighted average of its children (`applyWeightedProgress`, used by `SupabaseGoalStore`). **Primary root goals** (职业发展 / 个人成长 / 幸福生活 — `src/shared/goalRules.ts`) have no own progress.
 - **Goal maps** (`goal_maps`): a workspace can hold several independent goal networks. `map_positions` (jsonb) stores per-map node coordinates keyed by context id.
-- **Wikilink identity**: goals are referenced by title via `[[title]]`; `referenceKey()` normalizes (strip quotes/brackets/whitespace, lowercase) for matching. `legacy_id` is a slug derived from parent + title.
+- **Goal identity**: `legacy_id` is a stable slug derived from parent + title and is still used by the store to map API-facing goal ids to database rows.
 
 ### Request flow
 
@@ -63,5 +62,5 @@ Schema and RLS live in `supabase/migrations/`. Core tables: `workspaces`, `membe
 ## Conventions & gotchas
 
 - Path alias `@/*` maps to the repo root.
-- Chinese is first-class: vault folder names (目标 / 计划 / 复盘 / 进展 / 行动), section headings (子方向, 成功信号, 行动候选, 复盘问题), primary goal titles, and user-facing strings are all Chinese.
-- In `src/shared/types.ts`, `directionHeading` includes mojibake fallback literals (`瀛愭柟鍚?`, `涓湡鐩爣`) — these are intentional encoding-tolerance for legacy data, not bugs to "clean up".
+- Chinese is first-class: section headings (子方向, 成功信号, 行动候选, 复盘问题), primary goal titles, and user-facing strings are all Chinese.
+- In `src/shared/types.ts`, `directionHeading` includes mojibake fallback literals (`瀛愭柟鍚?`, `涓湡鐩爣`) — these are intentional encoding-tolerance for older imported data, not bugs to "clean up".

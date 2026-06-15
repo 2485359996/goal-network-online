@@ -1,8 +1,21 @@
 import { AlertCircle, CheckCircle2, Loader2, Sparkles, X } from "lucide-react";
 import { motion } from "framer-motion";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { isPrimaryGoalNode } from "../shared/goalRules";
 import type { ActionCreateInput, GoalCreateInput, GoalNode, GoalPatchInput } from "../shared/types";
+import { AiConversationControls } from "./AiConversationControls";
+import {
+  availableAssistantCommands,
+  availableQuickAdjustmentsForTarget,
+  buildAssistantCommandTurn,
+  buildAiTurn,
+  endpointForAssistantTarget,
+  isClarificationOnlyResponse,
+  quickAdjustmentLabel,
+  resolveAssistantMessageRoute,
+  type AiAssistantTarget,
+  shouldAllowGoalClarification
+} from "./aiConversation";
 import { resolveGoalThemeColor } from "./goalUtils";
 import { useDialogMotion } from "./motion";
 import { useModalDialog } from "./useModalDialog";
@@ -14,17 +27,21 @@ import {
   suggestSubgoalsResponseSchema,
   suggestWeeklyActionsResponseSchema,
   type AiDiagnoseBranchResponse,
-  type AiEndpoint,
   type AiFinding,
   type AiGoalContext,
   type AiImproveGoalResponse,
+  type AiClarificationAnswer,
+  type AiClarifyingQuestion,
+  type AiConversationMessage,
   type AiSubgoalSuggestion,
   type AiSuggestSubgoalsResponse,
   type AiSuggestWeeklyActionsResponse,
+  type AiTurn,
+  type AiQuickAdjustment,
   type AiWeeklyActionSuggestion
 } from "../shared/aiContracts";
 
-type AiTab = "improve" | "subgoals" | "diagnose" | "weekly";
+export type AiTab = AiAssistantTarget;
 type AiResponse =
   | AiImproveGoalResponse
   | AiSuggestSubgoalsResponse
@@ -34,6 +51,7 @@ type SelectionMap = Record<string, boolean>;
 type ImproveField = "summary" | "successSignals" | "actionCandidates" | "reviewQuestions";
 
 const AI_CLIENT_TIMEOUT_MS = 60_000;
+const assistantCommands = availableAssistantCommands();
 
 export type ImproveDraft = {
   summary: string;
@@ -62,7 +80,7 @@ export function improveDraftFromResponse(r: AiImproveGoalResponse): ImproveDraft
 }
 
 export function improveResponseFromDraft(draft: ImproveDraft, original: AiImproveGoalResponse): AiImproveGoalResponse {
-  const splitLines = (text: string) => text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const splitLines = (text: string) => text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   return {
     summary: original.summary !== undefined ? draft.summary.trim() || undefined : undefined,
     successSignals: original.successSignals !== undefined ? splitLines(draft.successSignals) : undefined,
@@ -71,13 +89,6 @@ export function improveResponseFromDraft(draft: ImproveDraft, original: AiImprov
     warnings: original.warnings
   };
 }
-
-const tabs: Array<{ id: AiTab; label: string; endpoint: AiEndpoint }> = [
-  { id: "improve", label: "优化目标", endpoint: "improve-goal" },
-  { id: "subgoals", label: "拆解子目标", endpoint: "suggest-subgoals" },
-  { id: "diagnose", label: "分支体检", endpoint: "diagnose-branch" },
-  { id: "weekly", label: "本周行动", endpoint: "suggest-weekly-actions" }
-];
 
 const responseSchemas = {
   improve: improveGoalResponseSchema,
@@ -121,7 +132,7 @@ export function selectedSubgoalSuggestionsForCreate(
   selected: SelectionMap,
   drafts: SubgoalDraft[]
 ): AiSubgoalSuggestion[] {
-  return ((response.subgoals ?? [])).flatMap((subgoal, index) => {
+  return (response.subgoals ?? []).flatMap((subgoal, index) => {
     if (!selected[`subgoal-${index}`]) return [];
     const draft = drafts[index] ?? { title: subgoal.title, summary: subgoal.summary ?? "" };
     if (!draft.title.trim()) throw new Error("子目标标题不能为空");
@@ -139,7 +150,7 @@ export function selectedWeeklyActionInputsForCreate(
   drafts: WeeklyDraft[],
   fallbackGoalTitle: string
 ): ActionCreateInput[] {
-  return ((response.weeklyActions ?? [])).flatMap((action, index) => {
+  return (response.weeklyActions ?? []).flatMap((action, index) => {
     if (!selected[`weekly-${index}`]) return [];
     const draft = drafts[index] ?? { description: action.description, due: action.due ?? "" };
     if (!draft.description.trim()) throw new Error("行动描述不能为空");
@@ -171,6 +182,43 @@ export function goalContextFromNode(goal: GoalNode): AiGoalContext {
   };
 }
 
+type ResolveAiAssistantResponseInput = {
+  tab: AiTab;
+  response: AiResponse;
+  goal: GoalNode;
+  allowClarification: boolean;
+  selectDefaults?: (tab: AiTab, response: AiResponse, goal: GoalNode) => SelectionMap;
+};
+
+type AiAssistantResponseTransition =
+  | { kind: "formal"; response: AiResponse; selected: SelectionMap }
+  | { kind: "clarification"; clarifyingQuestion: AiClarifyingQuestion }
+  | { kind: "protocol-error"; error: string };
+
+export function resolveAiAssistantResponse({
+  tab,
+  response,
+  goal,
+  allowClarification,
+  selectDefaults = defaultSelections
+}: ResolveAiAssistantResponseInput): AiAssistantResponseTransition {
+  if (isClarificationOnlyResponse(response)) {
+    if (!allowClarification) {
+      return {
+        kind: "protocol-error",
+        error: "AI returned a clarification question after clarification was disabled."
+      };
+    }
+    return { kind: "clarification", clarifyingQuestion: response.clarifyingQuestion };
+  }
+
+  return {
+    kind: "formal",
+    response,
+    selected: selectDefaults(tab, response, goal)
+  };
+}
+
 export function AiAssistantDialog({
   goal,
   flatGoals,
@@ -190,13 +238,17 @@ export function AiAssistantDialog({
   onCreateGoal: (input: GoalCreateInput) => Promise<boolean>;
   onCreateWeeklyAction: (input: ActionCreateInput) => Promise<boolean>;
 }) {
-  const [activeTab, setActiveTab] = useState<AiTab>("improve");
+  const [lastTarget, setLastTarget] = useState<AiTab | null>(null);
+  const [responseTarget, setResponseTarget] = useState<AiTab | null>(null);
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [response, setResponse] = useState<AiResponse | null>(null);
   const [selected, setSelected] = useState<SelectionMap>({});
+  const [messages, setMessages] = useState<AiConversationMessage[]>([]);
+  const [clarifyingQuestion, setClarifyingQuestion] = useState<AiClarifyingQuestion | null>(null);
+  const [clarificationAnswered, setClarificationAnswered] = useState(false);
   const [improveDraft, setImproveDraft] = useState<ImproveDraft | null>(null);
   const [subgoalDrafts, setSubgoalDrafts] = useState<SubgoalDraft[]>([]);
   const [weeklyDrafts, setWeeklyDrafts] = useState<WeeklyDraft[]>([]);
@@ -204,67 +256,173 @@ export function AiAssistantDialog({
 
   useEffect(() => {
     setResponse(null);
+    setResponseTarget(null);
     setError("");
     setNotice("");
     setSelected({});
+    setMessages([]);
+    setClarifyingQuestion(null);
+    setClarificationAnswered(false);
     setImproveDraft(null);
     setSubgoalDrafts([]);
     setWeeklyDrafts([]);
-  }, [activeTab, goal.id]);
+    setLastTarget(null);
+  }, [goal.id]);
 
-  const activeConfig = useMemo(() => tabs.find((tab) => tab.id === activeTab) ?? tabs[0], [activeTab]);
-  const canApply = response && activeTab !== "diagnose";
+  const canApply = Boolean(response) && responseTarget !== "diagnose";
 
-  const generate = async () => {
+  const resetDrafts = () => {
+    setImproveDraft(null);
+    setSubgoalDrafts([]);
+    setWeeklyDrafts([]);
+  };
+
+  const seedDraftsForResponse = (target: AiTab, nextResponse: AiResponse) => {
+    setImproveDraft(target === "improve" ? improveDraftFromResponse(nextResponse as AiImproveGoalResponse) : null);
+    setSubgoalDrafts(
+      target === "subgoals"
+        ? ((nextResponse as AiSuggestSubgoalsResponse).subgoals ?? []).map((subgoal) => ({ title: subgoal.title, summary: subgoal.summary ?? "" }))
+        : []
+    );
+    setWeeklyDrafts(
+      target === "weekly"
+        ? ((nextResponse as AiSuggestWeeklyActionsResponse).weeklyActions ?? []).map((action) => ({ description: action.description, due: action.due ?? "" }))
+        : []
+    );
+  };
+
+  const currentResponseWithDrafts = (target: AiTab, current: AiResponse): AiResponse => {
+    if (target === "improve") {
+      return improveDraft ? improveResponseFromDraft(improveDraft, current as AiImproveGoalResponse) : current;
+    }
+    if (target === "subgoals") {
+      const subgoals = ((current as AiSuggestSubgoalsResponse).subgoals ?? []).map((subgoal, index) => {
+        const draft = subgoalDrafts[index];
+        if (!draft) return subgoal;
+        return {
+          ...subgoal,
+          title: draft.title.trim() || subgoal.title,
+          summary: draft.summary.trim() || undefined
+        };
+      });
+      return { ...(current as AiSuggestSubgoalsResponse), subgoals };
+    }
+    if (target === "weekly") {
+      const weeklyActions = ((current as AiSuggestWeeklyActionsResponse).weeklyActions ?? []).map((action, index) => {
+        const draft = weeklyDrafts[index];
+        if (!draft) return action;
+        return {
+          ...action,
+          description: draft.description.trim() || action.description,
+          due: draft.due.trim() || undefined
+        };
+      });
+      return { ...(current as AiSuggestWeeklyActionsResponse), weeklyActions };
+    }
+    return current;
+  };
+
+  const handleAiResponse = (target: AiTab, nextResponse: AiResponse, allowClarification: boolean, nextMessages: AiConversationMessage[]) => {
+    const transition = resolveAiAssistantResponse({
+      tab: target,
+      response: nextResponse,
+      goal,
+      allowClarification
+    });
+
+    if (transition.kind === "protocol-error") {
+      setError(transition.error);
+      return;
+    }
+
+    if (transition.kind === "clarification") {
+      setClarifyingQuestion(transition.clarifyingQuestion);
+      setMessages([...nextMessages, { role: "assistant", content: transition.clarifyingQuestion.question }]);
+      return;
+    }
+
+    setClarifyingQuestion(null);
+    setResponse(transition.response);
+    setResponseTarget(target);
+    setSelected(transition.selected);
+    seedDraftsForResponse(target, transition.response);
+    setMessages(nextMessages);
+  };
+
+  const runTurn = async (
+    target: AiTab,
+    turn: AiTurn,
+    nextMessages: AiConversationMessage[],
+    options: { clearOnError?: boolean } = {}
+  ) => {
     setLoading(true);
     setError("");
     setNotice("");
 
     try {
       await onBeforeGenerate?.();
-      const nextResponse = await requestAi(activeTab, buildAiRequest(activeTab, goal, flatGoals));
-      setResponse(nextResponse);
-      setSelected(defaultSelections(activeTab, nextResponse, goal));
-
-      if (activeTab === "improve") {
-        setImproveDraft(improveDraftFromResponse(nextResponse as AiImproveGoalResponse));
-      }
-      if (activeTab === "subgoals") {
-        setSubgoalDrafts(((nextResponse as AiSuggestSubgoalsResponse).subgoals ?? []).map((s) => ({ title: s.title, summary: s.summary ?? "" })));
-      }
-      if (activeTab === "weekly") {
-        setWeeklyDrafts(((nextResponse as AiSuggestWeeklyActionsResponse).weeklyActions ?? []).map((a) => ({ description: a.description, due: a.due ?? "" })));
-      }
+      const nextResponse = await requestAi(target, buildAiRequest(target, goal, flatGoals, turn));
+      handleAiResponse(target, nextResponse, turn.allowClarification === true, nextMessages);
     } catch (nextError) {
-      setResponse(null);
-      setSelected({});
-      setImproveDraft(null);
-      setSubgoalDrafts([]);
-      setWeeklyDrafts([]);
+      if (options.clearOnError) {
+        setResponse(null);
+        setResponseTarget(null);
+        setSelected({});
+        setClarifyingQuestion(null);
+        resetDrafts();
+      }
       setError(aiErrorMessage(nextError));
     } finally {
       setLoading(false);
     }
   };
 
+  const runCommand = (commandId: string) => {
+    const command = assistantCommands.find((item) => item.target === commandId);
+    if (!command) return;
+
+    setLastTarget(command.target);
+    setResponse(null);
+    setResponseTarget(null);
+    setSelected({});
+    setClarifyingQuestion(null);
+    resetDrafts();
+    const nextParentChain = parentChain(goal, flatGoals);
+    const nextSiblings = siblingGoals(goal, flatGoals);
+    const allowClarification = shouldAllowGoalClarification({
+      target: command.target,
+      goal,
+      parentChain: nextParentChain,
+      children: goal.children,
+      siblings: nextSiblings,
+      hasClarificationAnswer: clarificationAnswered
+    });
+
+    const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: command.label }];
+    void runTurn(
+      command.target,
+      buildAssistantCommandTurn(allowClarification),
+      nextMessages,
+      { clearOnError: true }
+    );
+  };
+
   const applySelected = async () => {
-    if (!response) return;
+    if (!response || !responseTarget) return;
     setApplying(true);
     setError("");
     setNotice("");
 
     try {
-      if (activeTab === "improve") {
-        const effectiveResponse = improveDraft
-          ? improveResponseFromDraft(improveDraft, response as AiImproveGoalResponse)
-          : (response as AiImproveGoalResponse);
+      if (responseTarget === "improve") {
+        const effectiveResponse = currentResponseWithDrafts(responseTarget, response) as AiImproveGoalResponse;
         const patch = buildImproveGoalPatch(goal, effectiveResponse, selected);
         if (Object.keys(patch).length === 0) throw new Error("请先勾选要应用的建议");
         const ok = await onPatchGoal(goal.id, patch);
         if (!ok) throw new Error("目标更新失败");
       }
 
-      if (activeTab === "subgoals") {
+      if (responseTarget === "subgoals") {
         const subgoals = selectedSubgoalSuggestionsForCreate(response as AiSuggestSubgoalsResponse, selected, subgoalDrafts);
         if (subgoals.length === 0) throw new Error("请先勾选要创建的子目标");
         for (const subgoal of subgoals) {
@@ -273,7 +431,7 @@ export function AiAssistantDialog({
         }
       }
 
-      if (activeTab === "weekly") {
+      if (responseTarget === "weekly") {
         const actions = selectedWeeklyActionInputsForCreate(response as AiSuggestWeeklyActionsResponse, selected, weeklyDrafts, goal.title);
         if (actions.length === 0) throw new Error("请先勾选要创建的周行动");
         for (const action of actions) {
@@ -292,6 +450,102 @@ export function AiAssistantDialog({
 
   const toggleSelection = (key: string) => {
     setSelected((current) => ({ ...current, [key]: !current[key] }));
+  };
+
+  const sendMessage = (message: string) => {
+    const route = resolveAssistantMessageRoute(lastTarget, message);
+    const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: message }];
+
+    if (route.kind !== "task") {
+      setError("");
+      setNotice("");
+      setMessages([...nextMessages, { role: "assistant", content: route.reply }]);
+      return;
+    }
+
+    const nextParentChain = parentChain(goal, flatGoals);
+    const nextSiblings = siblingGoals(goal, flatGoals);
+    const allowClarification =
+      !response &&
+      shouldAllowGoalClarification({
+        target: route.target,
+        goal,
+        parentChain: nextParentChain,
+        children: goal.children,
+        siblings: nextSiblings,
+        hasClarificationAnswer: clarificationAnswered
+      });
+    setLastTarget(route.target);
+    if (route.inferred && route.target !== responseTarget) {
+      setResponse(null);
+      setResponseTarget(null);
+      setSelected({});
+      setClarifyingQuestion(null);
+      resetDrafts();
+    }
+    void runTurn(
+      route.target,
+      buildAiTurn({
+        intent: "message",
+        message,
+        allowClarification,
+        conversation: nextMessages,
+        currentResponse: route.target === responseTarget && response ? currentResponseWithDrafts(route.target, response) : undefined
+      }),
+      nextMessages
+    );
+  };
+
+  const quickAdjust = (adjustment: AiQuickAdjustment) => {
+    const target = responseTarget ?? lastTarget;
+    if (!target) {
+      setError("请先选择一个快捷指令");
+      return;
+    }
+
+    const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: quickAdjustmentLabel(adjustment) }];
+    void runTurn(
+      target,
+      buildAiTurn({
+        intent: "quick-adjust",
+        quickAdjustment: adjustment,
+        allowClarification: false,
+        conversation: nextMessages,
+        currentResponse: response ? currentResponseWithDrafts(target, response) : undefined
+      }),
+      nextMessages
+    );
+  };
+
+  const answerClarification = (answer: AiClarificationAnswer) => {
+    const target = lastTarget;
+    if (!target) {
+      setError("请先选择一个快捷指令");
+      return;
+    }
+
+    setClarificationAnswered(true);
+    const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: answer.label }];
+    void runTurn(
+      target,
+      buildAiTurn({
+        intent: "clarification-answer",
+        allowClarification: false,
+        clarificationAnswer: answer,
+        conversation: nextMessages,
+        currentResponse: response ? currentResponseWithDrafts(target, response) : undefined
+      }),
+      nextMessages
+    );
+  };
+
+  const skipClarification = () => {
+    if (!clarifyingQuestion) return;
+    answerClarification({
+      questionId: clarifyingQuestion.id,
+      optionId: "skip",
+      label: "按现有信息生成"
+    });
   };
 
   const busy = loading || applying;
@@ -314,38 +568,10 @@ export function AiAssistantDialog({
           </button>
         </div>
 
-        <div className="ai-tabs" role="tablist" aria-label="AI 助手模式">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              role="tab"
-              className={tab.id === activeTab ? "ai-tab active" : "ai-tab"}
-              aria-selected={tab.id === activeTab}
-              onClick={() => setActiveTab(tab.id)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
         <div className="ai-dialog-body">
           <div className="ai-context">
             <Sparkles />
-            <span>{activeConfig.label}会基于当前目标、父链、子目标和同级目标生成结构化建议。</span>
-          </div>
-
-          <div className="ai-actions">
-            <button type="button" className="primary-button" disabled={loading || applying || saving} onClick={() => void generate()}>
-              {loading ? <Loader2 className="spin" /> : <Sparkles />}
-              生成建议
-            </button>
-            {canApply && (
-              <button type="button" className="secondary-button" disabled={loading || applying || saving} onClick={() => void applySelected()}>
-                {applying ? <Loader2 className="spin" /> : <CheckCircle2 />}
-                应用勾选
-              </button>
-            )}
+            <span>选择快捷指令开始，或在已有指令后继续输入补充要求。AI 只会生成候选内容，写入前仍需要你确认。</span>
           </div>
 
           {error && (
@@ -361,21 +587,47 @@ export function AiAssistantDialog({
             </div>
           )}
 
-          {!response && !error && <p className="muted-text">点击“生成建议”后，建议会显示在这里。当前后端未配置模型时不会触发任何写入。</p>}
-
-          {response && (
-            <div className="ai-suggestion-list">
-              {renderResponse(activeTab, response, selected, primaryGoal, toggleSelection, {
-                improveDraft,
-                subgoalDrafts,
-                weeklyDrafts,
-                setImproveDraft,
-                setSubgoalDrafts,
-                setWeeklyDrafts
-              })}
-              {renderWarnings(response)}
-            </div>
-          )}
+          <AiConversationControls
+            messages={messages}
+            commands={assistantCommands.map((command) => ({ id: command.target, label: command.label }))}
+            quickAdjustments={responseTarget ? availableQuickAdjustmentsForTarget(responseTarget) : []}
+            clarifyingQuestion={clarifyingQuestion ?? undefined}
+            busy={busy || saving}
+            intro={{
+              title: "AI",
+              body: "告诉我你想怎么处理这个目标。我可以直接优化目标、拆解子目标、体检分支或安排本周行动。"
+            }}
+            inputPlaceholder="输入任务，例如：帮我优化这个目标，或安排本周行动"
+            onCommand={runCommand}
+            onSendMessage={sendMessage}
+            onQuickAdjust={quickAdjust}
+            onAnswerClarification={answerClarification}
+            onSkipClarification={skipClarification}
+          >
+            {response && responseTarget && (
+              <>
+                <div className="ai-suggestion-list">
+                  {renderResponse(responseTarget, response, selected, primaryGoal, toggleSelection, {
+                    improveDraft,
+                    subgoalDrafts,
+                    weeklyDrafts,
+                    setImproveDraft,
+                    setSubgoalDrafts,
+                    setWeeklyDrafts
+                  })}
+                  {renderWarnings(response)}
+                </div>
+                {canApply && (
+                  <div className="ai-result-actions">
+                    <button type="button" className="secondary-button" disabled={loading || applying || saving} onClick={() => void applySelected()}>
+                      {applying ? <Loader2 className="spin" /> : <CheckCircle2 />}
+                      执行选中任务
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </AiConversationControls>
         </div>
       </motion.section>
     </motion.div>
@@ -386,7 +638,7 @@ type DraftState = {
   improveDraft: ImproveDraft | null;
   subgoalDrafts: SubgoalDraft[];
   weeklyDrafts: WeeklyDraft[];
-  setImproveDraft: (d: ImproveDraft) => void;
+  setImproveDraft: (draft: ImproveDraft) => void;
   setSubgoalDrafts: React.Dispatch<React.SetStateAction<SubgoalDraft[]>>;
   setWeeklyDrafts: React.Dispatch<React.SetStateAction<WeeklyDraft[]>>;
 };
@@ -417,7 +669,7 @@ function renderImproveResponse(
   primaryGoal: boolean,
   onToggle: (key: string) => void,
   draft: ImproveDraft | null,
-  setDraft: (d: ImproveDraft) => void
+  setDraft: (draft: ImproveDraft) => void
 ) {
   const fields: ImproveField[] = ["summary", "successSignals", "actionCandidates", "reviewQuestions"];
   const visibleFields = fields.filter((field) => response[field] !== undefined);
@@ -439,22 +691,22 @@ function renderImproveResponse(
           <strong>{improveFieldLabels[field]}</strong>
           {field === "summary" && (
             draft
-              ? <textarea className="ai-draft-textarea" value={draft.summary} rows={3} onChange={(e) => updateDraft(e.target.value)} />
+              ? <textarea className="ai-draft-textarea" value={draft.summary} rows={3} onChange={(event) => updateDraft(event.target.value)} />
               : <p>{response.summary}</p>
           )}
           {field === "successSignals" && (
             draft
-              ? <textarea className="ai-draft-textarea" value={draft.successSignals} rows={3} placeholder="每行一条" onChange={(e) => updateDraft(e.target.value)} />
+              ? <textarea className="ai-draft-textarea" value={draft.successSignals} rows={3} placeholder="每行一条" onChange={(event) => updateDraft(event.target.value)} />
               : <InlineList items={response.successSignals ?? []} />
           )}
           {field === "actionCandidates" && (
             draft
-              ? <textarea className="ai-draft-textarea" value={draft.actionCandidates} rows={3} placeholder="每行一条" onChange={(e) => updateDraft(e.target.value)} />
+              ? <textarea className="ai-draft-textarea" value={draft.actionCandidates} rows={3} placeholder="每行一条" onChange={(event) => updateDraft(event.target.value)} />
               : <InlineList items={normalizeAiActionCandidates(response.actionCandidates ?? []).map((action) => action.text)} />
           )}
           {field === "reviewQuestions" && (
             draft
-              ? <textarea className="ai-draft-textarea" value={draft.reviewQuestions} rows={3} placeholder="每行一条" onChange={(e) => updateDraft(e.target.value)} />
+              ? <textarea className="ai-draft-textarea" value={draft.reviewQuestions} rows={3} placeholder="每行一条" onChange={(event) => updateDraft(event.target.value)} />
               : <InlineList items={response.reviewQuestions ?? []} />
           )}
           {disabled && <small>一级目标不写入行动候选。</small>}
@@ -489,8 +741,8 @@ function renderSubgoalResponse(
       <label key={`${subgoal.title}-${index}`} className="ai-suggestion-item">
         <input type="checkbox" checked={Boolean(selected[`subgoal-${index}`])} onChange={() => onToggle(`subgoal-${index}`)} />
         <span>
-          <input type="text" className="ai-draft-input" value={draft.title} onChange={(e) => updateDraft({ title: e.target.value })} />
-          <textarea className="ai-draft-textarea" value={draft.summary} rows={2} placeholder="摘要（可选）" onChange={(e) => updateDraft({ summary: e.target.value })} />
+          <input type="text" className="ai-draft-input" value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} />
+          <textarea className="ai-draft-textarea" value={draft.summary} rows={2} placeholder="摘要（可选）" onChange={(event) => updateDraft({ summary: event.target.value })} />
           {subgoal.successSignals?.length ? <InlineList items={subgoal.successSignals} /> : null}
         </span>
       </label>
@@ -534,9 +786,9 @@ function renderWeeklyResponse(
       <label key={`${action.description}-${index}`} className="ai-suggestion-item">
         <input type="checkbox" checked={Boolean(selected[`weekly-${index}`])} onChange={() => onToggle(`weekly-${index}`)} />
         <span>
-          <input type="text" className="ai-draft-input" value={draft.description} onChange={(e) => updateDraft({ description: e.target.value })} />
+          <input type="text" className="ai-draft-input" value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })} />
           <p>{action.goal || "当前目标"}</p>
-          <input type="text" className="ai-draft-input ai-draft-due" value={draft.due} placeholder="YYYY-MM-DD" onChange={(e) => updateDraft({ due: e.target.value })} />
+          <input type="text" className="ai-draft-input ai-draft-due" value={draft.due} placeholder="YYYY-MM-DD" onChange={(event) => updateDraft({ due: event.target.value })} />
         </span>
       </label>
     );
@@ -616,13 +868,14 @@ function createSubgoalInput(parent: GoalNode, suggestion: AiSubgoalSuggestion): 
   };
 }
 
-export function buildAiRequest(tab: AiTab, goal: GoalNode, flatGoals: GoalNode[]) {
+export function buildAiRequest(tab: AiTab, goal: GoalNode, flatGoals: GoalNode[], turn?: AiTurn) {
   const base = {
     goalId: goal.id,
     goal: goalContextFromNode(goal),
     parentChain: parentChain(goal, flatGoals).map(goalContextFromNode),
     children: goal.children.map(goalContextFromNode),
-    siblings: siblingGoals(goal, flatGoals).map(goalContextFromNode)
+    siblings: siblingGoals(goal, flatGoals).map(goalContextFromNode),
+    ...(turn ? { turn } : {})
   };
 
   if (tab === "diagnose" || tab === "weekly") {
@@ -636,7 +889,7 @@ export function buildAiRequest(tab: AiTab, goal: GoalNode, flatGoals: GoalNode[]
 }
 
 async function requestAi(tab: AiTab, payload: unknown): Promise<AiResponse> {
-  const endpoint = tabs.find((item) => item.id === tab)?.endpoint ?? "improve-goal";
+  const endpoint = endpointForAssistantTarget(tab);
   const contract = aiRouteContracts[endpoint];
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_CLIENT_TIMEOUT_MS);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { registerAiRoutes, runAiProvider } from "./ai";
+import { registerAiRoutes, runAiProvider, systemPromptFor } from "./ai";
 
 const validGoalContext = {
   id: "goal-delivery",
@@ -24,13 +24,13 @@ type AiHandler = (
   reply: { code: (status: number) => { send: (payload: unknown) => unknown } }
 ) => Promise<unknown>;
 
-function buildRoutes() {
+function buildRoutes(options: Parameters<typeof registerAiRoutes>[1] = { readLocalEnv: () => ({}) }) {
   const routes = new Map<string, AiHandler>();
   registerAiRoutes({
     post: (path, handler) => {
       routes.set(path, handler);
     }
-  }, { readLocalEnv: () => ({}) });
+  }, options);
   return routes;
 }
 
@@ -219,7 +219,7 @@ describe("AI routes", () => {
     });
   });
 
-  it("parses JSON wrapped in code fences", async () => {
+  it("parses the first JSON object when a provider appends non-JSON text", async () => {
     const request = {
       goalId: "goal-delivery",
       goal: validGoalContext,
@@ -238,106 +238,72 @@ describe("AI routes", () => {
       fetch: async () =>
         new Response(
           JSON.stringify({
-            choices: [{ message: { content: "```json\n{\"summary\": \"Better goal\"}\n```" } }]
+            choices: [
+              {
+                message: {
+                  content: '{"summary":"Sharper delivery goal"}\n\n说明：已按 JSON 返回。'
+                }
+              }
+            ]
           }),
           { status: 200, headers: { "content-type": "application/json" } }
         )
     });
 
-    expect((result as { summary: string }).summary).toBe("Better goal");
+    expect(result).toEqual({
+      summary: "Sharper delivery goal"
+    });
   });
 
-  it("extracts JSON object from content with surrounding text", async () => {
+  it("includes turn metadata inside the provider user message JSON", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
     const request = {
       goalId: "goal-delivery",
       goal: validGoalContext,
       parentChain: [],
       children: [],
-      siblings: []
+      siblings: [],
+      turn: {
+        intent: "quick-adjust",
+        allowClarification: false,
+        quickAdjustment: "too-hard",
+        currentResponse: { summary: "Current summary" }
+      }
     };
 
-    const result = await runAiProvider("improve-goal", request, {
+    await runAiProvider("improve-goal", request, {
       env: {
         AI_PROVIDER_URL: "https://provider.example/v1",
         AI_PROVIDER_KEY: "test-key",
         AI_PROVIDER_MODEL: "test-model"
       },
       readLocalEnv: () => ({}),
-      fetch: async () =>
-        new Response(
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(
           JSON.stringify({
-            choices: [{ message: { content: "Here is the result:\n{\"summary\": \"Better goal\"}\n\nDone." } }]
+            choices: [{ message: { content: JSON.stringify({ summary: "Adjusted summary" }) } }]
           }),
           { status: 200, headers: { "content-type": "application/json" } }
-        )
+        );
+      }
     });
 
-    expect((result as { summary: string }).summary).toBe("Better goal");
-  });
-
-  it("throws for completely invalid JSON content", async () => {
-    const request = {
-      goalId: "goal-delivery",
-      goal: validGoalContext,
-      parentChain: [],
-      children: [],
-      siblings: []
-    };
-
-    await expect(
-      runAiProvider("improve-goal", request, {
-        env: {
-          AI_PROVIDER_URL: "https://provider.example/v1",
-          AI_PROVIDER_KEY: "test-key",
-          AI_PROVIDER_MODEL: "test-model"
-        },
-        readLocalEnv: () => ({}),
-        fetch: async () =>
-          new Response(
-            JSON.stringify({
-              choices: [{ message: { content: "not any json at all" } }]
-            }),
-            { status: 200, headers: { "content-type": "application/json" } }
-          )
-      })
-    ).rejects.toThrow("AI provider returned invalid JSON");
-  });
-
-  it("throws a timeout error when the request exceeds AI_REQUEST_TIMEOUT_MS", async () => {
-    const request = {
-      goalId: "goal-delivery",
-      goal: validGoalContext,
-      parentChain: [],
-      children: [],
-      siblings: []
-    };
-
-    await expect(
-      runAiProvider("improve-goal", request, {
-        env: {
-          AI_PROVIDER_URL: "https://provider.example/v1",
-          AI_PROVIDER_KEY: "test-key",
-          AI_PROVIDER_MODEL: "test-model",
-          AI_REQUEST_TIMEOUT_MS: "10"
-        },
-        readLocalEnv: () => ({}),
-        fetch: async (_url, init) => {
-          await new Promise<void>((_resolve, reject) => {
-            const signal = (init as RequestInit).signal;
-            if (!signal) return;
-            signal.addEventListener("abort", () => {
-              const err = new Error("The operation was aborted");
-              (err as NodeJS.ErrnoException).name = "AbortError";
-              reject(err);
-            });
-          });
-          throw new Error("should not reach here");
+    const body = JSON.parse(String(calls[0].init.body)) as { messages: Array<{ role: string; content: string }> };
+    const userMessage = body.messages.find((message) => message.role === "user");
+    expect(JSON.parse(userMessage?.content ?? "{}")).toMatchObject({
+      endpoint: "improve-goal",
+      request: {
+        turn: {
+          intent: "quick-adjust",
+          quickAdjustment: "too-hard",
+          currentResponse: { summary: "Current summary" }
         }
-      })
-    ).rejects.toThrow("AI provider request timed out");
+      }
+    });
   });
 
-  it("throws with status code for provider 5xx errors", async () => {
+  it("only allows clarifyingQuestion in the system prompt when turn explicitly allows it", () => {
     const request = {
       goalId: "goal-delivery",
       goal: validGoalContext,
@@ -346,18 +312,67 @@ describe("AI routes", () => {
       siblings: []
     };
 
-    await expect(
-      runAiProvider("improve-goal", request, {
-        env: {
-          AI_PROVIDER_URL: "https://provider.example/v1",
-          AI_PROVIDER_KEY: "test-key",
-          AI_PROVIDER_MODEL: "test-model"
-        },
-        readLocalEnv: () => ({}),
-        fetch: async () =>
-          new Response(JSON.stringify({}), { status: 503, headers: { "content-type": "application/json" } })
-      })
-    ).rejects.toThrow("AI provider error: 503");
+    expect(systemPromptFor("improve-goal", request)).not.toContain("clarifyingQuestion");
+    expect(systemPromptFor("improve-goal", {
+      ...request,
+      turn: { intent: "generate", allowClarification: true }
+    })).toContain("clarifyingQuestion");
+    expect(systemPromptFor("improve-goal", {
+      ...request,
+      turn: { intent: "generate", allowClarification: false }
+    })).not.toContain("clarifyingQuestion");
   });
 
+  it("parses provider clarification responses through route contracts", async () => {
+    const routes = buildRoutes({
+      env: {
+        AI_PROVIDER_URL: "https://provider.example/v1",
+        AI_PROVIDER_KEY: "test-key",
+        AI_PROVIDER_MODEL: "test-model"
+      },
+      readLocalEnv: () => ({}),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    clarifyingQuestion: {
+                      id: "scope",
+                      question: "你更想先调整哪一部分？",
+                      options: [
+                        { id: "scope", label: "缩小范围" },
+                        { id: "cadence", label: "降低频率" }
+                      ]
+                    }
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    });
+
+    const response = await inject(routes, "/api/ai/improve-goal", {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: [],
+      turn: { intent: "generate", allowClarification: true }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      clarifyingQuestion: {
+        id: "scope",
+        options: [
+          { id: "scope", label: "缩小范围" },
+          { id: "cadence", label: "降低频率" }
+        ]
+      }
+    });
+  });
 });

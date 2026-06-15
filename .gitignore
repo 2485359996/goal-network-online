@@ -5,6 +5,7 @@ output/
 .vite/
 .next/
 .cache-pack/
+output/
 *.tsbuildinfo
 .claude/
 .impeccable/

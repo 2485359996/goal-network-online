@@ -507,6 +507,8 @@ h3 {
   position: relative;
   z-index: 1;
   grid-row: 1 / -1;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -2188,7 +2190,7 @@ textarea::placeholder {
   max-height: min(86vh, 760px);
   max-height: min(86dvh, 760px);
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 16px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -2371,6 +2373,189 @@ textarea::placeholder {
   border-color: rgba(245, 158, 11, 0.28);
 }
 
+.ai-conversation {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, color-mix(in oklch, var(--surface-raised) 92%, var(--accent) 4%), var(--surface-raised));
+  padding: 14px;
+}
+
+.ai-message-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-message {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.45;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+}
+
+.ai-message.user {
+  width: fit-content;
+  max-width: min(680px, 92%);
+  justify-self: end;
+  grid-template-columns: minmax(0, 1fr);
+  background: color-mix(in oklch, var(--accent) 13%, var(--surface));
+  color: var(--ink);
+}
+
+.ai-message.user strong {
+  display: none;
+}
+
+.ai-message.assistant {
+  justify-self: start;
+  width: min(100%, 760px);
+}
+
+.ai-message strong {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ai-message span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ai-result-message {
+  background: color-mix(in oklch, var(--surface) 86%, var(--accent) 7%);
+  border: 1px solid color-mix(in oklch, var(--line) 72%, var(--accent) 16%);
+}
+
+.ai-result-card {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.ai-result-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ai-result-actions .secondary-button {
+  min-height: 34px;
+  border-radius: 8px;
+}
+
+.ai-command-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px;
+}
+
+.ai-command-actions .secondary-button {
+  min-height: 36px;
+  border-radius: 8px;
+  background: var(--surface-raised);
+  font-weight: 760;
+}
+
+.ai-command-actions .secondary-button:hover {
+  border-color: color-mix(in oklch, var(--line-strong) 72%, var(--accent) 18%);
+}
+
+.ai-quick-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ai-quick-actions .secondary-button,
+.ai-quick-actions .ghost-button {
+  min-height: 34px;
+  border-radius: 8px;
+  padding-inline: 10px;
+}
+
+.ai-quick-actions svg {
+  width: 15px;
+  height: 15px;
+}
+
+.ai-clarifying-question {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.ai-clarifying-question strong {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.ai-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.ai-input-row input {
+  min-height: 38px;
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.ai-input-row .primary-button {
+  min-height: 38px;
+  border-radius: 8px;
+  padding-inline: 12px;
+}
+
+.ai-input-row svg {
+  width: 15px;
+  height: 15px;
+}
+
+.ai-conversation-hint {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ai-draft-preview {
+  display: grid;
+  gap: 4px;
+}
+
+.ai-draft-preview strong {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.ai-draft-preview p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .create-goal-dialog {
   width: min(680px, calc(100vw - 32px));
   max-height: min(88vh, 760px);
@@ -2435,11 +2620,29 @@ textarea::placeholder {
   padding: 0;
 }
 
+.detail-goal-color-field {
+  min-width: 0;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.detail-goal-color-field .field-label {
+  margin-bottom: 8px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 760;
+}
+
 .create-goal-color-options {
   display: flex;
   align-items: center;
   gap: 9px;
   flex-wrap: wrap;
+}
+
+.detail-goal-color-options {
+  gap: 8px;
 }
 
 .create-goal-color-option {
@@ -2455,6 +2658,11 @@ textarea::placeholder {
     border-color 140ms ease,
     box-shadow 140ms ease,
     transform 140ms ease;
+}
+
+.detail-goal-color-option {
+  width: 32px;
+  height: 32px;
 }
 
 .create-goal-color-option input {
@@ -2572,6 +2780,28 @@ textarea::placeholder {
 
   .ai-actions .primary-button,
   .ai-actions .secondary-button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .ai-message {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .ai-input-row {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-input-row .primary-button,
+  .ai-command-actions .secondary-button,
+  .ai-quick-actions .secondary-button,
+  .ai-quick-actions .ghost-button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .ai-result-actions .secondary-button {
     width: 100%;
     justify-content: center;
   }

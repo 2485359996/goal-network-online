@@ -1,14 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { PRIMARY_GOAL_TITLES } from "../shared/goalRules";
 import type { GoalNode } from "../shared/types";
+import { buildImproveGoalPatch, resolveAiAssistantResponse } from "./AiAssistantDialog";
 import {
-  buildAiRequest,
-  buildImproveGoalPatch,
-  improveDraftFromResponse,
-  improveResponseFromDraft,
-  selectedSubgoalSuggestionsForCreate,
-  selectedWeeklyActionInputsForCreate
-} from "./AiAssistantDialog";
+  availableAssistantCommands,
+  availableQuickAdjustmentsForTab,
+  buildAiTurn,
+  buildAssistantCommandTurn,
+  inferAssistantTargetFromMessage,
+  resolveAssistantMessageRoute,
+  resolveAssistantMessageTarget,
+  shouldAllowGoalClarification
+} from "./aiConversation";
 
 function goalFixture(patch: Partial<GoalNode> = {}): GoalNode {
   return {
@@ -38,7 +41,6 @@ function goalFixture(patch: Partial<GoalNode> = {}): GoalNode {
       reviewQuestions: []
     },
     children: [],
-    goalMapId: "map-1",
     ...patch
   } as GoalNode;
 }
@@ -66,139 +68,148 @@ describe("AI assistant apply helpers", () => {
       summary: "Clearer definition"
     });
   });
-});
 
-describe("buildAiRequest", () => {
-  it("improve tab omits branchGoals", () => {
-    const goal = goalFixture({ id: "g1", title: "Goal A" });
-    const req = buildAiRequest("improve", goal, [goal]);
-    expect(req).not.toHaveProperty("branchGoals");
-  });
-
-  it("subgoals tab omits branchGoals", () => {
-    const goal = goalFixture({ id: "g1", title: "Goal A" });
-    const req = buildAiRequest("subgoals", goal, [goal]);
-    expect(req).not.toHaveProperty("branchGoals");
-  });
-
-  it("diagnose tab includes branchGoals with full subtree", () => {
-    const child = goalFixture({ id: "g2", title: "Child A", parent: "[[Goal A]]" });
-    const goal = goalFixture({ id: "g1", title: "Goal A", children: [child] });
-    const req = buildAiRequest("diagnose", goal, [goal, child]);
-    expect(req).toHaveProperty("branchGoals");
-    const titles = (req as { branchGoals: Array<{ title: string }> }).branchGoals.map((g) => g.title);
-    expect(titles).toContain("Goal A");
-    expect(titles).toContain("Child A");
-  });
-
-  it("weekly tab includes branchGoals", () => {
-    const goal = goalFixture({ id: "g1", title: "Goal A" });
-    const req = buildAiRequest("weekly", goal, [goal]);
-    expect(req).toHaveProperty("branchGoals");
-  });
-
-  it("builds parentChain from root to immediate parent", () => {
-    const root = goalFixture({ id: "g0", title: "Root", parent: "" });
-    const parent = goalFixture({ id: "g1", title: "Parent", parent: "" });
-    const child = goalFixture({ id: "g2", title: "Child", parent: "[[Parent]]" });
-    parent.parent = "[[Root]]";
-    const req = buildAiRequest("improve", child, [root, parent, child]) as {
-      parentChain: Array<{ title: string }>;
-    };
-    expect(req.parentChain.map((g) => g.title)).toEqual(["Root", "Parent"]);
-  });
-
-  it("siblings share same parent and domain", () => {
-    const goal = goalFixture({ id: "g1", title: "Goal A", parent: "[[Root]]", domain: "[[Career]]" });
-    const sibling = goalFixture({ id: "g2", title: "Goal B", parent: "[[Root]]", domain: "[[Career]]" });
-    const unrelated = goalFixture({ id: "g3", title: "Goal C", parent: "[[Root]]", domain: "[[Health]]" });
-    const req = buildAiRequest("improve", goal, [goal, sibling, unrelated]) as {
-      siblings: Array<{ title: string }>;
-    };
-    expect(req.siblings.map((g) => g.title)).toEqual(["Goal B"]);
-  });
-});
-
-describe("improveDraftFromResponse / improveResponseFromDraft", () => {
-  it("round-trips a full response", () => {
-    const original = {
-      summary: "Better goal",
-      successSignals: ["Signal A", "Signal B"],
-      actionCandidates: [{ text: "Do thing", done: false }],
-      reviewQuestions: ["What worked?"],
-      warnings: undefined
-    };
-    const draft = improveDraftFromResponse(original);
-    expect(draft.summary).toBe("Better goal");
-    expect(draft.successSignals).toBe("Signal A\nSignal B");
-    expect(draft.actionCandidates).toBe("Do thing");
-    expect(draft.reviewQuestions).toBe("What worked?");
-
-    const back = improveResponseFromDraft(draft, original);
-    expect(back.summary).toBe("Better goal");
-    expect(back.successSignals).toEqual(["Signal A", "Signal B"]);
-    expect(back.actionCandidates).toEqual(["Do thing"]);
-    expect(back.reviewQuestions).toEqual(["What worked?"]);
-  });
-
-  it("preserves undefined for fields not returned by AI", () => {
-    const original = { summary: "Only summary", warnings: undefined };
-    const draft = improveDraftFromResponse(original);
-    const back = improveResponseFromDraft(draft, original);
-    expect(back.summary).toBe("Only summary");
-    expect(back.successSignals).toBeUndefined();
-    expect(back.actionCandidates).toBeUndefined();
-    expect(back.reviewQuestions).toBeUndefined();
-  });
-
-  it("filters empty lines when splitting textarea value", () => {
-    const original = { successSignals: ["A", "B"], warnings: undefined };
-    const draft = improveDraftFromResponse(original);
-    draft.successSignals = "A\n\n  B  \n";
-    const back = improveResponseFromDraft(draft, original);
-    expect(back.successSignals).toEqual(["A", "B"]);
-  });
-});
-
-describe("selected AI draft helpers", () => {
-  it("keeps subgoal drafts aligned to original suggestion indexes", () => {
-    const suggestions = selectedSubgoalSuggestionsForCreate(
-      {
-        subgoals: [
-          { title: "Subgoal A", summary: "Original A" },
-          { title: "Subgoal B", summary: "Original B", successSignals: ["Signal B"] }
-        ]
-      },
-      { "subgoal-1": true },
-      [
-        { title: "Edited A", summary: "Edited summary A" },
-        { title: "Edited B", summary: "Edited summary B" }
-      ]
+  it("returns quick adjustments by AI target", () => {
+    expect(availableQuickAdjustmentsForTab("diagnose")).toEqual([]);
+    expect(availableQuickAdjustmentsForTab("weekly")).toEqual(
+      expect.arrayContaining(["not-enough-time", "fewer-actions"])
     );
+  });
 
-    expect(suggestions).toEqual([
-      { title: "Edited B", summary: "Edited summary B", successSignals: ["Signal B"] }
+  it("maps assistant quick commands to the existing AI endpoints", () => {
+    expect(availableAssistantCommands()).toEqual([
+      { target: "improve", label: "优化目标", endpoint: "improve-goal" },
+      { target: "subgoals", label: "拆解子目标", endpoint: "suggest-subgoals" },
+      { target: "diagnose", label: "分支体检", endpoint: "diagnose-branch" },
+      { target: "weekly", label: "本周行动", endpoint: "suggest-weekly-actions" }
     ]);
   });
 
-  it("keeps weekly action drafts aligned to original suggestion indexes", () => {
-    const actions = selectedWeeklyActionInputsForCreate(
-      {
-        weeklyActions: [
-          { description: "Action A", goal: "Goal A", due: "2026-01-01" },
-          { description: "Action B", goal: "Goal B", due: "2026-01-02" }
-        ]
-      },
-      { "weekly-1": true },
-      [
-        { description: "Edited A", due: "2026-02-01" },
-        { description: "Edited B", due: "2026-02-02" }
-      ],
-      "Fallback Goal"
-    );
+  it("builds generate turns for assistant quick commands", () => {
+    expect(buildAssistantCommandTurn(true)).toEqual({
+      intent: "generate",
+      allowClarification: true
+    });
+  });
 
-    expect(actions).toEqual([
-      { description: "Edited B", goal: "Goal B", due: "2026-02-02" }
-    ]);
+  it("infers assistant targets from natural language messages", () => {
+    expect(inferAssistantTargetFromMessage("帮我拆解成几个子目标")).toBe("subgoals");
+    expect(inferAssistantTargetFromMessage("体检一下这个分支有什么风险")).toBe("diagnose");
+    expect(inferAssistantTargetFromMessage("安排一下本周行动")).toBe("weekly");
+    expect(inferAssistantTargetFromMessage("帮我改得更清楚")).toBe("improve");
+  });
+
+  it("uses the recent target for follow-up chat and asks for a command on unclear first messages", () => {
+    expect(resolveAssistantMessageTarget("weekly", "少一点")).toEqual({
+      target: "weekly",
+      inferred: false
+    });
+    expect(resolveAssistantMessageTarget(null, "帮我看看")).toBeNull();
+    expect(resolveAssistantMessageRoute(null, "帮我看看")).toEqual({
+      kind: "needs-command",
+      reply: "我还不确定你想让我执行哪类任务。请选择一个快捷指令，或直接说“优化目标 / 拆解子目标 / 分支体检 / 本周行动”。"
+    });
+    expect(resolveAssistantMessageTarget("weekly", "帮我拆解成几个子目标")).toEqual({
+      target: "subgoals",
+      inferred: true
+    });
+  });
+
+  it("treats greetings as chat instead of defaulting to goal suggestions", () => {
+    expect(inferAssistantTargetFromMessage("你好")).toBeNull();
+    expect(resolveAssistantMessageRoute(null, "你好")).toEqual({
+      kind: "chat",
+      reply: "你好，我可以帮你优化目标、拆解子目标、体检分支，或安排本周行动。你可以直接说想做哪一件。"
+    });
+  });
+
+  it("builds AI turns without translating quick adjustment enums", () => {
+    const turn = buildAiTurn({
+      intent: "quick-adjust",
+      quickAdjustment: "too-hard",
+      currentResponse: { summary: "Current summary" },
+      allowClarification: false
+    });
+
+    expect(turn).toMatchObject({
+      intent: "quick-adjust",
+      quickAdjustment: "too-hard",
+      currentResponse: { summary: "Current summary" },
+      allowClarification: false
+    });
+    expect(turn.message).toBeUndefined();
+  });
+
+  it("does not allow goal clarification after an answer was already supplied", () => {
+    const goal = goalFixture({ clarity: 1, horizon: "long" });
+
+    expect(
+      shouldAllowGoalClarification({
+        target: "improve",
+        goal,
+        parentChain: [goalFixture({ id: "parent-1" })],
+        children: [goalFixture({ id: "child-1" })],
+        siblings: [goalFixture({ id: "sibling-1" })],
+        hasClarificationAnswer: true
+      })
+    ).toBe(false);
+  });
+
+  it("does not allow goal clarification for diagnosis", () => {
+    const goal = goalFixture({ clarity: 1, horizon: "long" });
+
+    expect(
+      shouldAllowGoalClarification({
+        target: "diagnose",
+        goal,
+        parentChain: [goalFixture({ id: "parent-1" })],
+        children: [goalFixture({ id: "child-1" })],
+        siblings: [goalFixture({ id: "sibling-1" })],
+        hasClarificationAnswer: false
+      })
+    ).toBe(false);
+  });
+
+  it("rejects clarification questions when the current turn did not allow clarification", () => {
+    const transition = resolveAiAssistantResponse({
+      tab: "improve",
+      response: {
+        clarifyingQuestion: {
+          id: "scope",
+          question: "你更想先调整哪一部分？",
+          options: [
+            { id: "scope", label: "缩小范围" },
+            { id: "cadence", label: "降低频率" }
+          ]
+        }
+      },
+      goal: goalFixture(),
+      allowClarification: false
+    });
+
+    expect(transition.kind).toBe("protocol-error");
+  });
+
+  it("does not compute default selections for clarification-only responses", () => {
+    const transition = resolveAiAssistantResponse({
+      tab: "improve",
+      response: {
+        clarifyingQuestion: {
+          id: "scope",
+          question: "你更想先调整哪一部分？",
+          options: [
+            { id: "scope", label: "缩小范围" },
+            { id: "cadence", label: "降低频率" }
+          ]
+        }
+      },
+      goal: goalFixture(),
+      allowClarification: true,
+      selectDefaults: () => {
+        throw new Error("default selections should not be called");
+      }
+    });
+
+    expect(transition.kind).toBe("clarification");
   });
 });

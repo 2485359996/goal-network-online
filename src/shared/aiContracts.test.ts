@@ -53,6 +53,48 @@ describe("AI contracts", () => {
     ).toBe(false);
   });
 
+  it("accepts turn metadata on improve-goal requests", () => {
+    expect(
+      improveGoalRequestSchema.safeParse({
+        goalId: "goal-delivery",
+        goal: validGoalContext,
+        parentChain: [],
+        children: [],
+        siblings: [],
+        turn: {
+          intent: "quick-adjust",
+          allowClarification: false,
+          quickAdjustment: "too-hard",
+          currentResponse: { summary: "Current summary" }
+        }
+      }).success
+    ).toBe(true);
+  });
+
+  it("accepts clarification-only responses and rejects mixed result responses", () => {
+    const clarifyingQuestion = {
+      id: "scope",
+      question: "你更想先调整哪一部分？",
+      options: [
+        { id: "scope", label: "缩小范围" },
+        { id: "cadence", label: "降低频率" }
+      ]
+    };
+
+    expect(
+      improveGoalResponseSchema.safeParse({
+        clarifyingQuestion
+      }).success
+    ).toBe(true);
+
+    expect(
+      improveGoalResponseSchema.safeParse({
+        summary: "Sharper goal",
+        clarifyingQuestion
+      }).success
+    ).toBe(false);
+  });
+
   it("normalizes action candidate suggestions", () => {
     expect(normalizeAiActionCandidates(["Write plan", { text: "Review plan", done: true }, "  "])).toEqual([
       { text: "Write plan", done: false },
