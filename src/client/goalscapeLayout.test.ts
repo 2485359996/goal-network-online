@@ -4,6 +4,7 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { GoalNode } from "../shared/types";
 import {
+  ApiClientError,
   buildSunburstLayout,
   GOAL_PRESENTATION_STORAGE_KEY,
   GoalApp,
@@ -17,6 +18,7 @@ import {
   goalscapeCenterVisualMode,
   goalscapeBranchMapPositionPatches,
   goalHasMapPosition,
+  isUnauthorizedApiError,
   mapAddActionAvailability,
   mapPositionPreviewForContext,
   goalscapeNodeDensity,
@@ -224,6 +226,26 @@ describe("goalscape layout", () => {
     expect(shouldShowFirstGoalMapCta([{ id: "map-1", name: "目标网络", sortOrder: 0 }], false)).toBe(false);
     expect(goalMapCenterTitle({ name: "年度目标" })).toBe("年度目标");
     expect(goalMapCenterTitle(undefined)).toBe("目标地图");
+  });
+
+  it("renders a login recovery state instead of the empty-goal creation flow for auth failures", () => {
+    const source = clientMainSource();
+    const css = clientStyles();
+
+    expect(source).toContain("authRequired ? (");
+    expect(source).toContain("<AuthRequiredState />");
+    expect(source).toContain('href="/login"');
+    expect(source).toContain("{!authRequired && (");
+    expect(css).toContain(".map-workspace.auth-required-workspace");
+    expect(css).toContain(".auth-required-state");
+  });
+
+  it("routes unauthorized writes into the login recovery state", () => {
+    const source = clientMainSource();
+    const runWriteBlock = source.match(/const runWrite = useCallback\([\s\S]*?\n  }, \[clearNoticeTimer, enterAuthRequiredState, showNotice\]\);/)?.[0] ?? "";
+
+    expect(runWriteBlock).toContain("isUnauthorizedApiError(nextError)");
+    expect(runWriteBlock).toContain("enterAuthRequiredState();");
   });
 
   it("centers the goalscape composition in the svg viewbox", () => {
@@ -468,6 +490,12 @@ describe("goalscape layout", () => {
   it("ignores stale goal reload responses and state updates that finish after a newer request starts", () => {
     expect(shouldApplyGoalsResponse(1, 2)).toBe(false);
     expect(shouldApplyGoalsResponse(2, 2)).toBe(true);
+  });
+
+  it("classifies 401 API errors without treating generic errors as auth failures", () => {
+    expect(isUnauthorizedApiError(new ApiClientError("Unauthorized", 401))).toBe(true);
+    expect(isUnauthorizedApiError(new ApiClientError("Forbidden", 403))).toBe(false);
+    expect(isUnauthorizedApiError(new Error("Unauthorized"))).toBe(false);
   });
 
   it("keeps map position drag previews scoped to the active map context", () => {

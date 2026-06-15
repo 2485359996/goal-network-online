@@ -6,7 +6,9 @@ import {
   draftGoalResponseSchema,
   improveGoalRequestSchema,
   improveGoalResponseSchema,
-  normalizeAiActionCandidates
+  normalizeAiActionCandidates,
+  suggestSubgoalsResponseSchema,
+  suggestWeeklyActionsResponseSchema
 } from "./aiContracts";
 
 const validGoalContext = {
@@ -56,6 +58,47 @@ describe("AI contracts", () => {
       { text: "Write plan", done: false },
       { text: "Review plan", done: true }
     ]);
+  });
+
+  it("strips harmless goal-context fields from subgoal suggestions", () => {
+    expect(
+      suggestSubgoalsResponseSchema.parse({
+        subgoals: [
+          {
+            id: "draft-subgoal",
+            title: "Improve release confidence",
+            status: "active",
+            horizon: "medium",
+            priority: 60,
+            progress: 0,
+            directions: ["Clarify release gates"],
+            summary: "Make release readiness measurable."
+          }
+        ]
+      })
+    ).toEqual({
+      subgoals: [
+        {
+          title: "Improve release confidence",
+          horizon: "medium",
+          priority: 60,
+          summary: "Make release readiness measurable."
+        }
+      ]
+    });
+  });
+
+  it("normalizes string weekly-action suggestions into action objects", () => {
+    expect(
+      suggestWeeklyActionsResponseSchema.parse({
+        weeklyActions: ["Draft acceptance checklist", { description: "Review release risks", goal: "Delivery" }]
+      })
+    ).toEqual({
+      weeklyActions: [
+        { description: "Draft acceptance checklist" },
+        { description: "Review release risks", goal: "Delivery" }
+      ]
+    });
   });
 
   it("accepts draft-goal requests and rejects free-form draft-goal responses", () => {
