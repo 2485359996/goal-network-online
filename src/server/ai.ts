@@ -24,27 +24,41 @@ export async function runAiProvider(endpoint: AiEndpoint, request: unknown, opti
   if (!config) throw new AiProviderNotConfiguredError();
 
   const fetchImpl = options.fetch ?? fetch;
-  const response = await fetchImpl(`${config.url}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.key}`
-    },
-    body: JSON.stringify({
-      model: config.model,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: systemPromptFor(endpoint, request)
-        },
-        {
-          role: "user",
-          content: JSON.stringify({ endpoint, request }, null, 2)
-        }
-      ]
-    })
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetchImpl(`${config.url}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.key}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: config.model,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: systemPromptFor(endpoint, request)
+          },
+          {
+            role: "user",
+            content: JSON.stringify({ endpoint, request }, null, 2)
+          }
+        ]
+      })
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("AI provider request timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 
   const body = await response.json().catch(() => null);
   if (!response.ok) {
@@ -106,7 +120,10 @@ function loadAiProviderConfig(options: AiProviderOptions) {
   const model = env.AI_PROVIDER_MODEL?.trim();
 
   if (!url || !key || !model) return null;
-  return { url, key, model };
+  const timeoutRaw = Number(env.AI_REQUEST_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 45_000;
+
+  return { url, key, model, timeoutMs };
 }
 
 function readLocalEnvFile(): AiProviderEnv {
@@ -209,7 +226,11 @@ function parseJsonObject(content: string) {
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
-  return JSON.parse(firstJsonObject(withoutFence));
+  try {
+    return JSON.parse(firstJsonObject(withoutFence));
+  } catch {
+    throw new Error("AI provider returned invalid JSON");
+  }
 }
 
 function firstJsonObject(content: string) {

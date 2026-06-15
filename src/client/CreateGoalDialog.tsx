@@ -1,4 +1,5 @@
 import { AlertCircle, CheckCircle2, Loader2, Pencil, X } from "lucide-react";
+import { motion } from "framer-motion";
 import React, { useEffect, useMemo, useState } from "react";
 import { isPrimaryGoalTitle } from "../shared/goalRules";
 import {
@@ -24,6 +25,7 @@ import {
   shouldAllowDraftClarification
 } from "./aiConversation";
 import { GOAL_THEME_COLORS, nextGoalThemeColor, resolveGoalThemeColor } from "./goalUtils";
+import { useDialogMotion } from "./motion";
 import { useModalDialog } from "./useModalDialog";
 
 export type CreateGoalMode = "top" | "subgoal" | "sibling";
@@ -57,6 +59,7 @@ const horizonOptions = [
   { value: "long", label: "长期" }
 ];
 const draftCommands = availableDraftCommands();
+const AI_CLIENT_TIMEOUT_MS = 60_000;
 
 function titleFromLink(value: string | undefined) {
   return String(value ?? "")
@@ -253,11 +256,25 @@ export function resolveCreateGoalAiResponse({
 }
 
 async function requestGoalDraft(context: CreateGoalDialogContext, draft: CreateGoalDraft, turn?: AiTurn): Promise<AiDraftGoalResponse> {
-  const response = await fetch("/api/ai/draft-goal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(buildCreateGoalAiRequest(context, draft, turn))
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_CLIENT_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch("/api/ai/draft-goal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify(buildCreateGoalAiRequest(context, draft, turn))
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("AI 请求超时，请重试");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (response.status === 501) throw new Error("AI 后端尚未配置");
   if (!response.ok) {
@@ -304,6 +321,7 @@ export function CreateGoalDialog({
     onDismiss: onCancel,
     canDismiss: !busy
   });
+  const dialogMotion = useDialogMotion();
 
   useEffect(() => {
     setDraft(initialDraft);
@@ -461,8 +479,8 @@ export function CreateGoalDialog({
   };
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog create-goal-dialog" role="dialog" aria-modal="true" aria-labelledby="create-goal-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog create-goal-dialog" role="dialog" aria-modal="true" aria-labelledby="create-goal-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">创建目标</p>
@@ -694,8 +712,8 @@ export function CreateGoalDialog({
             </button>
           </div>
         </form>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 

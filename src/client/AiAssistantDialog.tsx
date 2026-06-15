@@ -1,4 +1,5 @@
 import { AlertCircle, CheckCircle2, Loader2, Sparkles, X } from "lucide-react";
+import { motion } from "framer-motion";
 import React, { useEffect, useState } from "react";
 import { isPrimaryGoalNode } from "../shared/goalRules";
 import type { ActionCreateInput, GoalCreateInput, GoalNode, GoalPatchInput } from "../shared/types";
@@ -16,6 +17,7 @@ import {
   shouldAllowGoalClarification
 } from "./aiConversation";
 import { resolveGoalThemeColor } from "./goalUtils";
+import { useDialogMotion } from "./motion";
 import { useModalDialog } from "./useModalDialog";
 import {
   aiRouteContracts,
@@ -48,7 +50,45 @@ type AiResponse =
 type SelectionMap = Record<string, boolean>;
 type ImproveField = "summary" | "successSignals" | "actionCandidates" | "reviewQuestions";
 
+const AI_CLIENT_TIMEOUT_MS = 60_000;
 const assistantCommands = availableAssistantCommands();
+
+export type ImproveDraft = {
+  summary: string;
+  successSignals: string;
+  actionCandidates: string;
+  reviewQuestions: string;
+};
+
+export type SubgoalDraft = {
+  title: string;
+  summary: string;
+};
+
+export type WeeklyDraft = {
+  description: string;
+  due: string;
+};
+
+export function improveDraftFromResponse(r: AiImproveGoalResponse): ImproveDraft {
+  return {
+    summary: r.summary ?? "",
+    successSignals: (r.successSignals ?? []).join("\n"),
+    actionCandidates: normalizeAiActionCandidates(r.actionCandidates ?? []).map((a) => a.text).join("\n"),
+    reviewQuestions: (r.reviewQuestions ?? []).join("\n")
+  };
+}
+
+export function improveResponseFromDraft(draft: ImproveDraft, original: AiImproveGoalResponse): AiImproveGoalResponse {
+  const splitLines = (text: string) => text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return {
+    summary: original.summary !== undefined ? draft.summary.trim() || undefined : undefined,
+    successSignals: original.successSignals !== undefined ? splitLines(draft.successSignals) : undefined,
+    actionCandidates: original.actionCandidates !== undefined ? splitLines(draft.actionCandidates) : undefined,
+    reviewQuestions: original.reviewQuestions !== undefined ? splitLines(draft.reviewQuestions) : undefined,
+    warnings: original.warnings
+  };
+}
 
 const responseSchemas = {
   improve: improveGoalResponseSchema,
@@ -85,6 +125,41 @@ export function buildImproveGoalPatch(
   }
 
   return patch;
+}
+
+export function selectedSubgoalSuggestionsForCreate(
+  response: AiSuggestSubgoalsResponse,
+  selected: SelectionMap,
+  drafts: SubgoalDraft[]
+): AiSubgoalSuggestion[] {
+  return (response.subgoals ?? []).flatMap((subgoal, index) => {
+    if (!selected[`subgoal-${index}`]) return [];
+    const draft = drafts[index] ?? { title: subgoal.title, summary: subgoal.summary ?? "" };
+    if (!draft.title.trim()) throw new Error("子目标标题不能为空");
+    return [{
+      ...subgoal,
+      title: draft.title.trim(),
+      summary: draft.summary.trim() || undefined
+    }];
+  });
+}
+
+export function selectedWeeklyActionInputsForCreate(
+  response: AiSuggestWeeklyActionsResponse,
+  selected: SelectionMap,
+  drafts: WeeklyDraft[],
+  fallbackGoalTitle: string
+): ActionCreateInput[] {
+  return (response.weeklyActions ?? []).flatMap((action, index) => {
+    if (!selected[`weekly-${index}`]) return [];
+    const draft = drafts[index] ?? { description: action.description, due: action.due ?? "" };
+    if (!draft.description.trim()) throw new Error("行动描述不能为空");
+    return [{
+      description: draft.description.trim(),
+      goal: action.goal || fallbackGoalTitle,
+      due: draft.due.trim() || undefined
+    }];
+  });
 }
 
 export function goalContextFromNode(goal: GoalNode): AiGoalContext {
@@ -174,6 +249,9 @@ export function AiAssistantDialog({
   const [messages, setMessages] = useState<AiConversationMessage[]>([]);
   const [clarifyingQuestion, setClarifyingQuestion] = useState<AiClarifyingQuestion | null>(null);
   const [clarificationAnswered, setClarificationAnswered] = useState(false);
+  const [improveDraft, setImproveDraft] = useState<ImproveDraft | null>(null);
+  const [subgoalDrafts, setSubgoalDrafts] = useState<SubgoalDraft[]>([]);
+  const [weeklyDrafts, setWeeklyDrafts] = useState<WeeklyDraft[]>([]);
   const primaryGoal = isPrimaryGoalNode(goal);
 
   useEffect(() => {
@@ -185,10 +263,64 @@ export function AiAssistantDialog({
     setMessages([]);
     setClarifyingQuestion(null);
     setClarificationAnswered(false);
+    setImproveDraft(null);
+    setSubgoalDrafts([]);
+    setWeeklyDrafts([]);
     setLastTarget(null);
   }, [goal.id]);
 
   const canApply = Boolean(response) && responseTarget !== "diagnose";
+
+  const resetDrafts = () => {
+    setImproveDraft(null);
+    setSubgoalDrafts([]);
+    setWeeklyDrafts([]);
+  };
+
+  const seedDraftsForResponse = (target: AiTab, nextResponse: AiResponse) => {
+    setImproveDraft(target === "improve" ? improveDraftFromResponse(nextResponse as AiImproveGoalResponse) : null);
+    setSubgoalDrafts(
+      target === "subgoals"
+        ? ((nextResponse as AiSuggestSubgoalsResponse).subgoals ?? []).map((subgoal) => ({ title: subgoal.title, summary: subgoal.summary ?? "" }))
+        : []
+    );
+    setWeeklyDrafts(
+      target === "weekly"
+        ? ((nextResponse as AiSuggestWeeklyActionsResponse).weeklyActions ?? []).map((action) => ({ description: action.description, due: action.due ?? "" }))
+        : []
+    );
+  };
+
+  const currentResponseWithDrafts = (target: AiTab, current: AiResponse): AiResponse => {
+    if (target === "improve") {
+      return improveDraft ? improveResponseFromDraft(improveDraft, current as AiImproveGoalResponse) : current;
+    }
+    if (target === "subgoals") {
+      const subgoals = ((current as AiSuggestSubgoalsResponse).subgoals ?? []).map((subgoal, index) => {
+        const draft = subgoalDrafts[index];
+        if (!draft) return subgoal;
+        return {
+          ...subgoal,
+          title: draft.title.trim() || subgoal.title,
+          summary: draft.summary.trim() || undefined
+        };
+      });
+      return { ...(current as AiSuggestSubgoalsResponse), subgoals };
+    }
+    if (target === "weekly") {
+      const weeklyActions = ((current as AiSuggestWeeklyActionsResponse).weeklyActions ?? []).map((action, index) => {
+        const draft = weeklyDrafts[index];
+        if (!draft) return action;
+        return {
+          ...action,
+          description: draft.description.trim() || action.description,
+          due: draft.due.trim() || undefined
+        };
+      });
+      return { ...(current as AiSuggestWeeklyActionsResponse), weeklyActions };
+    }
+    return current;
+  };
 
   const handleAiResponse = (target: AiTab, nextResponse: AiResponse, allowClarification: boolean, nextMessages: AiConversationMessage[]) => {
     const transition = resolveAiAssistantResponse({
@@ -213,6 +345,7 @@ export function AiAssistantDialog({
     setResponse(transition.response);
     setResponseTarget(target);
     setSelected(transition.selected);
+    seedDraftsForResponse(target, transition.response);
     setMessages(nextMessages);
   };
 
@@ -236,6 +369,7 @@ export function AiAssistantDialog({
         setResponseTarget(null);
         setSelected({});
         setClarifyingQuestion(null);
+        resetDrafts();
       }
       setError(aiErrorMessage(nextError));
     } finally {
@@ -252,6 +386,7 @@ export function AiAssistantDialog({
     setResponseTarget(null);
     setSelected({});
     setClarifyingQuestion(null);
+    resetDrafts();
     const nextParentChain = parentChain(goal, flatGoals);
     const nextSiblings = siblingGoals(goal, flatGoals);
     const allowClarification = shouldAllowGoalClarification({
@@ -280,14 +415,15 @@ export function AiAssistantDialog({
 
     try {
       if (responseTarget === "improve") {
-        const patch = buildImproveGoalPatch(goal, response as AiImproveGoalResponse, selected);
+        const effectiveResponse = currentResponseWithDrafts(responseTarget, response) as AiImproveGoalResponse;
+        const patch = buildImproveGoalPatch(goal, effectiveResponse, selected);
         if (Object.keys(patch).length === 0) throw new Error("请先勾选要应用的建议");
         const ok = await onPatchGoal(goal.id, patch);
         if (!ok) throw new Error("目标更新失败");
       }
 
       if (responseTarget === "subgoals") {
-        const subgoals = ((response as AiSuggestSubgoalsResponse).subgoals ?? []).filter((_, index) => selected[`subgoal-${index}`]);
+        const subgoals = selectedSubgoalSuggestionsForCreate(response as AiSuggestSubgoalsResponse, selected, subgoalDrafts);
         if (subgoals.length === 0) throw new Error("请先勾选要创建的子目标");
         for (const subgoal of subgoals) {
           const ok = await onCreateGoal(createSubgoalInput(goal, subgoal));
@@ -296,14 +432,10 @@ export function AiAssistantDialog({
       }
 
       if (responseTarget === "weekly") {
-        const actions = ((response as AiSuggestWeeklyActionsResponse).weeklyActions ?? []).filter((_, index) => selected[`weekly-${index}`]);
+        const actions = selectedWeeklyActionInputsForCreate(response as AiSuggestWeeklyActionsResponse, selected, weeklyDrafts, goal.title);
         if (actions.length === 0) throw new Error("请先勾选要创建的周行动");
         for (const action of actions) {
-          const ok = await onCreateWeeklyAction({
-            description: action.description,
-            goal: action.goal || goal.title,
-            due: action.due
-          });
+          const ok = await onCreateWeeklyAction(action);
           if (!ok) throw new Error(`周行动创建失败：${action.description}`);
         }
       }
@@ -349,6 +481,7 @@ export function AiAssistantDialog({
       setResponseTarget(null);
       setSelected({});
       setClarifyingQuestion(null);
+      resetDrafts();
     }
     void runTurn(
       route.target,
@@ -357,7 +490,7 @@ export function AiAssistantDialog({
         message,
         allowClarification,
         conversation: nextMessages,
-        currentResponse: route.target === responseTarget ? response ?? undefined : undefined
+        currentResponse: route.target === responseTarget && response ? currentResponseWithDrafts(route.target, response) : undefined
       }),
       nextMessages
     );
@@ -378,7 +511,7 @@ export function AiAssistantDialog({
         quickAdjustment: adjustment,
         allowClarification: false,
         conversation: nextMessages,
-        currentResponse: response ?? undefined
+        currentResponse: response ? currentResponseWithDrafts(target, response) : undefined
       }),
       nextMessages
     );
@@ -400,7 +533,7 @@ export function AiAssistantDialog({
         allowClarification: false,
         clarificationAnswer: answer,
         conversation: nextMessages,
-        currentResponse: response ?? undefined
+        currentResponse: response ? currentResponseWithDrafts(target, response) : undefined
       }),
       nextMessages
     );
@@ -420,10 +553,11 @@ export function AiAssistantDialog({
     onDismiss: onClose,
     canDismiss: !busy
   });
+  const dialogMotion = useDialogMotion();
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="ai-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="ai-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">AI 助手</p>
@@ -473,7 +607,14 @@ export function AiAssistantDialog({
             {response && responseTarget && (
               <>
                 <div className="ai-suggestion-list">
-                  {renderResponse(responseTarget, response, selected, primaryGoal, toggleSelection)}
+                  {renderResponse(responseTarget, response, selected, primaryGoal, toggleSelection, {
+                    improveDraft,
+                    subgoalDrafts,
+                    weeklyDrafts,
+                    setImproveDraft,
+                    setSubgoalDrafts,
+                    setWeeklyDrafts
+                  })}
                   {renderWarnings(response)}
                 </div>
                 {canApply && (
@@ -488,35 +629,47 @@ export function AiAssistantDialog({
             )}
           </AiConversationControls>
         </div>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
+
+type DraftState = {
+  improveDraft: ImproveDraft | null;
+  subgoalDrafts: SubgoalDraft[];
+  weeklyDrafts: WeeklyDraft[];
+  setImproveDraft: (draft: ImproveDraft) => void;
+  setSubgoalDrafts: React.Dispatch<React.SetStateAction<SubgoalDraft[]>>;
+  setWeeklyDrafts: React.Dispatch<React.SetStateAction<WeeklyDraft[]>>;
+};
 
 function renderResponse(
   tab: AiTab,
   response: AiResponse,
   selected: SelectionMap,
   primaryGoal: boolean,
-  onToggle: (key: string) => void
+  onToggle: (key: string) => void,
+  drafts: DraftState
 ) {
   if (tab === "improve") {
-    return renderImproveResponse(response as AiImproveGoalResponse, selected, primaryGoal, onToggle);
+    return renderImproveResponse(response as AiImproveGoalResponse, selected, primaryGoal, onToggle, drafts.improveDraft, drafts.setImproveDraft);
   }
   if (tab === "subgoals") {
-    return renderSubgoalResponse(response as AiSuggestSubgoalsResponse, selected, onToggle);
+    return renderSubgoalResponse(response as AiSuggestSubgoalsResponse, selected, onToggle, drafts.subgoalDrafts, drafts.setSubgoalDrafts);
   }
   if (tab === "diagnose") {
     return renderDiagnosisResponse(response as AiDiagnoseBranchResponse);
   }
-  return renderWeeklyResponse(response as AiSuggestWeeklyActionsResponse, selected, onToggle);
+  return renderWeeklyResponse(response as AiSuggestWeeklyActionsResponse, selected, onToggle, drafts.weeklyDrafts, drafts.setWeeklyDrafts);
 }
 
 function renderImproveResponse(
   response: AiImproveGoalResponse,
   selected: SelectionMap,
   primaryGoal: boolean,
-  onToggle: (key: string) => void
+  onToggle: (key: string) => void,
+  draft: ImproveDraft | null,
+  setDraft: (draft: ImproveDraft) => void
 ) {
   const fields: ImproveField[] = ["summary", "successSignals", "actionCandidates", "reviewQuestions"];
   const visibleFields = fields.filter((field) => response[field] !== undefined);
@@ -527,15 +680,35 @@ function renderImproveResponse(
 
   return visibleFields.map((field) => {
     const disabled = field === "actionCandidates" && primaryGoal;
+    const updateDraft = (value: string) => {
+      if (!draft) return;
+      setDraft({ ...draft, [field]: value });
+    };
     return (
       <label key={field} className={disabled ? "ai-suggestion-item disabled" : "ai-suggestion-item"}>
         <input type="checkbox" checked={!disabled && Boolean(selected[field])} disabled={disabled} onChange={() => onToggle(field)} />
         <span>
           <strong>{improveFieldLabels[field]}</strong>
-          {field === "summary" && <p>{response.summary}</p>}
-          {field === "successSignals" && <InlineList items={response.successSignals ?? []} />}
-          {field === "actionCandidates" && <InlineList items={normalizeAiActionCandidates(response.actionCandidates ?? []).map((action) => action.text)} />}
-          {field === "reviewQuestions" && <InlineList items={response.reviewQuestions ?? []} />}
+          {field === "summary" && (
+            draft
+              ? <textarea className="ai-draft-textarea" value={draft.summary} rows={3} onChange={(event) => updateDraft(event.target.value)} />
+              : <p>{response.summary}</p>
+          )}
+          {field === "successSignals" && (
+            draft
+              ? <textarea className="ai-draft-textarea" value={draft.successSignals} rows={3} placeholder="每行一条" onChange={(event) => updateDraft(event.target.value)} />
+              : <InlineList items={response.successSignals ?? []} />
+          )}
+          {field === "actionCandidates" && (
+            draft
+              ? <textarea className="ai-draft-textarea" value={draft.actionCandidates} rows={3} placeholder="每行一条" onChange={(event) => updateDraft(event.target.value)} />
+              : <InlineList items={normalizeAiActionCandidates(response.actionCandidates ?? []).map((action) => action.text)} />
+          )}
+          {field === "reviewQuestions" && (
+            draft
+              ? <textarea className="ai-draft-textarea" value={draft.reviewQuestions} rows={3} placeholder="每行一条" onChange={(event) => updateDraft(event.target.value)} />
+              : <InlineList items={response.reviewQuestions ?? []} />
+          )}
           {disabled && <small>一级目标不写入行动候选。</small>}
         </span>
       </label>
@@ -543,22 +716,38 @@ function renderImproveResponse(
   });
 }
 
-function renderSubgoalResponse(response: AiSuggestSubgoalsResponse, selected: SelectionMap, onToggle: (key: string) => void) {
+function renderSubgoalResponse(
+  response: AiSuggestSubgoalsResponse,
+  selected: SelectionMap,
+  onToggle: (key: string) => void,
+  drafts: SubgoalDraft[],
+  setDrafts: React.Dispatch<React.SetStateAction<SubgoalDraft[]>>
+) {
   const subgoals = response.subgoals ?? [];
   if (subgoals.length === 0) {
     return <p className="muted-text">这次没有建议创建的子目标。</p>;
   }
 
-  return subgoals.map((subgoal, index) => (
-    <label key={`${subgoal.title}-${index}`} className="ai-suggestion-item">
-      <input type="checkbox" checked={Boolean(selected[`subgoal-${index}`])} onChange={() => onToggle(`subgoal-${index}`)} />
-      <span>
-        <strong>{subgoal.title}</strong>
-        {subgoal.summary && <p>{subgoal.summary}</p>}
-        {subgoal.successSignals?.length ? <InlineList items={subgoal.successSignals} /> : null}
-      </span>
-    </label>
-  ));
+  return subgoals.map((subgoal, index) => {
+    const draft = drafts[index] ?? { title: subgoal.title, summary: subgoal.summary ?? "" };
+    const updateDraft = (patch: Partial<SubgoalDraft>) => {
+      setDrafts((current) => {
+        const next = [...current];
+        next[index] = { ...draft, ...patch };
+        return next;
+      });
+    };
+    return (
+      <label key={`${subgoal.title}-${index}`} className="ai-suggestion-item">
+        <input type="checkbox" checked={Boolean(selected[`subgoal-${index}`])} onChange={() => onToggle(`subgoal-${index}`)} />
+        <span>
+          <input type="text" className="ai-draft-input" value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} />
+          <textarea className="ai-draft-textarea" value={draft.summary} rows={2} placeholder="摘要（可选）" onChange={(event) => updateDraft({ summary: event.target.value })} />
+          {subgoal.successSignals?.length ? <InlineList items={subgoal.successSignals} /> : null}
+        </span>
+      </label>
+    );
+  });
 }
 
 function renderDiagnosisResponse(response: AiDiagnoseBranchResponse) {
@@ -572,21 +761,38 @@ function renderDiagnosisResponse(response: AiDiagnoseBranchResponse) {
   ));
 }
 
-function renderWeeklyResponse(response: AiSuggestWeeklyActionsResponse, selected: SelectionMap, onToggle: (key: string) => void) {
+function renderWeeklyResponse(
+  response: AiSuggestWeeklyActionsResponse,
+  selected: SelectionMap,
+  onToggle: (key: string) => void,
+  drafts: WeeklyDraft[],
+  setDrafts: React.Dispatch<React.SetStateAction<WeeklyDraft[]>>
+) {
   const actions = response.weeklyActions ?? [];
   if (actions.length === 0) {
     return <p className="muted-text">这次没有建议创建的周行动。</p>;
   }
 
-  return actions.map((action, index) => (
-    <label key={`${action.description}-${index}`} className="ai-suggestion-item">
-      <input type="checkbox" checked={Boolean(selected[`weekly-${index}`])} onChange={() => onToggle(`weekly-${index}`)} />
-      <span>
-        <strong>{action.description}</strong>
-        <p>{action.goal || "当前目标"}{action.due ? ` · ${action.due}` : ""}</p>
-      </span>
-    </label>
-  ));
+  return actions.map((action, index) => {
+    const draft = drafts[index] ?? { description: action.description, due: action.due ?? "" };
+    const updateDraft = (patch: Partial<WeeklyDraft>) => {
+      setDrafts((current) => {
+        const next = [...current];
+        next[index] = { ...draft, ...patch };
+        return next;
+      });
+    };
+    return (
+      <label key={`${action.description}-${index}`} className="ai-suggestion-item">
+        <input type="checkbox" checked={Boolean(selected[`weekly-${index}`])} onChange={() => onToggle(`weekly-${index}`)} />
+        <span>
+          <input type="text" className="ai-draft-input" value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })} />
+          <p>{action.goal || "当前目标"}</p>
+          <input type="text" className="ai-draft-input ai-draft-due" value={draft.due} placeholder="YYYY-MM-DD" onChange={(event) => updateDraft({ due: event.target.value })} />
+        </span>
+      </label>
+    );
+  });
 }
 
 function renderWarnings(response: AiResponse) {
@@ -662,7 +868,7 @@ function createSubgoalInput(parent: GoalNode, suggestion: AiSubgoalSuggestion): 
   };
 }
 
-function buildAiRequest(tab: AiTab, goal: GoalNode, flatGoals: GoalNode[], turn?: AiTurn) {
+export function buildAiRequest(tab: AiTab, goal: GoalNode, flatGoals: GoalNode[], turn?: AiTurn) {
   const base = {
     goalId: goal.id,
     goal: goalContextFromNode(goal),
@@ -685,11 +891,25 @@ function buildAiRequest(tab: AiTab, goal: GoalNode, flatGoals: GoalNode[], turn?
 async function requestAi(tab: AiTab, payload: unknown): Promise<AiResponse> {
   const endpoint = endpointForAssistantTarget(tab);
   const contract = aiRouteContracts[endpoint];
-  const response = await fetch(contract.path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_CLIENT_TIMEOUT_MS);
+
+  let response: Response;
+  try {
+    response = await fetch(contract.path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify(payload)
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("AI 请求超时，请重试");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (response.status === 501) {
     throw new Error("AI 后端尚未配置");

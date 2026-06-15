@@ -126,7 +126,7 @@ export const aiSubgoalSuggestionSchema = z.object({
   successSignals: z.array(z.string()).optional(),
   actionCandidates: z.array(aiActionCandidateInputSchema).optional(),
   reviewQuestions: z.array(z.string()).optional()
-}).strict();
+}).strip();
 
 export const aiFindingSchema = z.object({
   severity: z.enum(["info", "warning", "critical"]).default("info"),
@@ -135,11 +135,14 @@ export const aiFindingSchema = z.object({
   recommendation: z.string().optional()
 }).strict();
 
-export const aiWeeklyActionSchema = z.object({
+export const aiWeeklyActionSchema = z.preprocess((value) => {
+  if (typeof value === "string") return { description: value.trim() };
+  return value;
+}, z.object({
   description: z.string().min(1),
   goal: z.string().optional(),
   due: z.string().optional()
-}).strict();
+}).strip());
 
 const warningsSchema = z.array(z.string()).optional();
 

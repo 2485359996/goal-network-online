@@ -22,13 +22,13 @@ import {
   Leaf,
   ListPlus,
   Loader2,
+  LogIn,
   Monitor,
   Moon,
   Network,
   Pencil,
   Plus,
   RefreshCw,
-  Save,
   Sparkles,
   Star,
   Sun,
@@ -37,6 +37,7 @@ import {
   Users,
   X
 } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ActionCreateInput,
@@ -52,6 +53,7 @@ import { createBrowserSupabaseClient } from "../lib/supabase/client";
 import { isPrimaryGoalNode, isPrimaryGoalTitle, normalizedGoalTitle } from "../shared/goalRules";
 import { AiAssistantDialog } from "./AiAssistantDialog";
 import { CreateGoalDialog, type CreateGoalDialogContext } from "./CreateGoalDialog";
+import { listItemTransition, useBannerMotion, useDialogMotion, useListItemMotion } from "./motion";
 import { useModalDialog } from "./useModalDialog";
 import {
   applyThemePreference,
@@ -101,9 +103,9 @@ import {
   clampGoalscapePosition,
   constrainGoalscapePositionToOrbit,
   DEFAULT_SUNBURST_VISIBLE_DEPTH,
+  goalscapeBranchMapPositionPatches,
   goalHasMapPosition,
   goalIconComponent,
-  goalMapPosition,
   goalscapeBlobPath,
   goalscapeCenter,
   goalscapeCenterPearlSize,
@@ -121,7 +123,6 @@ import {
   goalscapeTopNodeBaseSize,
   goalscapeTopNodeSize,
   hasCustomMapPosition,
-  hasMapPositionOverride,
   mapPositionPreviewForContext,
   nextSunburstVisibleDepth,
   pruneSavedMapPositionPreviews,
@@ -155,6 +156,7 @@ export {
   clampGoalscapePosition,
   constrainGoalscapePositionToOrbit,
   DEFAULT_SUNBURST_VISIBLE_DEPTH,
+  goalscapeBranchMapPositionPatches,
   goalHasMapPosition,
   goalscapeCenter,
   goalscapeCenterPearlSize,
@@ -181,6 +183,7 @@ const emptyGoals: GoalsResponse = {
 };
 
 const ACTIVE_GOAL_MAP_STORAGE_KEY = "goal-network.activeGoalMapId";
+const GOAL_EDIT_AUTOSAVE_DELAY_MS = 700;
 export const GOAL_PRESENTATION_STORAGE_KEY = "goal-network.presentationByGoalMapId";
 const FLOATING_AI_ASSISTANT_POSITION_STORAGE_KEY = "goal-network.floatingAiAssistantPosition";
 const FLOATING_AI_ASSISTANT_SIZE = 56;
@@ -308,6 +311,20 @@ type PendingEdit = {
 };
 type DraftCache = Record<string, EditDraft>;
 
+export class ApiClientError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number
+  ) {
+    super(message);
+    this.name = "ApiClientError";
+  }
+}
+
+export function isUnauthorizedApiError(error: unknown) {
+  return error instanceof ApiClientError && error.status === 401;
+}
+
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers);
   if (options?.body !== undefined && !headers.has("Content-Type")) {
@@ -320,7 +337,7 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error || `请求失败：${response.status}`);
+    throw new ApiClientError(payload.error || `请求失败：${response.status}`, response.status);
   }
   return response.json() as Promise<T>;
 }
@@ -331,6 +348,10 @@ function nextGoalsRequestId(ref: React.MutableRefObject<number>) {
   return requestId;
 }
 
+function goalscapeCorePulse(progress: number) {
+  return Number((1.02 + clamp(progress, 0, 100) * 0.0009).toFixed(3));
+}
+
 export function GoalApp() {
   const [goals, setGoals] = useState<GoalsResponse>(emptyGoals);
   const [selectedId, setSelectedId] = useState("root");
@@ -339,6 +360,7 @@ export function GoalApp() {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [authRequired, setAuthRequired] = useState(false);
   const [importancePreview, setImportancePreview] = useState<ImportanceOverrides>({});
   const [progressPreview, setProgressPreview] = useState<ProgressOverrides>({});
   const [colorPreview, setColorPreview] = useState<ColorOverrides>({});
@@ -368,8 +390,29 @@ export function GoalApp() {
   const mapPaneRef = useRef<HTMLElement | null>(null);
   const pendingEditRef = useRef<PendingEdit | null>(null);
   const pendingSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftCacheRef = useRef<DraftCache>({});
   const goalsRequestIdRef = useRef(0);
+  const noticeTimeoutRef = useRef<number | null>(null);
+  const bannerMotion = useBannerMotion();
+
+  const clearNoticeTimer = useCallback(() => {
+    if (noticeTimeoutRef.current !== null) {
+      window.clearTimeout(noticeTimeoutRef.current);
+      noticeTimeoutRef.current = null;
+    }
+  }, []);
+
+  const showNotice = useCallback((message: string) => {
+    clearNoticeTimer();
+    setNotice(message);
+    noticeTimeoutRef.current = window.setTimeout(() => {
+      setNotice("");
+      noticeTimeoutRef.current = null;
+    }, 2800);
+  }, [clearNoticeTimer]);
+
+  useEffect(() => () => clearNoticeTimer(), [clearNoticeTimer]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -390,12 +433,41 @@ export function GoalApp() {
     applyThemePreference(stored, { systemPrefersDark: mediaQueryMatches("(prefers-color-scheme: dark)") });
   }, []);
 
+  const enterAuthRequiredState = useCallback(() => {
+    clearNoticeTimer();
+    setGoals(emptyGoals);
+    setSelectedId("root");
+    setActiveGoalMapId("");
+    setFocusRootId(null);
+    setAuthRequired(true);
+    setError("");
+    setNotice("");
+    setCreateGoalDialogContext(null);
+    setCreateGoalMapOpen(false);
+    setRenameGoalMapCandidate(null);
+    setDeleteGoalMapCandidate(null);
+    setDeleteCandidate(null);
+    setRenameOpen(false);
+    setAiOpen(false);
+    setAiGoal(null);
+  }, [clearNoticeTimer]);
+
   const loadGoals = useCallback(async () => {
     const requestId = nextGoalsRequestId(goalsRequestIdRef);
-    const next = await api<GoalsResponse>("/api/goals");
-    if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) setGoals(next);
-    return next;
-  }, []);
+    try {
+      const next = await api<GoalsResponse>("/api/goals");
+      if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
+        setGoals(next);
+        setAuthRequired(false);
+      }
+      return next;
+    } catch (nextError) {
+      if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current) && isUnauthorizedApiError(nextError)) {
+        enterAuthRequiredState();
+      }
+      throw nextError;
+    }
+  }, [enterAuthRequiredState]);
 
   const reload = useCallback(async () => {
     const requestId = nextGoalsRequestId(goalsRequestIdRef);
@@ -403,18 +475,23 @@ export function GoalApp() {
       const next = await api<GoalsResponse>("/api/goals");
       if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
         setGoals(next);
+        setAuthRequired(false);
         setError("");
       }
       return next;
     } catch (nextError) {
       if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
-        setError(nextError instanceof Error ? nextError.message : "加载失败");
+        if (isUnauthorizedApiError(nextError)) {
+          enterAuthRequiredState();
+        } else {
+          setError(nextError instanceof Error ? nextError.message : "加载失败");
+        }
       }
       throw nextError;
     } finally {
       if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) setLoading(false);
     }
-  }, []);
+  }, [enterAuthRequiredState]);
 
   useEffect(() => {
     void reload().catch(() => undefined);
@@ -426,29 +503,30 @@ export function GoalApp() {
     const supabase = createBrowserSupabaseClient();
     if (!supabase) return;
 
+    // 批量写入（如 AI 生成子目标）会在 5 张表上连发十余条事件；合并成一次全量拉取。
+    let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReload = () => {
+      if (reloadTimer !== null) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        reloadTimer = null;
+        void reload().catch(() => undefined);
+      }, 200);
+    };
+
     const channel = supabase
       .channel(`goal-network:${workspaceId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "goal_maps", filter: `workspace_id=eq.${workspaceId}` }, () => {
-        void reload().catch(() => undefined);
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "goals", filter: `workspace_id=eq.${workspaceId}` }, () => {
-        void reload().catch(() => undefined);
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "goal_relations", filter: `workspace_id=eq.${workspaceId}` }, () => {
-        void reload().catch(() => undefined);
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "weekly_actions", filter: `workspace_id=eq.${workspaceId}` }, () => {
-        void reload().catch(() => undefined);
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "records", filter: `workspace_id=eq.${workspaceId}` }, () => {
-        void reload().catch(() => undefined);
-      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "goal_maps", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "goals", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "goal_relations", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "weekly_actions", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
+      .on("postgres_changes", { event: "*", schema: "public", table: "records", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
       .subscribe((status) => {
         if (status === "SUBSCRIBED") setError((current) => (current === "Realtime disconnected" ? "" : current));
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setError("Realtime disconnected");
       });
 
     return () => {
+      if (reloadTimer !== null) clearTimeout(reloadTimer);
       void supabase.removeChannel(channel);
     };
   }, [goals.workspaceId, reload]);
@@ -473,8 +551,15 @@ export function GoalApp() {
   const activeAiGoal = useMemo(() => (aiGoal ? goals.flatGoals.find((goal) => goal.id === aiGoal.id) ?? aiGoal : null), [aiGoal, goals.flatGoals]);
   const selectedParent = useMemo(() => parentGoal(visibleTree, selectedId), [selectedId, visibleTree]);
   const mapGoals = focusGoal ? focusGoal.children ?? [] : visibleTree;
+  const sunburstGoals = focusGoal ? [focusGoal] : visibleTree;
   const mapContextId = focusGoal ? focusGoal.id : activeGoalMap?.id || "root";
   const mapCenterId = focusGoal ? focusGoal.id : activeGoalMap?.id || "root";
+  const focusTreeRootThemeColor = useMemo(() => {
+    if (!focusGoal || focusedPath.length === 0) return "";
+    const treeRoot = focusedPath[0];
+    const treeRootIndex = visibleTree.findIndex((goal) => goal.id === treeRoot.id);
+    return resolveGoalThemeColor(treeRoot, goalThemeColorForIndex(treeRootIndex >= 0 ? treeRootIndex : 0));
+  }, [focusGoal, focusedPath, visibleTree]);
   const floatingAiGoal = useMemo(
     () => selectedGoalFull ?? (selectedId === mapCenterId ? visibleTree[0] : undefined),
     [mapCenterId, selectedGoalFull, selectedId, visibleTree]
@@ -585,17 +670,32 @@ export function GoalApp() {
     if (resizingHeight && !mapPaneRect) return;
 
     setResizingPanelAxis(resizingHeight ? "height" : "width");
+    // 布局只在按下时读取一次；移动帧不再触发强制同步布局，setState 经 rAF 合帧
     const workspaceRect = workspace.getBoundingClientRect();
+    const maxDetailWidth = Math.max(340, Math.min(560, workspaceRect.width - 520));
+    let frame = 0;
+    let pointerX = 0;
+    let pointerY = 0;
 
-    const handlePointerMove = (moveEvent: PointerEvent) => {
+    const applyPointer = () => {
+      frame = 0;
       if (resizingHeight) {
-        setMapPaneHeight(clampMapPaneHeight(moveEvent.clientY - mapPaneRect!.top));
+        setMapPaneHeight(clampMapPaneHeight(pointerY - mapPaneRect!.top));
         return;
       }
+      setDetailWidth(clamp(Math.round(workspaceRect.right - pointerX), 340, maxDetailWidth));
+    };
 
-      setDetailWidth(clampDetailWidth(workspaceRect.right - moveEvent.clientX));
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      pointerX = moveEvent.clientX;
+      pointerY = moveEvent.clientY;
+      if (frame === 0) frame = window.requestAnimationFrame(applyPointer);
     };
     const handlePointerUp = () => {
+      if (frame !== 0) {
+        window.cancelAnimationFrame(frame);
+        applyPointer();
+      }
       setResizingPanelAxis(null);
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
@@ -616,21 +716,28 @@ export function GoalApp() {
     setMapPaneHeight((current) => clampMapPaneHeight(current + delta));
   };
 
-  const runWrite = useCallback(async (work: () => Promise<GoalsResponse | void>, message: string) => {
+  const runWrite = useCallback(async (work: () => Promise<GoalsResponse | void>, message: string, options: { silent?: boolean } = {}) => {
     setSaving(true);
     setError("");
     try {
       await work();
-      setNotice(message);
-      window.setTimeout(() => setNotice(""), 2400);
+      if (!options.silent) {
+        showNotice(message);
+      }
       return true;
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "保存失败");
+      clearNoticeTimer();
+      setNotice("");
+      if (isUnauthorizedApiError(nextError)) {
+        enterAuthRequiredState();
+      } else {
+        setError(nextError instanceof Error ? nextError.message : "保存失败");
+      }
       return false;
     } finally {
       setSaving(false);
     }
-  }, []);
+  }, [clearNoticeTimer, enterAuthRequiredState, showNotice]);
 
   const clearCachedDraft = useCallback((goalId: string, savedDraft?: EditDraft) => {
     const cachedDraft = draftCacheRef.current[goalId];
@@ -643,7 +750,7 @@ export function GoalApp() {
     }
   }, []);
 
-  const saveGoal = useCallback(async (goal: GoalNode, draft: EditDraft, options: { selectAfterSave?: string | false } = {}) => {
+  const saveGoal = useCallback(async (goal: GoalNode, draft: EditDraft, options: { selectAfterSave?: string | false; silent?: boolean } = {}) => {
     return runWrite(async () => {
       const nextImportance = rebalanceImportance(visibleTree, goal.id, draft.importance);
       const primaryGoal = isPrimaryGoalNode(goal);
@@ -700,22 +807,16 @@ export function GoalApp() {
         setSelectedId(nextSelectedId);
       }
       return next;
-    }, "目标已保存");
+    }, "目标已保存", { silent: options.silent });
   }, [clearCachedDraft, loadGoals, runWrite, visibleTree]);
 
-  const registerPendingEdit = useCallback((goal: GoalNode, draft: EditDraft, dirty: boolean) => {
-    if (dirty) {
-      pendingEditRef.current = { goal, draft };
-      draftCacheRef.current[goal.id] = draft;
-      return;
-    }
-    if (pendingEditRef.current?.goal.id === goal.id) {
-      pendingEditRef.current = null;
-    }
-    delete draftCacheRef.current[goal.id];
+  const clearGoalEditAutosaveTimer = useCallback(() => {
+    if (autoSaveTimerRef.current !== null) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = null;
   }, []);
 
-  const queuePendingEditSave = useCallback(() => {
+  const queuePendingEditSave = useCallback((options: { silent?: boolean } = {}) => {
+    clearGoalEditAutosaveTimer();
     const pending = pendingEditRef.current;
     if (!pending) return pendingSaveQueueRef.current;
 
@@ -723,13 +824,31 @@ export function GoalApp() {
     pendingSaveQueueRef.current = pendingSaveQueueRef.current
       .catch(() => undefined)
       .then(async () => {
-        const saved = await saveGoal(pending.goal, pending.draft, { selectAfterSave: false });
+        const saved = await saveGoal(pending.goal, pending.draft, { selectAfterSave: false, silent: options.silent });
         if (!saved && !pendingEditRef.current) {
           pendingEditRef.current = pending;
+          draftCacheRef.current[pending.goal.id] = pending.draft;
         }
       });
     return pendingSaveQueueRef.current;
-  }, [saveGoal]);
+  }, [clearGoalEditAutosaveTimer, saveGoal]);
+
+  const registerPendingEdit = useCallback((goal: GoalNode, draft: EditDraft, dirty: boolean) => {
+    clearGoalEditAutosaveTimer();
+    if (dirty) {
+      pendingEditRef.current = { goal, draft };
+      draftCacheRef.current[goal.id] = draft;
+      autoSaveTimerRef.current = window.setTimeout(() => {
+        autoSaveTimerRef.current = null;
+        void queuePendingEditSave({ silent: true });
+      }, GOAL_EDIT_AUTOSAVE_DELAY_MS) as unknown as ReturnType<typeof setTimeout>;
+      return;
+    }
+    if (pendingEditRef.current?.goal.id === goal.id) {
+      pendingEditRef.current = null;
+    }
+    delete draftCacheRef.current[goal.id];
+  }, [clearGoalEditAutosaveTimer, queuePendingEditSave]);
 
   const selectPresentationMode = useCallback((mode: GoalPresentationMode) => {
     if (mode === presentationMode) return;
@@ -737,7 +856,6 @@ export function GoalApp() {
     setPresentationMode(mode);
     if (activeGoalMapId) writeGoalPresentationMode(activeGoalMapId, mode);
     if (mode === "sunburst") {
-      setFocusRootId(null);
       setMapPositionPreview({});
     }
   }, [activeGoalMapId, presentationMode, queuePendingEditSave]);
@@ -752,14 +870,16 @@ export function GoalApp() {
     queuePendingEditSave();
     setFocusRootId(id);
     setSelectedId(id);
-  }, [queuePendingEditSave]);
+    if (presentationMode === "sunburst") setSunburstVisibleDepth(DEFAULT_SUNBURST_VISIBLE_DEPTH);
+  }, [presentationMode, queuePendingEditSave]);
 
   const ascendGoal = useCallback(() => {
     if (!focusRootId) return;
     const parentId = buildParentMap(visibleTree).get(focusRootId);
     setFocusRootId(parentId && parentId !== "root" ? parentId : null);
     setSelectedId(focusRootId);
-  }, [focusRootId, visibleTree]);
+    if (presentationMode === "sunburst") setSunburstVisibleDepth(DEFAULT_SUNBURST_VISIBLE_DEPTH);
+  }, [focusRootId, presentationMode, visibleTree]);
 
   const createGoal = async (input: GoalCreateInput): Promise<boolean> => {
     return runWrite(async () => {
@@ -919,25 +1039,49 @@ export function GoalApp() {
 
   const saveMapPosition = useCallback((goalId: string, position: MapPosition) => {
     const nextPosition = clampGoalscapePosition(position);
+    const nextPositionOverrides = {
+      ...activeMapPositionPreview,
+      [goalId]: nextPosition
+    };
+    const positionPatches = goalscapeBranchMapPositionPatches(mapGoals, goalId, nextPositionOverrides, mapContextId);
+    if (!positionPatches.some((patch) => patch.id === goalId)) {
+      positionPatches.push({ id: goalId, position: nextPosition });
+    }
     void runWrite(async () => {
-      await api(`/api/goals/${encodeURIComponent(goalId)}`, {
+      await api("/api/goals/map-positions", {
         method: "PATCH",
-        body: JSON.stringify({ map_positions: { [mapContextId]: nextPosition } })
+        body: JSON.stringify({ positions: positionPatches, mapContextId })
       });
       await loadGoals();
+      setMapPositionPreview((current) => {
+        let next = current;
+        for (const patch of positionPatches) next = withoutMapPositionPreview(next, mapContextId, patch.id);
+        return next;
+      });
     }, "目标位置已保存");
-  }, [loadGoals, mapContextId, runWrite]);
+  }, [
+    activeMapPositionPreview,
+    loadGoals,
+    mapContextId,
+    mapGoals,
+    runWrite
+  ]);
 
   const resetSelectedMapPosition = useCallback(() => {
     if (!selectedGoalFull) return;
     const goalId = selectedGoalFull.id;
+    const resetIds = [goalId, ...Array.from(collectDescendants(selectedGoalFull))];
     void runWrite(async () => {
-      await api(`/api/goals/${encodeURIComponent(goalId)}`, {
+      await api("/api/goals/map-positions", {
         method: "PATCH",
-        body: JSON.stringify({ map_positions: { [mapContextId]: null } })
+        body: JSON.stringify({ ids: resetIds, mapContextId })
       });
       await loadGoals();
-      setMapPositionPreview((current) => withoutMapPositionPreview(current, mapContextId, goalId));
+      setMapPositionPreview((current) => {
+        let next = current;
+        for (const id of resetIds) next = withoutMapPositionPreview(next, mapContextId, id);
+        return next;
+      });
     }, "目标位置已重置");
   }, [loadGoals, mapContextId, runWrite, selectedGoalFull]);
 
@@ -1002,7 +1146,7 @@ export function GoalApp() {
   const activeCount = useMemo(() => visibleFlatGoals.filter((goal) => goal.status === "active").length, [visibleFlatGoals]);
   const doneCount = useMemo(() => visibleFlatGoals.filter((goal) => goal.status === "done").length, [visibleFlatGoals]);
   const progressAverage = useMemo(() => averageProgress(visibleFlatGoals), [visibleFlatGoals]);
-  const syncStatus = saving ? "保存中" : loading ? "读取中" : error ? "同步异常" : "已同步";
+  const syncStatus = authRequired ? "需要登录" : saving ? "保存中" : loading ? "读取中" : error ? "同步异常" : "已同步";
   const workspaceStyle = useMemo(
     () =>
       ({
@@ -1067,9 +1211,22 @@ export function GoalApp() {
           </button>
         </div>
       </header>
-      {(notice || error) && <div className={error ? "banner error" : "banner"}>{error || notice}</div>}
+      <AnimatePresence initial={false}>
+        {(notice || error) && (
+          <motion.div
+            key={error ? `error-${error}` : `notice-${notice}`}
+            className={error ? "banner error" : "banner"}
+            variants={bannerMotion}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+          >
+            {error || notice}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      <main ref={workspaceRef} className={`map-workspace${resizingClass}`} style={workspaceStyle}>
+      <main ref={workspaceRef} className={`map-workspace${resizingClass}${authRequired ? " auth-required-workspace" : ""}`} style={workspaceStyle}>
         <section
           ref={mapPaneRef}
           className={`map-pane ${scopeListCollapsed ? "scope-collapsed" : "scope-open"}${presentationMode === "sunburst" ? " sunburst-active" : ""}`}
@@ -1089,7 +1246,7 @@ export function GoalApp() {
                 onRenameMap={setRenameGoalMapCandidate}
                 onDeleteMap={setDeleteGoalMapCandidate}
               />
-              {focusRootId && presentationMode === "sphere" && (
+              {focusRootId && (presentationMode === "sphere" || presentationMode === "sunburst") && (
                 <nav className="map-breadcrumb" aria-label="目标层级路径">
                   <button
                     type="button"
@@ -1098,6 +1255,7 @@ export function GoalApp() {
                       queuePendingEditSave();
                       setFocusRootId(null);
                       setSelectedId(activeGoalMap.id);
+                      if (presentationMode === "sunburst") setSunburstVisibleDepth(DEFAULT_SUNBURST_VISIBLE_DEPTH);
                     }}
                   >
                     {goalMapCenterTitle(activeGoalMap)}
@@ -1114,6 +1272,7 @@ export function GoalApp() {
                           queuePendingEditSave();
                           setFocusRootId(goal.id);
                           setSelectedId(goal.id);
+                          if (presentationMode === "sunburst") setSunburstVisibleDepth(DEFAULT_SUNBURST_VISIBLE_DEPTH);
                         }}
                         aria-current={index === focusedPath.length - 1 ? "page" : undefined}
                       >
@@ -1142,190 +1301,249 @@ export function GoalApp() {
             </div>
           )}
           <div className="map-canvas">
-            {loading ? (
-            <div className="loading-state">
-              <Loader2 className="spin" />
-              正在读取目标网络
-            </div>
-          ) : shouldShowFirstGoalMapCta(goals.goalMaps, loading) ? (
-            <div className="first-map-empty" role="status">
-              <button type="button" className="first-map-cta" onClick={() => setCreateGoalMapOpen(true)} disabled={saving}>
-                <Sparkles />
-                开始你的第一个目标
-              </button>
-            </div>
-          ) : activeGoalMap && presentationMode === "sphere" ? (
-            <GoalMap
-              goals={mapGoals}
-              selectedId={selectedId}
-              importanceOverrides={importancePreview}
-              progressOverrides={progressPreview}
-              colorOverrides={colorPreview}
-              positionOverrides={activeMapPositionPreview}
-              mapContextId={mapContextId}
-              centerId={mapCenterId}
-              centerTitle={mapCenterTitle}
-              centerGoal={focusGoal}
-              emptyLabel={mapEmptyLabel}
-              onSelect={selectGoal}
-              onDrill={drillGoal}
-              onAscend={ascendGoal}
-              onPreviewPosition={previewMapPosition}
-              onCommitPosition={saveMapPosition}
-            />
-          ) : activeGoalMap && presentationMode === "sunburst" ? (
-            <SunburstGoalMap
-              goals={visibleTree}
-              selectedId={selectedId}
-              centerId={mapCenterId}
-              centerTitle={goalMapCenterTitle(activeGoalMap)}
-              importanceOverrides={importancePreview}
-              progressOverrides={progressPreview}
-              colorOverrides={colorPreview}
-              visibleDepth={sunburstVisibleDepth}
-              onSelect={selectGoal}
-              onVisibleDepthChange={setSunburstVisibleDepth}
-            />
-          ) : null}
-            {!loading && activeGoalMap && visibleTree.length === 0 && (
-            <div className="empty-scape map-empty-scape" role="status">
-              <button type="button" className="empty-scape-cta secondary" onClick={openCreateTopGoalDialog} disabled={saving}>
-                <CirclePlus />
-                添加第一个目标
-              </button>
-            </div>
+            <div className="starfield" aria-hidden="true" />
+            {authRequired ? (
+              <AuthRequiredState />
+            ) : loading ? (
+              <div className="loading-state">
+                <Loader2 className="spin" />
+                正在读取 Obsidian 目标
+              </div>
+            ) : shouldShowFirstGoalMapCta(goals.goalMaps, loading) ? (
+              <div className="first-map-empty" role="status">
+                <button type="button" className="first-map-cta" onClick={() => setCreateGoalMapOpen(true)} disabled={saving}>
+                  <Sparkles />
+                  开始你的第一个目标
+                </button>
+              </div>
+            ) : activeGoalMap && presentationMode === "sphere" ? (
+              <GoalMap
+                goals={mapGoals}
+                selectedId={selectedId}
+                importanceOverrides={importancePreview}
+                progressOverrides={progressPreview}
+                colorOverrides={colorPreview}
+                positionOverrides={activeMapPositionPreview}
+                mapContextId={mapContextId}
+                treeRootThemeColor={focusTreeRootThemeColor}
+                centerId={mapCenterId}
+                centerTitle={mapCenterTitle}
+                centerGoal={focusGoal}
+                emptyLabel={mapEmptyLabel}
+                onSelect={selectGoal}
+                onDrill={drillGoal}
+                onAscend={ascendGoal}
+                onPreviewPosition={previewMapPosition}
+                onCommitPosition={saveMapPosition}
+              />
+            ) : activeGoalMap && presentationMode === "sunburst" ? (
+              <SunburstGoalMap
+                goals={sunburstGoals}
+                selectedId={selectedId}
+                centerId={mapCenterId}
+                centerTitle={mapCenterTitle}
+                importanceOverrides={importancePreview}
+                progressOverrides={progressPreview}
+                colorOverrides={colorPreview}
+                visibleDepth={sunburstVisibleDepth}
+                canAscend={Boolean(focusRootId)}
+                emptyLabel={mapEmptyLabel}
+                onSelect={selectGoal}
+                onDrill={drillGoal}
+                onAscend={ascendGoal}
+                onVisibleDepthChange={setSunburstVisibleDepth}
+              />
+            ) : null}
+            {!authRequired && !loading && activeGoalMap && visibleTree.length === 0 && (
+              <div className="empty-scape map-empty-scape" role="status">
+                <button type="button" className="empty-scape-cta secondary" onClick={openCreateTopGoalDialog} disabled={saving}>
+                  <CirclePlus />
+                  添加第一个目标
+                </button>
+              </div>
             )}
           </div>
         </section>
 
-        <div
-          className={`pane-resizer ${stackedLayout ? "horizontal" : "vertical"}`}
-          role="separator"
-          aria-label={stackedLayout ? "调整上方地图窗口高度" : "调整右侧窗口宽度"}
-          aria-orientation={stackedLayout ? "horizontal" : "vertical"}
-          aria-valuenow={stackedLayout ? mapPaneHeight : detailWidth}
-          aria-valuemin={stackedLayout ? MAP_PANE_MIN_HEIGHT : DETAIL_PANEL_MIN_WIDTH}
-          aria-valuemax={stackedLayout ? mapPaneHeightMax : detailWidthMax}
-          tabIndex={0}
-          onPointerDown={startPanelResize}
-          onKeyDown={(event) => {
-            if (stackedLayout) {
-              if (event.key === "ArrowUp") {
-                event.preventDefault();
-                nudgeMapPaneHeight(-24);
-              }
-              if (event.key === "ArrowDown") {
-                event.preventDefault();
-                nudgeMapPaneHeight(24);
-              }
-              return;
-            }
+        {!authRequired && (
+          <>
+            <div
+              className={`pane-resizer ${stackedLayout ? "horizontal" : "vertical"}`}
+              role="separator"
+              aria-label={stackedLayout ? "调整上方地图窗口高度" : "调整右侧窗口宽度"}
+              aria-orientation={stackedLayout ? "horizontal" : "vertical"}
+              aria-valuenow={stackedLayout ? mapPaneHeight : detailWidth}
+              aria-valuemin={stackedLayout ? MAP_PANE_MIN_HEIGHT : DETAIL_PANEL_MIN_WIDTH}
+              aria-valuemax={stackedLayout ? mapPaneHeightMax : detailWidthMax}
+              tabIndex={0}
+              onPointerDown={startPanelResize}
+              onKeyDown={(event) => {
+                if (stackedLayout) {
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    nudgeMapPaneHeight(-24);
+                  }
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    nudgeMapPaneHeight(24);
+                  }
+                  return;
+                }
 
-            if (event.key === "ArrowLeft") {
-              event.preventDefault();
-              nudgeDetailWidth(24);
-            }
-            if (event.key === "ArrowRight") {
-              event.preventDefault();
-              nudgeDetailWidth(-24);
-            }
-          }}
-        >
-          <span className="resizer-grip" aria-hidden="true">
-            {stackedLayout ? <GripHorizontal /> : <GripVertical />}
-          </span>
-        </div>
+                if (event.key === "ArrowLeft") {
+                  event.preventDefault();
+                  nudgeDetailWidth(24);
+                }
+                if (event.key === "ArrowRight") {
+                  event.preventDefault();
+                  nudgeDetailWidth(-24);
+                }
+              }}
+            >
+              <span className="resizer-grip" aria-hidden="true">
+                {stackedLayout ? <GripHorizontal /> : <GripVertical />}
+              </span>
+            </div>
 
-        <GoalDetailPanel
-          selectedGoal={selectedGoal}
-          activeGoalMap={activeGoalMap}
-          cachedDraft={selectedGoal ? draftCacheRef.current[selectedGoal.id] : undefined}
-          topGoals={visibleTree}
-          saving={saving}
-          importanceOverrides={importancePreview}
-          progressOverrides={progressPreview}
-          onSelect={selectGoal}
-          onSave={saveGoal}
-          onPreviewImportance={previewImportance}
-          onPreviewProgress={previewProgress}
-          onPreviewThemeColor={previewThemeColor}
-          onDraftChange={registerPendingEdit}
-        />
+            <GoalDetailPanel
+              selectedGoal={selectedGoal}
+              activeGoalMap={activeGoalMap}
+              cachedDraft={selectedGoal ? draftCacheRef.current[selectedGoal.id] : undefined}
+              topGoals={visibleTree}
+              saving={saving}
+              importanceOverrides={importancePreview}
+              progressOverrides={progressPreview}
+              onSelect={selectGoal}
+              onPreviewImportance={previewImportance}
+              onPreviewProgress={previewProgress}
+              onPreviewThemeColor={previewThemeColor}
+              onDraftChange={registerPendingEdit}
+            />
+          </>
+        )}
       </main>
       <FloatingAiAssistantButton goal={floatingAiGoal} open={aiOpen} onOpen={openAiAssistant} />
-      {aiOpen && activeAiGoal && (
-        <AiAssistantDialog
-          goal={activeAiGoal}
-          flatGoals={goals.flatGoals}
-          saving={saving}
-          onClose={() => setAiOpen(false)}
-          onBeforeGenerate={queuePendingEditSave}
-          onPatchGoal={patchGoalFromAi}
-          onCreateGoal={createGoal}
-          onCreateWeeklyAction={createWeeklyActionFromAi}
-        />
-      )}
-      {createGoalDialogContext && (
-        <CreateGoalDialog
-          context={createGoalDialogContext}
-          saving={saving}
-          onCancel={() => setCreateGoalDialogContext(null)}
-          onBeforeSubmit={queuePendingEditSave}
-          onBeforeGenerate={queuePendingEditSave}
-          onCreate={createGoal}
-        />
-      )}
-      <RenameGoalDialog
-        goal={renameOpen ? selectedGoalFull ?? null : null}
-        saving={saving}
-        onCancel={() => setRenameOpen(false)}
-        onConfirm={(title) => void submitRename(title)}
-      />
-      <GoalMapNameDialog
-        open={createGoalMapOpen}
-        title="新建目标地图"
-        initialName=""
-        saving={saving}
-        submitLabel="创建"
-        onCancel={() => setCreateGoalMapOpen(false)}
-        onConfirm={(name) => {
-          void createGoalMap(name).then((created) => {
-            if (created) setCreateGoalMapOpen(false);
-          });
-        }}
-      />
-      <GoalMapNameDialog
-        open={Boolean(renameGoalMapCandidate)}
-        title="重命名目标地图"
-        initialName={renameGoalMapCandidate?.name || ""}
-        saving={saving}
-        submitLabel="重命名"
-        onCancel={() => setRenameGoalMapCandidate(null)}
-        onConfirm={(name) => {
-          if (!renameGoalMapCandidate) return;
-          void patchGoalMap(renameGoalMapCandidate, name).then((renamed) => {
-            if (renamed) setRenameGoalMapCandidate(null);
-          });
-        }}
-      />
-      <DeleteGoalMapDialog
-        goalMap={deleteGoalMapCandidate}
-        goalCount={deleteGoalMapCandidate ? goalMapCounts[deleteGoalMapCandidate.id] ?? 0 : 0}
-        saving={saving}
-        onCancel={() => setDeleteGoalMapCandidate(null)}
-        onConfirm={() => {
-          if (!deleteGoalMapCandidate) return;
-          void deleteGoalMap(deleteGoalMapCandidate).then((deleted) => {
-            if (deleted) setDeleteGoalMapCandidate(null);
-          });
-        }}
-      />
-      <DeleteGoalDialog
-        goal={deleteCandidate}
-        saving={saving}
-        onCancel={() => setDeleteCandidate(null)}
-        onConfirm={() => deleteCandidate && void deleteGoal(deleteCandidate)}
-      />
+      <AnimatePresence initial={false}>
+        {aiOpen && activeAiGoal && (
+          <AiAssistantDialog
+            key={`ai-${activeAiGoal.id}`}
+            goal={activeAiGoal}
+            flatGoals={goals.flatGoals}
+            saving={saving}
+            onClose={() => setAiOpen(false)}
+            onBeforeGenerate={queuePendingEditSave}
+            onPatchGoal={patchGoalFromAi}
+            onCreateGoal={createGoal}
+            onCreateWeeklyAction={createWeeklyActionFromAi}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {createGoalDialogContext && (
+          <CreateGoalDialog
+            key={`create-goal-${createGoalDialogContext.goalMap.id}-${createGoalDialogContext.parentGoal?.id ?? "top"}-${createGoalDialogContext.sourceGoal?.id ?? "new"}-${createGoalDialogContext.mode}`}
+            context={createGoalDialogContext}
+            saving={saving}
+            onCancel={() => setCreateGoalDialogContext(null)}
+            onBeforeSubmit={queuePendingEditSave}
+            onBeforeGenerate={queuePendingEditSave}
+            onCreate={createGoal}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {renameOpen && selectedGoalFull && (
+          <RenameGoalDialog
+            key={`rename-${selectedGoalFull.id}`}
+            goal={selectedGoalFull}
+            saving={saving}
+            onCancel={() => setRenameOpen(false)}
+            onConfirm={(title) => void submitRename(title)}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {createGoalMapOpen && (
+          <GoalMapNameDialog
+            key="create-goal-map"
+            open
+            title="新建目标地图"
+            initialName=""
+            saving={saving}
+            submitLabel="创建"
+            onCancel={() => setCreateGoalMapOpen(false)}
+            onConfirm={(name) => {
+              void createGoalMap(name).then((created) => {
+                if (created) setCreateGoalMapOpen(false);
+              });
+            }}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {renameGoalMapCandidate && (
+          <GoalMapNameDialog
+            key={`rename-goal-map-${renameGoalMapCandidate.id}`}
+            open
+            title="重命名目标地图"
+            initialName={renameGoalMapCandidate.name}
+            saving={saving}
+            submitLabel="重命名"
+            onCancel={() => setRenameGoalMapCandidate(null)}
+            onConfirm={(name) => {
+              void patchGoalMap(renameGoalMapCandidate, name).then((renamed) => {
+                if (renamed) setRenameGoalMapCandidate(null);
+              });
+            }}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {deleteGoalMapCandidate && (
+          <DeleteGoalMapDialog
+            key={`delete-goal-map-${deleteGoalMapCandidate.id}`}
+            goalMap={deleteGoalMapCandidate}
+            goalCount={goalMapCounts[deleteGoalMapCandidate.id] ?? 0}
+            saving={saving}
+            onCancel={() => setDeleteGoalMapCandidate(null)}
+            onConfirm={() => {
+              void deleteGoalMap(deleteGoalMapCandidate).then((deleted) => {
+                if (deleted) setDeleteGoalMapCandidate(null);
+              });
+            }}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {deleteCandidate && (
+          <DeleteGoalDialog
+            key={`delete-${deleteCandidate.id}`}
+            goal={deleteCandidate}
+            saving={saving}
+            onCancel={() => setDeleteCandidate(null)}
+            onConfirm={() => void deleteGoal(deleteCandidate)}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function AuthRequiredState() {
+  return (
+    <div className="auth-required-state" role="status" aria-live="polite">
+      <div className="auth-required-orb" aria-hidden="true">
+        <LogIn />
+      </div>
+      <div>
+        <p className="eyebrow">需要登录</p>
+        <h2>登录后查看你的目标星图</h2>
+        <p>当前会话无法读取 Obsidian 目标。重新登录后，星图会回到这里继续展开。</p>
+      </div>
+      <a className="primary-button auth-login-link" href="/login">
+        <LogIn aria-hidden="true" />
+        前往登录
+      </a>
     </div>
   );
 }
@@ -1465,6 +1683,7 @@ function MapScopeList({
 }) {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const openMenuRef = useRef<HTMLDivElement | null>(null);
+  const listItemMotion = useListItemMotion();
 
   useEffect(() => {
     if (collapsed) setOpenMenuId(null);
@@ -1504,67 +1723,79 @@ function MapScopeList({
       {!collapsed && (
         <div className="scope-content">
           <p className="scope-title">目标地图</p>
-          {goalMaps.map((goalMap) => {
-            const active = activeGoalMapId === goalMap.id;
-            const menuOpen = openMenuId === goalMap.id;
-            return (
-              <div key={goalMap.id} className="scope-map-entry" style={{ "--scope-accent": "var(--accent)" } as React.CSSProperties}>
-                <button
-                  type="button"
-                  className={active ? "scope-item active" : "scope-item"}
-                  onClick={() => onSelectMap(goalMap.id)}
+          <AnimatePresence initial={false}>
+            {goalMaps.map((goalMap) => {
+              const active = activeGoalMapId === goalMap.id;
+              const menuOpen = openMenuId === goalMap.id;
+              return (
+                <motion.div
+                  key={goalMap.id}
+                  layout
+                  className="scope-map-entry"
+                  style={{ "--scope-accent": "var(--accent)" } as React.CSSProperties}
+                  variants={listItemMotion}
+                  initial="initial"
+                  animate="animate"
+                  exit="exit"
+                  transition={listItemTransition}
                 >
-                  <span>{goalMap.name}</span>
-                  <small>{goalCounts[goalMap.id] ?? 0} 个目标</small>
-                </button>
-                <div className="scope-item-menu-wrap" ref={menuOpen ? openMenuRef : null}>
                   <button
                     type="button"
-                    className="scope-item-menu-trigger"
-                    title="目标地图操作"
-                    aria-label={`目标地图「${goalMap.name}」操作`}
-                    aria-haspopup="menu"
-                    aria-expanded={menuOpen}
-                    disabled={saving}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setOpenMenuId((current) => (current === goalMap.id ? null : goalMap.id));
-                    }}
+                    className={active ? "scope-item active" : "scope-item"}
+                    onClick={() => onSelectMap(goalMap.id)}
                   >
-                    <Ellipsis />
+                    <span>{goalMap.name}</span>
+                    <small>{goalCounts[goalMap.id] ?? 0} 个目标</small>
                   </button>
-                  {menuOpen && (
-                    <div className="quick-menu scope-map-menu" role="menu">
-                      <button
-                        type="button"
-                        className="menu-item"
-                        disabled={saving}
-                        onClick={() => {
-                          setOpenMenuId(null);
-                          onRenameMap(goalMap);
-                        }}
-                      >
-                        <Pencil />
-                        重命名地图
-                      </button>
-                      <button
-                        type="button"
-                        className="menu-item danger-menu-item"
-                        disabled={saving}
-                        onClick={() => {
-                          setOpenMenuId(null);
-                          onDeleteMap(goalMap);
-                        }}
-                      >
-                        <Trash2 />
-                        删除地图
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+                  <div className="scope-item-menu-wrap" ref={menuOpen ? openMenuRef : null}>
+                    <button
+                      type="button"
+                      className="scope-item-menu-trigger"
+                      title="目标地图操作"
+                      aria-label={`目标地图「${goalMap.name}」操作`}
+                      aria-haspopup="menu"
+                      aria-expanded={menuOpen}
+                      disabled={saving}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setOpenMenuId((current) => (current === goalMap.id ? null : goalMap.id));
+                      }}
+                    >
+                      <Ellipsis />
+                    </button>
+                    {menuOpen && (
+                      <div className="quick-menu scope-map-menu" role="menu">
+                        <button
+                          type="button"
+                          className="menu-item"
+                          disabled={saving}
+                          onClick={() => {
+                            setOpenMenuId(null);
+                            onRenameMap(goalMap);
+                          }}
+                        >
+                          <Pencil />
+                          重命名地图
+                        </button>
+                        <button
+                          type="button"
+                          className="menu-item danger-menu-item"
+                          disabled={saving}
+                          onClick={() => {
+                            setOpenMenuId(null);
+                            onDeleteMap(goalMap);
+                          }}
+                        >
+                          <Trash2 />
+                          删除地图
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
           <div className="scope-divider" />
           <button type="button" className="scope-create" onClick={onCreateMap}>
             <Plus />
@@ -1601,7 +1832,7 @@ function PresentationModeToggle({
         onClick={() => onChange("sunburst")}
       >
         <ChartPie aria-hidden="true" />
-        <span>目标旭日图</span>
+        <span>目标日晷</span>
       </button>
     </div>
   );
@@ -1854,11 +2085,12 @@ function DeleteGoalDialogBody({
     onDismiss: onCancel,
     canDismiss: !saving
   });
+  const dialogMotion = useDialogMotion();
   const childCount = collectDescendants(goal).size;
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">删除目标</p>
@@ -1878,8 +2110,8 @@ function DeleteGoalDialogBody({
             彻底删除
           </button>
         </div>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 
@@ -1919,10 +2151,11 @@ function DeleteGoalMapDialogBody({
     onDismiss: onCancel,
     canDismiss: !saving
   });
+  const dialogMotion = useDialogMotion();
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-goal-map-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-goal-map-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">删除目标地图</p>
@@ -1944,8 +2177,8 @@ function DeleteGoalMapDialogBody({
             彻底删除
           </button>
         </div>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 
@@ -1998,6 +2231,7 @@ function GoalMapNameDialogBody({
     onDismiss: onCancel,
     canDismiss: !saving
   });
+  const dialogMotion = useDialogMotion();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState(initialName);
 
@@ -2013,8 +2247,8 @@ function GoalMapNameDialogBody({
   const canSubmit = !saving && trimmed.length > 0 && trimmed !== initialName.trim();
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="goal-map-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="goal-map-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">目标地图</p>
@@ -2052,8 +2286,8 @@ function GoalMapNameDialogBody({
             </button>
           </div>
         </form>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 
@@ -2087,6 +2321,7 @@ function RenameGoalDialogBody({
     onDismiss: onCancel,
     canDismiss: !saving
   });
+  const dialogMotion = useDialogMotion();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [title, setTitle] = useState(goal.title);
 
@@ -2101,8 +2336,8 @@ function RenameGoalDialogBody({
   const canSubmit = !saving && trimmed.length > 0 && trimmed !== goal.title;
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">重命名目标</p>
@@ -2140,8 +2375,8 @@ function RenameGoalDialogBody({
             </button>
           </div>
         </form>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 
@@ -2307,7 +2542,11 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   progressOverrides,
   colorOverrides,
   visibleDepth,
+  canAscend,
+  emptyLabel,
   onSelect,
+  onDrill,
+  onAscend,
   onVisibleDepthChange
 }: {
   goals: GoalNode[];
@@ -2318,7 +2557,11 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   progressOverrides: ProgressOverrides;
   colorOverrides: ColorOverrides;
   visibleDepth: number;
+  canAscend: boolean;
+  emptyLabel: string;
   onSelect: (id: string) => void;
+  onDrill: (id: string) => void;
+  onAscend: () => void;
   onVisibleDepthChange: React.Dispatch<React.SetStateAction<number>>;
 }) {
   const layout = useMemo(
@@ -2328,12 +2571,15 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   const centerGoal = layout.center.node;
   const centerDisplayTitle = centerGoal?.title || centerTitle;
   const centerProgress = centerGoal ? weightedGoalProgress(centerGoal, importanceOverrides, progressOverrides) : averageProgress(goals, importanceOverrides, progressOverrides);
-  const centerProgressRadius = sunburstCenterRadius - 5;
+  const centerCoreRadius = sunburstCenterRadius - 12;
+  const centerProgressRadius = centerCoreRadius + 6;
   const centerProgressCircumference = 2 * Math.PI * centerProgressRadius;
   const centerProgressDashOffset = centerProgressCircumference * (1 - clamp(centerProgress, 0, 100) / 100);
   const CenterIcon = centerGoal ? goalIconComponent(centerGoal) : ChartPie;
   const centerSelected = centerGoal ? selectedId === centerGoal.id : selectedId === centerId;
   const controlState = sunburstDepthControlState(layout.visibleDepth, layout.maxDepth);
+  const centerTargetId = centerGoal?.id || centerId;
+  const lastSegmentClickRef = useRef<{ id: string; time: number } | null>(null);
 
   const changeVisibleDepth = useCallback(
     (delta: 1 | -1) => {
@@ -2345,22 +2591,47 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   const selectSegment = useCallback(
     (segment: SunburstSegmentLayout) => {
       if (segment.collapsed) {
+        lastSegmentClickRef.current = null;
         changeVisibleDepth(1);
         return;
       }
+      const now = window.performance.now();
+      const lastClick = lastSegmentClickRef.current;
+      if (lastClick?.id === segment.node.id && now - lastClick.time <= 360) {
+        lastSegmentClickRef.current = null;
+        onDrill(segment.node.id);
+        return;
+      }
+      lastSegmentClickRef.current = { id: segment.node.id, time: now };
       onSelect(segment.node.id);
     },
-    [changeVisibleDepth, onSelect]
+    [changeVisibleDepth, onDrill, onSelect]
   );
 
   const handleSegmentKey = useCallback(
     (event: React.KeyboardEvent<SVGGElement>, segment: SunburstSegmentLayout) => {
+      if (event.key === "Enter" && event.shiftKey) {
+        event.preventDefault();
+        lastSegmentClickRef.current = null;
+        if (segment.collapsed) {
+          changeVisibleDepth(1);
+          return;
+        }
+        onDrill(segment.node.id);
+        return;
+      }
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
+      lastSegmentClickRef.current = null;
       selectSegment(segment);
     },
-    [selectSegment]
+    [changeVisibleDepth, onDrill, selectSegment]
   );
+
+  const activateCenter = useCallback(() => {
+    if (canAscend) onAscend();
+    onSelect(centerTargetId);
+  }, [canAscend, centerTargetId, onAscend, onSelect]);
 
   const handleDepthControlKey = useCallback(
     (event: React.KeyboardEvent<SVGGElement>, delta: 1 | -1, disabled: boolean) => {
@@ -2378,9 +2649,9 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
       viewBox={`${SUNBURST_VIEW_BOX.x} ${SUNBURST_VIEW_BOX.y} ${SUNBURST_VIEW_BOX.width} ${SUNBURST_VIEW_BOX.height}`}
       role="img"
       aria-labelledby="sunburst-title sunburst-desc"
-      onClick={() => onSelect(centerGoal?.id || centerId)}
+      onClick={() => onSelect(centerTargetId)}
     >
-      <title id="sunburst-title">{centerDisplayTitle}目标旭日图</title>
+      <title id="sunburst-title">{centerDisplayTitle}目标日晷</title>
       <desc id="sunburst-desc">目标按同级重要性分配角度，子目标沿父目标扇区向外展开。</desc>
       <defs>
         <filter id="sunburst-selected-glow" x="-50%" y="-50%" width="200%" height="200%">
@@ -2395,11 +2666,24 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
           <stop offset="62%" stopColor="var(--sun-sky-fade, rgba(255, 244, 224, 0.05))" />
           <stop offset="100%" stopColor="transparent" />
         </radialGradient>
-        <radialGradient id="sunburst-core-glow" gradientUnits="userSpaceOnUse" cx="600" cy="380" r="120">
+        <radialGradient id="sunburst-core-glow" gradientUnits="userSpaceOnUse" cx={goalscapeCenter.x} cy={goalscapeCenter.y - 16} r={centerCoreRadius + 18}>
           <stop offset="0%" stopColor="var(--sun-core-hi, rgba(255, 250, 240, 0.96))" />
-          <stop offset="46%" stopColor="var(--sun-core-mid, rgba(255, 242, 220, 0.42))" />
+          <stop offset="48%" stopColor="var(--sun-core-mid, rgba(255, 242, 220, 0.42))" />
           <stop offset="100%" stopColor="transparent" />
         </radialGradient>
+        <radialGradient id="sunburst-core-body" gradientUnits="userSpaceOnUse" cx={goalscapeCenter.x} cy={goalscapeCenter.y - 26} r={centerCoreRadius + 14}>
+          <stop offset="0%" stopColor="rgba(255, 255, 255, 0.42)" />
+          <stop offset="44%" stopColor="rgba(255, 255, 255, 0.06)" />
+          <stop offset="100%" stopColor="rgba(15, 23, 42, 0.12)" />
+        </radialGradient>
+        <radialGradient id="sunburst-core-glint" gradientUnits="userSpaceOnUse" cx={goalscapeCenter.x - 24} cy={goalscapeCenter.y - 26} r={centerCoreRadius * 0.62}>
+          <stop offset="0%" stopColor="rgba(255, 255, 255, 0.9)" />
+          <stop offset="55%" stopColor="rgba(255, 255, 255, 0.16)" />
+          <stop offset="100%" stopColor="transparent" />
+        </radialGradient>
+        <clipPath id="sunburst-core-clip">
+          <circle cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={centerCoreRadius} />
+        </clipPath>
         <filter id="sunburst-aura-blur" x="-60%" y="-60%" width="220%" height="220%">
           <feGaussianBlur stdDeviation="12" />
         </filter>
@@ -2412,26 +2696,25 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
         className={centerSelected ? "sunburst-center active" : "sunburst-center"}
         role="button"
         tabIndex={0}
-        focusable="true"
         aria-label={`${centerDisplayTitle}，进度 ${centerProgress}%`}
         onClick={(event) => {
           event.stopPropagation();
-          onSelect(centerGoal?.id || centerId);
+          activateCenter();
         }}
         onKeyDown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
-          onSelect(centerGoal?.id || centerId);
+          activateCenter();
         }}
       >
         <title>{centerDisplayTitle}</title>
-        <circle className="sunburst-center-aura" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={sunburstCenterRadius + 16} aria-hidden="true" />
+        <circle className="sunburst-center-aura" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={centerCoreRadius + 22} aria-hidden="true" />
         <circle
           cx={goalscapeCenter.x}
           cy={goalscapeCenter.y}
-          r={sunburstCenterRadius - 10}
+          r={centerCoreRadius}
           className="sunburst-center-core"
-          fillOpacity={0.44 + 0.42 * (centerProgress / 100)}
+          fillOpacity={0.5 + 0.4 * (centerProgress / 100)}
           style={
             {
               "--center-color": layout.center.color,
@@ -2439,7 +2722,11 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
             } as React.CSSProperties & { "--center-color": string; "--center-progress": number }
           }
         />
-        <circle className="sunburst-center-coreglow" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={sunburstCenterRadius - 10} fill="url(#sunburst-core-glow)" aria-hidden="true" />
+        <g clipPath="url(#sunburst-core-clip)" aria-hidden="true">
+          <circle className="sunburst-center-body" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={centerCoreRadius} fill="url(#sunburst-core-body)" />
+          <circle className="sunburst-center-coreglow" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={centerCoreRadius} fill="url(#sunburst-core-glow)" />
+          <circle className="sunburst-center-glint" cx={goalscapeCenter.x - 24} cy={goalscapeCenter.y - 26} r={centerCoreRadius * 0.62} fill="url(#sunburst-core-glint)" />
+        </g>
         <circle className="sunburst-center-progress-track" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={centerProgressRadius} aria-hidden="true" />
         <circle
           className="sunburst-center-progress-ring"
@@ -2451,19 +2738,19 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
           transform={`rotate(-90 ${goalscapeCenter.x} ${goalscapeCenter.y})`}
           aria-hidden="true"
         />
-        <foreignObject x={goalscapeCenter.x - 18} y={goalscapeCenter.y - 38} width="36" height="36" className="sunburst-center-icon-object">
+        <foreignObject x={goalscapeCenter.x - 15} y={goalscapeCenter.y - 31} width="30" height="30" className="sunburst-center-icon-object">
           <div className="sunburst-center-icon">
             <CenterIcon aria-hidden="true" />
           </div>
         </foreignObject>
-        <text className="sunburst-center-title" x={goalscapeCenter.x} y={goalscapeCenter.y + 16}>
+        <text className="sunburst-center-title" x={goalscapeCenter.x} y={goalscapeCenter.y + 12}>
           {goalscapeLabelLines(centerDisplayTitle, 6, 2).map((line, index) => (
-            <tspan key={`${line}-${index}`} x={goalscapeCenter.x} dy={index === 0 ? 0 : 17}>
+            <tspan key={`${line}-${index}`} x={goalscapeCenter.x} dy={index === 0 ? 0 : 15}>
               {line}
             </tspan>
           ))}
         </text>
-        <text className="sunburst-center-progress-text" x={goalscapeCenter.x} y={goalscapeCenter.y + 66}>
+        <text className="sunburst-center-progress-text" x={goalscapeCenter.x} y={goalscapeCenter.y + 43}>
           {centerProgress}%
         </text>
       </g>
@@ -2482,7 +2769,6 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
               className={`sunburst-segment ${depthClass}${active ? " active" : ""}${segment.collapsed ? " collapsed" : ""}`}
               role="button"
               tabIndex={0}
-              focusable="true"
               aria-label={`${segment.node.title}，第 ${segment.depth} 层，进度 ${segment.progress}%${segment.collapsed ? `，折叠 ${segment.hiddenDescendantCount} 个目标` : ""}`}
               style={
                 {
@@ -2524,6 +2810,12 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
         })}
       </g>
 
+      {layout.segments.length === 0 && emptyLabel && (
+        <text className="empty-map-text" x={goalscapeCenter.x} y={goalscapeCenter.y + 138}>
+          {emptyLabel}
+        </text>
+      )}
+
       {layout.maxDepth > 1 && (
         <g className="sunburst-depth-control" aria-label="显示层级密度">
           <path className="sunburst-depth-arc" d={SUNBURST_DEPTH_CONTROL_GEOMETRY.arcPath} aria-hidden="true" />
@@ -2531,7 +2823,6 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
             className={controlState.canIncrease ? "sunburst-depth-button increase" : "sunburst-depth-button increase disabled"}
             role="button"
             tabIndex={controlState.canIncrease ? 0 : -1}
-            focusable={controlState.canIncrease ? "true" : "false"}
             aria-disabled={!controlState.canIncrease}
             aria-label={`放大到第 ${controlState.increaseDepth} 层`}
             onClick={(event) => {
@@ -2548,7 +2839,6 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
             className={controlState.canDecrease ? "sunburst-depth-button decrease" : "sunburst-depth-button decrease disabled"}
             role="button"
             tabIndex={controlState.canDecrease ? 0 : -1}
-            focusable={controlState.canDecrease ? "true" : "false"}
             aria-disabled={!controlState.canDecrease}
             aria-label={`缩小到第 ${controlState.decreaseDepth} 层`}
             onClick={(event) => {
@@ -2575,6 +2865,7 @@ const GoalMap = React.memo(function GoalMap({
   colorOverrides,
   positionOverrides,
   mapContextId,
+  treeRootThemeColor,
   centerId,
   centerTitle,
   centerGoal,
@@ -2592,6 +2883,7 @@ const GoalMap = React.memo(function GoalMap({
   colorOverrides: ColorOverrides;
   positionOverrides: MapPositionOverrides;
   mapContextId: string;
+  treeRootThemeColor: string;
   centerId: string;
   centerTitle: string;
   centerGoal?: GoalNode | null;
@@ -2603,8 +2895,8 @@ const GoalMap = React.memo(function GoalMap({
   onCommitPosition: (id: string, position: MapPosition) => void;
 }) {
   const layouts = useMemo(
-    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, undefined, colorOverrides),
-    [goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, colorOverrides]
+    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, undefined, colorOverrides, treeRootThemeColor),
+    [goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, colorOverrides, treeRootThemeColor]
   );
   const centerNodeId = centerId;
   const centerDisplayTitle = centerTitle;
@@ -2618,6 +2910,14 @@ const GoalMap = React.memo(function GoalMap({
     () => [...layouts].sort((a, b) => a.zIndex - b.zIndex || a.depth - b.depth || a.node.id.localeCompare(b.node.id)),
     [layouts]
   );
+  // 瓶身/液体梯度只依赖颜色；按颜色去重后 defs 数量从 O(节点) 降到 O(色种)
+  const nodeTintKeys = useMemo(() => {
+    const keys = new Map<string, number>();
+    for (const layout of visibleLayouts) {
+      if (!keys.has(layout.color)) keys.set(layout.color, keys.size);
+    }
+    return keys;
+  }, [visibleLayouts]);
   const layoutById = useMemo(() => new Map(visibleLayouts.map((item) => [item.node.id, item])), [visibleLayouts]);
   const parentById = useMemo(() => buildParentMap(goals), [goals]);
   const visibleDepth = layouts[0]?.visibleDepth ?? 2;
@@ -2625,7 +2925,10 @@ const GoalMap = React.memo(function GoalMap({
     () => Array.from(new Set(visibleLayouts.map((layout) => layout.depth))).sort((a, b) => a - b),
     [visibleLayouts]
   );
-  const centerPearlTint = useMemo(() => goalscapeCenterPearlTint(centerNodeId, previewedCenterGoal), [centerNodeId, previewedCenterGoal]);
+  const centerPearlTint = useMemo(
+    () => goalscapeCenterPearlTint(centerNodeId, previewedCenterGoal, centerGoalPreviewColor || treeRootThemeColor),
+    [centerGoalPreviewColor, centerNodeId, previewedCenterGoal, treeRootThemeColor]
+  );
   const centerPearlPath = useMemo(
     () =>
       goalscapeBlobPath(
@@ -2642,7 +2945,7 @@ const GoalMap = React.memo(function GoalMap({
     if (centerVisualMode !== "goal" || !previewedCenterGoal) return null;
     const width = goalscapeTopNodeBaseSize.width;
     const height = goalscapeTopNodeBaseSize.height;
-    const color = goalscapeNodeColor(previewedCenterGoal, "#64748b");
+    const color = centerGoalPreviewColor || treeRootThemeColor || goalscapeNodeColor(previewedCenterGoal, "#64748b");
     const progress = weightedGoalProgress(previewedCenterGoal, importanceOverrides, progressOverrides);
     const metrics = goalscapeNodeVisualMetrics({ width, height, depth: 1 });
     const label = goalscapeLabelLines(previewedCenterGoal.title, goalscapeLabelMaxChars({ width, depth: 1 }, metrics), 2);
@@ -2663,7 +2966,7 @@ const GoalMap = React.memo(function GoalMap({
       rimPath: goalscapeBlobPath(goalscapeCenter.x, goalscapeCenter.y, width - 12, height - 10, 2),
       progressFill: goalscapeProgressFillGeometry(goalscapeCenter.y, height, progress)
     };
-  }, [centerVisualMode, importanceOverrides, previewedCenterGoal, progressOverrides]);
+  }, [centerGoalPreviewColor, centerVisualMode, importanceOverrides, previewedCenterGoal, progressOverrides, treeRootThemeColor]);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{
     id: string;
@@ -2786,20 +3089,17 @@ const GoalMap = React.memo(function GoalMap({
     ? ({
         "--center-glow": centerPearlTint.glow,
         "--node-color": centerGoalVisual.color,
-        "--node-icon-size": `${centerGoalVisual.metrics.iconSize}px`,
-        "--node-icon-glyph-size": `${centerGoalVisual.metrics.iconGlyphSize}px`,
         "--node-title-size": `${centerGoalVisual.metrics.titleSize}px`,
-        "--node-depth-scale": 1
+        "--node-depth-scale": 1,
+        "--core-pulse": goalscapeCorePulse(centerGoalVisual.progress)
       } as React.CSSProperties & {
         "--center-glow": string;
         "--node-color": string;
-        "--node-icon-size": string;
-        "--node-icon-glyph-size": string;
         "--node-title-size": string;
         "--node-depth-scale": number;
+        "--core-pulse": number;
       })
     : ({ "--center-glow": centerPearlTint.glow } as React.CSSProperties & { "--center-glow": string });
-  const CenterGoalIcon = centerGoalVisual?.Icon ?? Network;
 
   return (
     <svg
@@ -2853,6 +3153,15 @@ const GoalMap = React.memo(function GoalMap({
             <feMergeNode in="SourceGraphic" />
           </feMerge>
         </filter>
+        <filter id="goalscape-node-volume" x="-36%" y="-36%" width="172%" height="172%" colorInterpolationFilters="sRGB">
+          <feDropShadow dx="0" dy="7" stdDeviation="5" floodColor="#0f172a" floodOpacity="0.18" />
+        </filter>
+        <linearGradient id="goalscape-liquid-specular" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="rgba(255, 255, 255, 0)" />
+          <stop offset="18%" stopColor="rgba(255, 255, 255, 0.86)" />
+          <stop offset="52%" stopColor="rgba(255, 255, 255, 0.34)" />
+          <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
+        </linearGradient>
         <filter id="goalscape-hub-glow" x="-80%" y="-80%" width="260%" height="260%">
           <feGaussianBlur stdDeviation="16" result="blurOuter" />
           <feGaussianBlur stdDeviation="6" result="blurInner" />
@@ -2926,26 +3235,25 @@ const GoalMap = React.memo(function GoalMap({
             </linearGradient>
           </React.Fragment>
         )}
-        {visibleLayouts.map((layout, index) => {
-          const nodePath = goalscapeBlobPath(layout.x, layout.y, layout.width, layout.height, layout.variant);
-          return (
-            <React.Fragment key={`${layout.node.id}-bottle-defs`}>
-              <clipPath id={`goalscape-node-clip-${index}`}>
-                <path d={nodePath} />
-              </clipPath>
-              <linearGradient id={`goalscape-bottle-gradient-${index}`} x1="18%" y1="5%" x2="86%" y2="96%">
-                <stop offset="0%" stopColor="rgba(255, 255, 255, 0.96)" />
-                <stop offset="52%" stopColor={blend(layout.color, "#ffffff", 0.88)} />
-                <stop offset="100%" stopColor={blend(layout.color, "#ffffff", 0.72)} />
-              </linearGradient>
-              <linearGradient id={`goalscape-liquid-gradient-${index}`} x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor={blend(layout.color, "#ffffff", 0.38)} />
-                <stop offset="58%" stopColor={layout.color} />
-                <stop offset="100%" stopColor={blend(layout.color, "#12233e", 0.18)} />
-              </linearGradient>
-            </React.Fragment>
-          );
-        })}
+        {visibleLayouts.map((layout, index) => (
+          <clipPath key={`${layout.node.id}-clip`} id={`goalscape-node-clip-${index}`}>
+            <path d={goalscapeBlobPath(layout.x, layout.y, layout.width, layout.height, layout.variant)} />
+          </clipPath>
+        ))}
+        {Array.from(nodeTintKeys, ([color, tintIndex]) => (
+          <React.Fragment key={`tint-${color}`}>
+            <linearGradient id={`goalscape-bottle-gradient-${tintIndex}`} x1="18%" y1="5%" x2="86%" y2="96%">
+              <stop offset="0%" stopColor="rgba(255, 255, 255, 0.96)" />
+              <stop offset="52%" stopColor={blend(color, "#ffffff", 0.88)} />
+              <stop offset="100%" stopColor={blend(color, "#ffffff", 0.72)} />
+            </linearGradient>
+            <linearGradient id={`goalscape-liquid-gradient-${tintIndex}`} x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stopColor={blend(color, "#ffffff", 0.38)} />
+              <stop offset="58%" stopColor={color} />
+              <stop offset="100%" stopColor={blend(color, "#12233e", 0.18)} />
+            </linearGradient>
+          </React.Fragment>
+        ))}
       </defs>
 
       <g className="goalscape-orbits" aria-hidden="true">
@@ -2981,7 +3289,6 @@ const GoalMap = React.memo(function GoalMap({
         className={centerGroupClassName}
         role="button"
         tabIndex={0}
-        focusable="true"
         style={centerGroupStyle}
         onClick={(event) => {
           event.stopPropagation();
@@ -2999,7 +3306,7 @@ const GoalMap = React.memo(function GoalMap({
         {centerGoalVisual ? (
           // SYNC: this focused-center body mirrors the per-node renderer below (search
           // "goalscape-node-visual"). They intentionally duplicate the shape/liquid/core/rim/
-          // icon/title visuals — change one and you must mirror it in the other, or the center
+          // title visuals — change one and you must mirror it in the other, or the center
           // silently drifts from the map nodes. (Dedupe into a shared component is a follow-up.)
           <g className="goalscape-node-visual goalscape-center-goal-visual">
             <path className="goalscape-node-halo" d={centerGoalVisual.haloPath} />
@@ -3060,17 +3367,6 @@ const GoalMap = React.memo(function GoalMap({
               d={centerGoalVisual.rimPath}
               strokeOpacity={0.4 + 0.5 * (centerGoalVisual.progress / 100)}
             />
-            <foreignObject
-              x={centerGoalVisual.x - centerGoalVisual.metrics.iconSize / 2}
-              y={centerGoalVisual.y - centerGoalVisual.metrics.iconY}
-              width={centerGoalVisual.metrics.iconSize}
-              height={centerGoalVisual.metrics.iconSize}
-              className="goalscape-icon-object"
-            >
-              <div className="goalscape-icon-wrap">
-                <CenterGoalIcon className="goalscape-node-icon" aria-hidden="true" />
-              </div>
-            </foreignObject>
             <text
               className="goalscape-node-title domain"
               x={centerGoalVisual.x}
@@ -3181,11 +3477,11 @@ const GoalMap = React.memo(function GoalMap({
       {visibleLayouts.map((layout, index) => {
         const active = selectedId === layout.node.id;
         const depthTone = layout.perspectiveScale >= 0.98 ? " front" : layout.opacity <= 0.58 ? " back" : "";
-        const Icon = goalIconComponent(layout.node);
         const visualMetrics = goalscapeNodeVisualMetrics(layout);
         const label = goalscapeLabelLines(layout.node.title, goalscapeLabelMaxChars(layout, visualMetrics), 2);
-        const bottleGradientId = `goalscape-bottle-gradient-${index}`;
-        const liquidGradientId = `goalscape-liquid-gradient-${index}`;
+        const tintIndex = nodeTintKeys.get(layout.color) ?? 0;
+        const bottleGradientId = `goalscape-bottle-gradient-${tintIndex}`;
+        const liquidGradientId = `goalscape-liquid-gradient-${tintIndex}`;
         const clipPathId = `goalscape-node-clip-${index}`;
         const nodePath = goalscapeBlobPath(layout.x, layout.y, layout.width, layout.height, layout.variant);
         const progressFill = goalscapeProgressFillGeometry(layout.y, layout.height, layout.progress);
@@ -3200,22 +3496,19 @@ const GoalMap = React.memo(function GoalMap({
             className={`goalscape-node depth-${layout.depth}${depthTone}${active ? " active" : ""}${draggingId === layout.node.id ? " dragging" : ""}`}
             role="button"
             tabIndex={0}
-            focusable="true"
             aria-label={`${layout.node.title}，进度 ${layout.progress}%${childCount ? `，折叠 ${childCount} 个后代` : ""}`}
               style={
                 {
                   "--node-color": layout.color,
-                  "--node-icon-size": `${visualMetrics.iconSize}px`,
-                  "--node-icon-glyph-size": `${visualMetrics.iconGlyphSize}px`,
                   "--node-title-size": `${visualMetrics.titleSize}px`,
                   "--node-depth-scale": layout.perspectiveScale,
+                  "--core-pulse": goalscapeCorePulse(layout.progress),
                   opacity: layout.opacity
                 } as React.CSSProperties & {
                   "--node-color": string;
-                  "--node-icon-size": string;
-                  "--node-icon-glyph-size": string;
                   "--node-title-size": string;
                   "--node-depth-scale": number;
+                  "--core-pulse": number;
                 }
               }
             onPointerDown={(event) => startNodeDrag(event, layout)}
@@ -3245,7 +3538,7 @@ const GoalMap = React.memo(function GoalMap({
           >
             {/* Inner group with isolated floating animation delay */}
             {/* SYNC: this node-visual body mirrors the focused-center renderer above
-                (centerGoalVisual). Keep the shared shape/liquid/core/rim/icon/title visuals in
+                (centerGoalVisual). Keep the shared shape/liquid/core/rim/title visuals in
                 step across both, or the center node drifts from the map nodes. */}
             <g className="goalscape-node-visual" style={{ animationDelay: `${-index * 0.7}s` }}>
               <path className="goalscape-node-halo" d={goalscapeBlobPath(layout.x, layout.y, layout.width + 20, layout.height + 18, layout.variant)} />
@@ -3314,17 +3607,6 @@ const GoalMap = React.memo(function GoalMap({
                 d={goalscapeBlobPath(layout.x, layout.y, layout.width - 12, layout.height - 10, layout.variant + 2)}
                 strokeOpacity={0.4 + 0.5 * (layout.progress / 100)}
               />
-              <foreignObject
-                x={layout.x - visualMetrics.iconSize / 2}
-                y={layout.y - visualMetrics.iconY}
-                width={visualMetrics.iconSize}
-                height={visualMetrics.iconSize}
-                className="goalscape-icon-object"
-              >
-                <div className="goalscape-icon-wrap">
-                  <Icon className="goalscape-node-icon" aria-hidden="true" />
-                </div>
-              </foreignObject>
               <text
                 className={layout.depth === 1 ? "goalscape-node-title domain" : "goalscape-node-title child"}
                 x={layout.x}
@@ -3367,7 +3649,6 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   importanceOverrides,
   progressOverrides,
   onSelect,
-  onSave,
   onPreviewImportance,
   onPreviewProgress,
   onPreviewThemeColor,
@@ -3381,7 +3662,6 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   importanceOverrides: ImportanceOverrides;
   progressOverrides: ProgressOverrides;
   onSelect: (id: string) => void;
-  onSave: (goal: GoalNode, draft: EditDraft) => Promise<boolean>;
   onPreviewImportance: (goalId: string, value: number) => void;
   onPreviewProgress: (goalId: string, value: number) => void;
   onPreviewThemeColor: (goal: GoalNode, value: string) => void;
@@ -3408,11 +3688,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   const selectedThemeColor = selectedGoal
     ? resolveGoalThemeColor(selectedGoal, themeColorEditable ? goalThemeColorForIndex(selectedTopGoalIndex) : "")
     : "";
-  const editFormId = selectedGoal ? `goal-editor-${encodeURIComponent(selectedGoal.id)}` : "";
-  const saveSelectedGoal = useCallback(
-    (draft: EditDraft) => (selectedGoal ? onSave(selectedGoal, draft) : Promise.resolve(false)),
-    [onSave, selectedGoal]
-  );
+  const listItemMotion = useListItemMotion();
 
   if (!selectedGoal) {
     return (
@@ -3428,18 +3704,26 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         <section className="detail-section">
           <h3>顶层目标</h3>
           <div className="child-list">
-            {topGoals.map((goal) => (
-              <button
-                key={goal.id}
-                type="button"
-                className="child-pill"
-                style={{ "--pill-accent": domainAccentToken(goal.domain || goal.title) } as React.CSSProperties}
-                onClick={() => onSelect(goal.id)}
-              >
-                <span>{goal.title}</span>
-                <small>{rootImportance[goal.id] ?? 0}%</small>
-              </button>
-            ))}
+            <AnimatePresence initial={false}>
+              {topGoals.map((goal) => (
+                <motion.button
+                  key={goal.id}
+                  layout
+                  type="button"
+                  className="child-pill"
+                  style={{ "--pill-accent": domainAccentToken(goal.domain || goal.title) } as React.CSSProperties}
+                  variants={listItemMotion}
+                  initial="initial"
+                  animate="animate"
+                  exit="exit"
+                  transition={listItemTransition}
+                  onClick={() => onSelect(goal.id)}
+                >
+                  <span>{goal.title}</span>
+                  <small>{rootImportance[goal.id] ?? 0}%</small>
+                </motion.button>
+              ))}
+            </AnimatePresence>
             {topGoals.length === 0 && <p className="muted-text">还没有顶层目标。</p>}
           </div>
         </section>
@@ -3466,10 +3750,6 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
           <h2>{selectedGoal.title}</h2>
         </div>
         <div className="detail-head-actions">
-          <button type="submit" form={editFormId} className="primary-button compact-save-button" disabled={saving}>
-            {saving ? <Loader2 className="spin" /> : <Save />}
-            保存
-          </button>
           <span className={`status-badge ${selectedGoal.status}`}>{statusLabels[selectedGoal.status]}</span>
         </div>
       </div>
@@ -3486,7 +3766,6 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
       </div>
 
       <GoalEditForm
-        formId={editFormId}
         goal={selectedGoal}
         cachedDraft={cachedDraft}
         importance={selectedSiblingImportance}
@@ -3498,24 +3777,31 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         onPreviewProgress={onPreviewProgress}
         onPreviewThemeColor={onPreviewThemeColor}
         onDraftChange={onDraftChange}
-        onSave={saveSelectedGoal}
       />
 
       <section className="detail-section subgoal-section">
         <h3>子目标</h3>
         <div className="child-list">
-          {selectedGoal.children.map((child) => (
-            <button
-              key={child.id}
-              type="button"
-              className="child-pill"
-              style={{ "--pill-accent": domainAccentToken(child.domain || child.title) } as React.CSSProperties}
-              onClick={() => onSelect(child.id)}
-            >
-              <span>{child.title}</span>
-              <small>{childImportance[child.id] ?? 0}%</small>
-            </button>
-          ))}
+          <AnimatePresence initial={false}>
+            {selectedGoal.children.map((child) => (
+              <motion.button
+                key={child.id}
+                layout
+                type="button"
+                className="child-pill"
+                style={{ "--pill-accent": domainAccentToken(child.domain || child.title) } as React.CSSProperties}
+                variants={listItemMotion}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+                transition={listItemTransition}
+                onClick={() => onSelect(child.id)}
+              >
+                <span>{child.title}</span>
+                <small>{childImportance[child.id] ?? 0}%</small>
+              </motion.button>
+            ))}
+          </AnimatePresence>
           {selectedGoal.children.length === 0 && <p className="muted-text">还没有子目标。</p>}
         </div>
       </section>
@@ -3538,7 +3824,6 @@ function draftsEqual(first: EditDraft, second: EditDraft) {
 }
 
 const GoalEditForm = React.memo(function GoalEditForm({
-  formId,
   goal,
   cachedDraft,
   importance,
@@ -3549,10 +3834,8 @@ const GoalEditForm = React.memo(function GoalEditForm({
   onPreviewImportance,
   onPreviewProgress,
   onPreviewThemeColor,
-  onDraftChange,
-  onSave
+  onDraftChange
 }: {
-  formId: string;
   goal: GoalNode;
   cachedDraft?: EditDraft;
   importance: number;
@@ -3564,7 +3847,6 @@ const GoalEditForm = React.memo(function GoalEditForm({
   onPreviewProgress: (goalId: string, value: number) => void;
   onPreviewThemeColor: (goal: GoalNode, value: string) => void;
   onDraftChange: (goal: GoalNode, draft: EditDraft, dirty: boolean) => void;
-  onSave: (draft: EditDraft) => Promise<boolean>;
 }) {
   const baselineDraft = useMemo(() => draftFromGoal(goal, importance, themeColor), [goal, importance, themeColor]);
   const initialDraft = cachedDraft ?? baselineDraft;
@@ -3586,16 +3868,7 @@ const GoalEditForm = React.memo(function GoalEditForm({
   };
 
   return (
-    <form
-      id={formId}
-      className="goal-editor"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void onSave(draft).then((saved) => {
-          if (saved) onDraftChange(goal, draft, false);
-        });
-      }}
-    >
+    <div className="goal-editor">
       <section className="editor-section">
         <RangeField
           label="重要性"
@@ -3668,7 +3941,7 @@ const GoalEditForm = React.memo(function GoalEditForm({
           {!primaryGoal && <ActionCandidatesField actions={draft.actions} onChange={(actions) => updateDraft({ actions })} />}
         </div>
       </section>
-    </form>
+    </div>
   );
 });
 

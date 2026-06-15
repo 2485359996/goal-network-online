@@ -6,11 +6,11 @@ export default function LoginPage() {
       <form className="login-panel">
         <h1>目标网络</h1>
         <label>
-          Email
+          邮箱
           <input name="email" type="email" autoComplete="email" required />
         </label>
         <label>
-          Password
+          密码
           <input name="password" type="password" autoComplete="current-password" required />
         </label>
         <div className="login-actions">

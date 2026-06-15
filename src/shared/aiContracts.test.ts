@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  aiFindingSchema,
+  aiWeeklyActionSchema,
   draftGoalRequestSchema,
   draftGoalResponseSchema,
   improveGoalRequestSchema,
   improveGoalResponseSchema,
-  normalizeAiActionCandidates
+  normalizeAiActionCandidates,
+  suggestSubgoalsResponseSchema,
+  suggestWeeklyActionsResponseSchema
 } from "./aiContracts";
 
 const validGoalContext = {
@@ -98,6 +102,47 @@ describe("AI contracts", () => {
     ]);
   });
 
+  it("strips harmless goal-context fields from subgoal suggestions", () => {
+    expect(
+      suggestSubgoalsResponseSchema.parse({
+        subgoals: [
+          {
+            id: "draft-subgoal",
+            title: "Improve release confidence",
+            status: "active",
+            horizon: "medium",
+            priority: 60,
+            progress: 0,
+            directions: ["Clarify release gates"],
+            summary: "Make release readiness measurable."
+          }
+        ]
+      })
+    ).toEqual({
+      subgoals: [
+        {
+          title: "Improve release confidence",
+          horizon: "medium",
+          priority: 60,
+          summary: "Make release readiness measurable."
+        }
+      ]
+    });
+  });
+
+  it("normalizes string weekly-action suggestions into action objects", () => {
+    expect(
+      suggestWeeklyActionsResponseSchema.parse({
+        weeklyActions: ["Draft acceptance checklist", { description: "Review release risks", goal: "Delivery" }]
+      })
+    ).toEqual({
+      weeklyActions: [
+        { description: "Draft acceptance checklist" },
+        { description: "Review release risks", goal: "Delivery" }
+      ]
+    });
+  });
+
   it("accepts draft-goal requests and rejects free-form draft-goal responses", () => {
     const request = {
       mode: "subgoal",
@@ -129,5 +174,20 @@ describe("AI contracts", () => {
         markdown: "# Free-form content"
       }).success
     ).toBe(false);
+  });
+
+  it("finding severity defaults to info when omitted", () => {
+    const result = aiFindingSchema.safeParse({
+      title: "Stale goal",
+      detail: "No progress in 30 days"
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.severity).toBe("info");
+  });
+
+  it("weekly action schema requires description and accepts optional fields", () => {
+    expect(aiWeeklyActionSchema.safeParse({ description: "Review PRs" }).success).toBe(true);
+    expect(aiWeeklyActionSchema.safeParse({ description: "Review PRs", goal: "Delivery", due: "2025-01-13" }).success).toBe(true);
+    expect(aiWeeklyActionSchema.safeParse({ goal: "Delivery" }).success).toBe(false);
   });
 });

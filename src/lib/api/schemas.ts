@@ -35,6 +35,19 @@ export const goalPatchSchema = z.object({
   reviewQuestions: z.array(z.string()).optional()
 });
 
+export const goalMapPositionsClearSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1),
+  mapContextId: z.string().min(1)
+});
+
+export const goalMapPositionsSetSchema = z.object({
+  positions: z.array(z.object({
+    id: z.string().min(1),
+    position: goalMapPositionSchema
+  })).min(1),
+  mapContextId: z.string().min(1)
+});
+
 export const goalCreateSchema = z.object({
   title: z.string().min(1),
   goalMapId: z.string().min(1),
