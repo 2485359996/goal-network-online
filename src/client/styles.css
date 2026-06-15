@@ -210,6 +210,7 @@ h3 {
 
 .app-shell {
   height: 100vh;
+  height: 100dvh;
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -280,7 +281,7 @@ h3 {
   font-weight: 600;
   white-space: nowrap;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
-  transition: all 0.2s ease;
+  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .header-metrics svg,
@@ -408,7 +409,7 @@ h3 {
 .map-pane {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 12px;
   width: 100%;
   height: 100%;
@@ -426,14 +427,20 @@ h3 {
 }
 
 .map-pane-toolbar {
-  position: relative;
+  position: absolute;
   z-index: 8;
-  width: 100%;
+  inset: var(--map-pane-padding) var(--map-pane-padding) auto var(--map-pane-padding);
+  width: auto;
   min-width: 0;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+  pointer-events: none;
+}
+
+.map-pane-toolbar > * {
+  pointer-events: auto;
 }
 
 .map-breadcrumb {
@@ -499,7 +506,7 @@ h3 {
 .map-canvas {
   position: relative;
   z-index: 1;
-  grid-row: 2;
+  grid-row: 1 / -1;
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -778,6 +785,7 @@ h3 {
 
 .scope-map-entry:hover .scope-item-menu-trigger,
 .scope-item.active + .scope-item-menu-wrap .scope-item-menu-trigger,
+.scope-item-menu-trigger:focus-visible,
 .scope-item-menu-trigger[aria-expanded="true"] {
   opacity: 1;
 }
@@ -1006,7 +1014,12 @@ h3 {
   font-weight: 600;
   font-size: 13px;
   border: 1px solid transparent;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition:
+    border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    background 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .icon-button {
@@ -1038,6 +1051,25 @@ h3 {
 .icon-button.compact svg {
   width: 14px;
   height: 14px;
+}
+
+/* 触屏设备上 28px 低于 44px 触控指引；桌面密度不受影响 */
+@media (pointer: coarse) {
+  .icon-button,
+  .primary-button,
+  .secondary-button,
+  .danger-button {
+    min-height: 44px;
+  }
+
+  .icon-button {
+    width: 44px;
+  }
+
+  .icon-button.compact {
+    width: 40px;
+    min-height: 40px;
+  }
 }
 
 .icon-button.danger-icon {
@@ -1149,7 +1181,7 @@ h3 {
   color: var(--ink-soft);
   font-size: 13px;
   font-weight: 500;
-  transition: all 0.15s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .menu-item {
@@ -1526,6 +1558,15 @@ h3 {
   stroke-width: 2.4;
 }
 
+/* 深色面板上 #586884 仅约 3.2:1，13px/760 属小字需 4.5:1，改走主题 token */
+:root[data-theme="dark"] .goal-path {
+  color: var(--ink-soft);
+}
+
+:root[data-theme="dark"] .goal-path svg {
+  color: var(--muted);
+}
+
 .summary {
   color: var(--ink-soft);
   font-size: 15px;
@@ -1640,20 +1681,6 @@ h3 {
   color: var(--muted);
 }
 
-.compact-save-button {
-  min-height: 32px !important;
-  gap: 4px;
-  padding: 0 12px !important;
-  border-radius: 8px;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.compact-save-button svg {
-  width: 14px;
-  height: 14px;
-}
-
 .child-list {
   display: flex;
   flex-wrap: wrap;
@@ -1679,7 +1706,12 @@ h3 {
   font-size: 12px;
   font-weight: 500;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition:
+    border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    background 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* 领域星核：每个子目标 pill 前缀一颗领域色光点，呼应星图里凝聚的星体 */
@@ -1809,7 +1841,7 @@ textarea {
   color: var(--ink);
   outline: none;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 input,
@@ -1830,7 +1862,7 @@ input:focus,
 select:focus,
 textarea:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12), 0 1px 2px rgba(15, 23, 42, 0.02);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 16%, transparent), 0 1px 2px rgba(15, 23, 42, 0.02);
 }
 
 input::placeholder,
@@ -1951,7 +1983,7 @@ textarea::placeholder {
   border-radius: 8px;
   background: var(--surface);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.01);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .action-row:hover {
@@ -1985,7 +2017,7 @@ textarea::placeholder {
   border: 1px solid var(--line-strong);
   border-radius: 4px;
   background: var(--surface);
-  transition: all 0.2s ease;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
 }
 
 .action-check input:checked + span {
@@ -2036,6 +2068,11 @@ textarea::placeholder {
   padding: 20px;
   background: rgba(15, 23, 42, 0.3);
   backdrop-filter: blur(8px);
+}
+
+/* 深色下面板与遮罩同为深靛蓝，0.3 不足以分层，加深一档 */
+:root[data-theme="dark"] .dialog-backdrop {
+  background: rgba(2, 6, 23, 0.55);
 }
 
 .confirm-dialog {
@@ -2095,8 +2132,8 @@ textarea::placeholder {
 .floating-ai-assistant {
   position: fixed;
   z-index: 40;
-  right: 28px;
-  bottom: 28px;
+  right: max(28px, env(safe-area-inset-right));
+  bottom: max(28px, env(safe-area-inset-bottom));
   width: 56px;
   height: 56px;
   display: inline-flex;
@@ -2149,6 +2186,7 @@ textarea::placeholder {
 .ai-dialog {
   width: min(920px, calc(100vw - 32px));
   max-height: min(86vh, 760px);
+  max-height: min(86dvh, 760px);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: 16px;
@@ -2260,8 +2298,35 @@ textarea::placeholder {
   opacity: 0.66;
 }
 
-.ai-suggestion-item input {
+.ai-suggestion-item input[type="checkbox"] {
   margin-top: 3px;
+}
+
+.ai-draft-input,
+.ai-draft-textarea {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.ai-draft-input:focus,
+.ai-draft-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.ai-draft-due {
+  margin-top: 4px;
+  width: auto;
+  max-width: 140px;
 }
 
 .ai-suggestion-item strong,
@@ -2483,8 +2548,8 @@ textarea::placeholder {
 
 @media (max-width: 720px) {
   .floating-ai-assistant {
-    right: 18px;
-    bottom: 18px;
+    right: max(18px, env(safe-area-inset-right));
+    bottom: max(18px, env(safe-area-inset-bottom));
     width: 52px;
     height: 52px;
   }
@@ -2497,6 +2562,7 @@ textarea::placeholder {
   .ai-dialog {
     width: calc(100vw - 24px);
     max-height: min(86vh, 760px);
+    max-height: min(86dvh, 760px);
     padding: 18px;
   }
 
@@ -2551,6 +2617,7 @@ textarea::placeholder {
   .app-shell {
     height: auto;
     min-height: 100vh;
+    min-height: 100dvh;
     overflow: visible;
   }
 
@@ -2597,6 +2664,7 @@ textarea::placeholder {
     height: var(--map-pane-height);
     min-height: 320px;
     max-height: min(620px, calc(100vh - 220px));
+    max-height: min(620px, calc(100dvh - 220px));
     gap: 10px;
   }
 
@@ -2894,6 +2962,7 @@ textarea::placeholder {
   .goalscape-center-astrolabe,
   .goalscape-map.focused .goalscape-orbits,
   .goalscape-map.focused .goalscape-connections,
+  .goal-supernova-sparkle,
   .first-map-cta,
   .goal-supernova-sparkle,
   .spin,
@@ -3176,35 +3245,6 @@ textarea::placeholder {
   stroke: rgba(255, 255, 255, 0.72);
 }
 
-.goalscape-icon-object {
-  overflow: visible;
-}
-
-.goalscape-icon-wrap {
-  width: var(--node-icon-size, 32px);
-  height: var(--node-icon-size, 32px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid rgba(255, 255, 255, 0.68);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.3);
-  color: #fff;
-  box-shadow:
-    inset 0 1px 4px rgba(255, 255, 255, 0.28),
-    0 2px 8px rgba(7, 21, 54, 0.12);
-}
-
-.goalscape-node.depth-2 .goalscape-icon-wrap {
-  margin: 0;
-}
-
-.goalscape-node-icon {
-  width: var(--node-icon-glyph-size, 18px);
-  height: var(--node-icon-glyph-size, 18px);
-  stroke-width: 2.45;
-}
-
 .goalscape-node-title,
 .goalscape-center-title,
 .goalscape-center-progress,
@@ -3381,7 +3421,9 @@ textarea::placeholder {
 /* ── 日晷美化：天光 / 放射光芒 / 日核发光 / 扇区绽放 ───────── */
 .sunburst-sky-wash,
 .sunburst-center-aura,
+.sunburst-center-body,
 .sunburst-center-coreglow,
+.sunburst-center-glint,
 .sunburst-center-progress-track,
 .sunburst-center-progress-ring,
 .sunburst-center-progress-text {
@@ -3397,6 +3439,15 @@ textarea::placeholder {
 }
 
 .sunburst-center-coreglow {
+  mix-blend-mode: screen;
+  opacity: 0.9;
+}
+
+.sunburst-center-body {
+  mix-blend-mode: soft-light;
+}
+
+.sunburst-center-glint {
   mix-blend-mode: screen;
 }
 
@@ -3446,10 +3497,10 @@ textarea::placeholder {
 }
 
 .sunburst-center-core {
-  fill: color-mix(in oklch, var(--center-color, var(--accent)) 52%, var(--surface));
-  stroke: rgba(255, 255, 255, 0.82);
-  stroke-width: 2.4;
-  filter: drop-shadow(0 14px 22px rgba(15, 23, 42, 0.12));
+  fill: color-mix(in oklch, var(--center-color, var(--accent)) 50%, var(--surface));
+  stroke: rgba(255, 255, 255, 0.68);
+  stroke-width: 1.4;
+  filter: drop-shadow(0 7px 15px rgba(15, 23, 42, 0.16));
 }
 
 .sunburst-center-progress-track,
@@ -3460,14 +3511,14 @@ textarea::placeholder {
 
 .sunburst-center-progress-track {
   stroke: color-mix(in oklch, var(--center-color, var(--accent)) 20%, rgba(255, 255, 255, 0.62));
-  stroke-width: 8;
-  opacity: 0.58;
+  stroke-width: 5.5;
+  opacity: 0.5;
 }
 
 .sunburst-center-progress-ring {
   stroke: color-mix(in oklch, var(--center-color, var(--accent)) 74%, var(--accent-strong));
-  stroke-width: 8;
-  filter: drop-shadow(0 0 7px color-mix(in oklch, var(--center-color, var(--accent)) 42%, transparent));
+  stroke-width: 5.5;
+  filter: drop-shadow(0 0 6px color-mix(in oklch, var(--center-color, var(--accent)) 42%, transparent));
   transition: stroke-dashoffset 120ms linear;
 }
 
@@ -3481,7 +3532,7 @@ textarea::placeholder {
 .sunburst-center:hover .sunburst-center-progress-ring,
 .sunburst-center:focus-visible .sunburst-center-progress-ring,
 .sunburst-center.active .sunburst-center-progress-ring {
-  stroke-width: 9.5;
+  stroke-width: 7;
 }
 
 .sunburst-center-icon-object {
@@ -3489,8 +3540,8 @@ textarea::placeholder {
 }
 
 .sunburst-center-icon {
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
   border: 1px solid rgba(255, 255, 255, 0.72);
@@ -3501,9 +3552,9 @@ textarea::placeholder {
 }
 
 .sunburst-center-icon svg {
-  width: 19px;
-  height: 19px;
-  stroke-width: 2.4;
+  width: 15px;
+  height: 15px;
+  stroke-width: 2.2;
 }
 
 .sunburst-center-title,
@@ -3519,16 +3570,16 @@ textarea::placeholder {
 .sunburst-center-title {
   fill: var(--ink);
   stroke: rgba(255, 255, 255, 0.9);
-  stroke-width: 4px;
-  font-size: 15px;
+  stroke-width: 3.4px;
+  font-size: 13.5px;
   font-weight: 820;
 }
 
 .sunburst-center-progress-text {
   fill: var(--ink);
   stroke: rgba(255, 255, 255, 0.88);
-  stroke-width: 3px;
-  font-size: 13px;
+  stroke-width: 2.6px;
+  font-size: 11.5px;
   font-weight: 860;
 }
 
@@ -3639,6 +3690,10 @@ textarea::placeholder {
 
 :root[data-theme="dark"] .sunburst-center-progress-track {
   stroke: rgba(255, 255, 255, 0.18);
+}
+
+:root[data-theme="dark"] .sunburst-center-title {
+  fill: #000000;
 }
 
 :root[data-theme="dark"] .sunburst-center-progress-text {
@@ -3819,7 +3874,9 @@ textarea::placeholder {
 
   .goal-map.goalscape-map {
     width: min(100%, 1120px, calc((100vh - 176px) * 1.579));
+    width: min(100%, 1120px, calc((100dvh - 176px) * 1.579));
     max-height: calc(100vh - 176px);
+    max-height: calc(100dvh - 176px);
     filter: saturate(1.04);
   }
 
@@ -3913,10 +3970,11 @@ body {
 
 .login-shell {
   min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   place-items: center;
-  background: #0f172a;
-  color: #e5e7eb;
+  background: var(--body-background);
+  color: var(--ink);
   padding: 24px;
 }
 
@@ -3925,9 +3983,11 @@ body {
   display: grid;
   gap: 18px;
   padding: 28px;
-  border: 1px solid rgba(148, 163, 184, 0.28);
-  background: #111827;
-  border-radius: 8px;
+  border: 1px solid var(--dream-line);
+  background: var(--dream-panel-strong);
+  border-radius: 12px;
+  box-shadow: var(--dream-shadow);
+  backdrop-filter: blur(20px);
 }
 
 .login-panel h1 {
@@ -3939,14 +3999,15 @@ body {
   display: grid;
   gap: 8px;
   font-size: 14px;
+  color: var(--ink-soft);
 }
 
 .login-panel input {
   min-height: 42px;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  border-radius: 6px;
-  background: #020617;
-  color: #e5e7eb;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
   padding: 0 12px;
 }
 

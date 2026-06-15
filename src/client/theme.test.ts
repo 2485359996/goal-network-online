@@ -78,6 +78,12 @@ describe("theme styles", () => {
     expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.goalscape-center-title\s*{\s*fill:\s*#000000;/);
   });
 
+  it("keeps the sunburst center title black in dark mode", () => {
+    const styles = clientStyles();
+
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.sunburst-center-title\s*{\s*fill:\s*#000000;/);
+  });
+
   it("uses theme tokens for the notes and actions drawer colors", () => {
     const styles = clientStyles();
 
@@ -145,7 +151,7 @@ describe("visual motion contracts", () => {
 
   it("keeps new ambient animation periods slow and reduced-motion aware", () => {
     const styles = clientStyles();
-    const reducedMotionBlock = styles.match(/@media \(prefers-reduced-motion: reduce\)\s*{([\s\S]*?)\n}\n\n@keyframes starfield-drift/)?.[1] ?? "";
+    const reducedMotionBlock = styles.match(/@media \(prefers-reduced-motion: reduce\)\s*{([\s\S]*?)\r?\n}\r?\n\r?\n@keyframes starfield-drift/)?.[1] ?? "";
 
     expect(styles).toMatch(/\.starfield\s*{[\s\S]*animation:\s*starfield-drift 56s linear infinite;/);
     expect(styles).toMatch(/\.starfield::before\s*{[\s\S]*animation:\s*starfield-beam-hue 12s cubic-bezier\(0\.16, 1, 0\.3, 1\) infinite;/);
