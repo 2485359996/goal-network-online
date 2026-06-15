@@ -1,4 +1,5 @@
 import { AlertCircle, CheckCircle2, Loader2, Pencil, Sparkles, X } from "lucide-react";
+import { motion } from "framer-motion";
 import React, { useEffect, useMemo, useState } from "react";
 import { isPrimaryGoalTitle } from "../shared/goalRules";
 import {
@@ -10,6 +11,7 @@ import {
 import type { GoalActionCandidate, GoalCreateInput, GoalMap, GoalNode } from "../shared/types";
 import { goalContextFromNode } from "./AiAssistantDialog";
 import { GOAL_THEME_COLORS, nextGoalThemeColor, resolveGoalThemeColor } from "./goalUtils";
+import { useDialogMotion } from "./motion";
 import { useModalDialog } from "./useModalDialog";
 
 export type CreateGoalMode = "top" | "subgoal" | "sibling";
@@ -240,6 +242,7 @@ export function CreateGoalDialog({
     onDismiss: onCancel,
     canDismiss: !busy
   });
+  const dialogMotion = useDialogMotion();
 
   useEffect(() => {
     setDraft(initialDraft);
@@ -289,8 +292,8 @@ export function CreateGoalDialog({
   };
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog create-goal-dialog" role="dialog" aria-modal="true" aria-labelledby="create-goal-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog create-goal-dialog" role="dialog" aria-modal="true" aria-labelledby="create-goal-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">创建目标</p>
@@ -508,8 +511,8 @@ export function CreateGoalDialog({
             </button>
           </div>
         </form>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 

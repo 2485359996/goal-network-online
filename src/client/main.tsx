@@ -22,6 +22,7 @@ import {
   Leaf,
   ListPlus,
   Loader2,
+  LogIn,
   Monitor,
   Moon,
   Network,
@@ -37,6 +38,7 @@ import {
   Users,
   X
 } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ActionCreateInput,
@@ -52,6 +54,7 @@ import { createBrowserSupabaseClient } from "../lib/supabase/client";
 import { isPrimaryGoalNode, isPrimaryGoalTitle, normalizedGoalTitle } from "../shared/goalRules";
 import { AiAssistantDialog } from "./AiAssistantDialog";
 import { CreateGoalDialog, type CreateGoalDialogContext } from "./CreateGoalDialog";
+import { listItemTransition, useBannerMotion, useDialogMotion, useListItemMotion } from "./motion";
 import { useModalDialog } from "./useModalDialog";
 import {
   applyThemePreference,
@@ -313,6 +316,20 @@ type PendingEdit = {
 };
 type DraftCache = Record<string, EditDraft>;
 
+export class ApiClientError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number
+  ) {
+    super(message);
+    this.name = "ApiClientError";
+  }
+}
+
+export function isUnauthorizedApiError(error: unknown) {
+  return error instanceof ApiClientError && error.status === 401;
+}
+
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers);
   if (options?.body !== undefined && !headers.has("Content-Type")) {
@@ -325,7 +342,7 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    throw new Error(payload.error || `请求失败：${response.status}`);
+    throw new ApiClientError(payload.error || `请求失败：${response.status}`, response.status);
   }
   return response.json() as Promise<T>;
 }
@@ -336,6 +353,10 @@ function nextGoalsRequestId(ref: React.MutableRefObject<number>) {
   return requestId;
 }
 
+function goalscapeCorePulse(progress: number) {
+  return Number((1.02 + clamp(progress, 0, 100) * 0.0009).toFixed(3));
+}
+
 export function GoalApp() {
   const [goals, setGoals] = useState<GoalsResponse>(emptyGoals);
   const [selectedId, setSelectedId] = useState("root");
@@ -344,6 +365,7 @@ export function GoalApp() {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [authRequired, setAuthRequired] = useState(false);
   const [importancePreview, setImportancePreview] = useState<ImportanceOverrides>({});
   const [progressPreview, setProgressPreview] = useState<ProgressOverrides>({});
   const [mapPositionPreview, setMapPositionPreview] = useState<MapPositionPreviewOverrides>({});
@@ -373,6 +395,26 @@ export function GoalApp() {
   const pendingSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const draftCacheRef = useRef<DraftCache>({});
   const goalsRequestIdRef = useRef(0);
+  const noticeTimeoutRef = useRef<number | null>(null);
+  const bannerMotion = useBannerMotion();
+
+  const clearNoticeTimer = useCallback(() => {
+    if (noticeTimeoutRef.current !== null) {
+      window.clearTimeout(noticeTimeoutRef.current);
+      noticeTimeoutRef.current = null;
+    }
+  }, []);
+
+  const showNotice = useCallback((message: string) => {
+    clearNoticeTimer();
+    setNotice(message);
+    noticeTimeoutRef.current = window.setTimeout(() => {
+      setNotice("");
+      noticeTimeoutRef.current = null;
+    }, 2800);
+  }, [clearNoticeTimer]);
+
+  useEffect(() => () => clearNoticeTimer(), [clearNoticeTimer]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -393,12 +435,41 @@ export function GoalApp() {
     applyThemePreference(stored, { systemPrefersDark: mediaQueryMatches("(prefers-color-scheme: dark)") });
   }, []);
 
+  const enterAuthRequiredState = useCallback(() => {
+    clearNoticeTimer();
+    setGoals(emptyGoals);
+    setSelectedId("root");
+    setActiveGoalMapId("");
+    setFocusRootId(null);
+    setAuthRequired(true);
+    setError("");
+    setNotice("");
+    setCreateGoalDialogContext(null);
+    setCreateGoalMapOpen(false);
+    setRenameGoalMapCandidate(null);
+    setDeleteGoalMapCandidate(null);
+    setDeleteCandidate(null);
+    setRenameOpen(false);
+    setAiOpen(false);
+    setAiGoal(null);
+  }, [clearNoticeTimer]);
+
   const loadGoals = useCallback(async () => {
     const requestId = nextGoalsRequestId(goalsRequestIdRef);
-    const next = await api<GoalsResponse>("/api/goals");
-    if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) setGoals(next);
-    return next;
-  }, []);
+    try {
+      const next = await api<GoalsResponse>("/api/goals");
+      if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
+        setGoals(next);
+        setAuthRequired(false);
+      }
+      return next;
+    } catch (nextError) {
+      if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current) && isUnauthorizedApiError(nextError)) {
+        enterAuthRequiredState();
+      }
+      throw nextError;
+    }
+  }, [enterAuthRequiredState]);
 
   const reload = useCallback(async () => {
     const requestId = nextGoalsRequestId(goalsRequestIdRef);
@@ -406,18 +477,23 @@ export function GoalApp() {
       const next = await api<GoalsResponse>("/api/goals");
       if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
         setGoals(next);
+        setAuthRequired(false);
         setError("");
       }
       return next;
     } catch (nextError) {
       if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
-        setError(nextError instanceof Error ? nextError.message : "加载失败");
+        if (isUnauthorizedApiError(nextError)) {
+          enterAuthRequiredState();
+        } else {
+          setError(nextError instanceof Error ? nextError.message : "加载失败");
+        }
       }
       throw nextError;
     } finally {
       if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) setLoading(false);
     }
-  }, []);
+  }, [enterAuthRequiredState]);
 
   useEffect(() => {
     void reload().catch(() => undefined);
@@ -622,16 +698,21 @@ export function GoalApp() {
     setError("");
     try {
       await work();
-      setNotice(message);
-      window.setTimeout(() => setNotice(""), 2400);
+      showNotice(message);
       return true;
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "保存失败");
+      clearNoticeTimer();
+      setNotice("");
+      if (isUnauthorizedApiError(nextError)) {
+        enterAuthRequiredState();
+      } else {
+        setError(nextError instanceof Error ? nextError.message : "保存失败");
+      }
       return false;
     } finally {
       setSaving(false);
     }
-  }, []);
+  }, [clearNoticeTimer, enterAuthRequiredState, showNotice]);
 
   const clearCachedDraft = useCallback((goalId: string, savedDraft?: EditDraft) => {
     const cachedDraft = draftCacheRef.current[goalId];
@@ -971,7 +1052,7 @@ export function GoalApp() {
   const activeCount = useMemo(() => visibleFlatGoals.filter((goal) => goal.status === "active").length, [visibleFlatGoals]);
   const doneCount = useMemo(() => visibleFlatGoals.filter((goal) => goal.status === "done").length, [visibleFlatGoals]);
   const progressAverage = useMemo(() => averageProgress(visibleFlatGoals), [visibleFlatGoals]);
-  const syncStatus = saving ? "保存中" : loading ? "读取中" : error ? "同步异常" : "已同步";
+  const syncStatus = authRequired ? "需要登录" : saving ? "保存中" : loading ? "读取中" : error ? "同步异常" : "已同步";
   const workspaceStyle = useMemo(
     () =>
       ({
@@ -1034,9 +1115,22 @@ export function GoalApp() {
           </button>
         </div>
       </header>
-      {(notice || error) && <div className={error ? "banner error" : "banner"}>{error || notice}</div>}
+      <AnimatePresence initial={false}>
+        {(notice || error) && (
+          <motion.div
+            key={error ? `error-${error}` : `notice-${notice}`}
+            className={error ? "banner error" : "banner"}
+            variants={bannerMotion}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+          >
+            {error || notice}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      <main ref={workspaceRef} className={`map-workspace${resizingClass}`} style={workspaceStyle}>
+      <main ref={workspaceRef} className={`map-workspace${resizingClass}${authRequired ? " auth-required-workspace" : ""}`} style={workspaceStyle}>
         <section
           ref={mapPaneRef}
           className={`map-pane ${scopeListCollapsed ? "scope-collapsed" : "scope-open"}${presentationMode === "sunburst" ? " sunburst-active" : ""}`}
@@ -1109,49 +1203,52 @@ export function GoalApp() {
             </div>
           )}
           <div className="map-canvas">
-            {loading ? (
-            <div className="loading-state">
-              <Loader2 className="spin" />
-              正在读取 Obsidian 目标
-            </div>
-          ) : shouldShowFirstGoalMapCta(goals.goalMaps, loading) ? (
-            <div className="first-map-empty" role="status">
-              <button type="button" className="first-map-cta" onClick={() => setCreateGoalMapOpen(true)} disabled={saving}>
-                <Sparkles />
-                开始你的第一个目标
-              </button>
-            </div>
-          ) : activeGoalMap && presentationMode === "sphere" ? (
-            <GoalMap
-              goals={mapGoals}
-              selectedId={selectedId}
-              importanceOverrides={importancePreview}
-              progressOverrides={progressPreview}
-              positionOverrides={activeMapPositionPreview}
-              mapContextId={mapContextId}
-              centerId={mapCenterId}
-              centerTitle={mapCenterTitle}
-              centerGoal={focusGoal}
-              emptyLabel={mapEmptyLabel}
-              onSelect={selectGoal}
-              onDrill={drillGoal}
-              onAscend={ascendGoal}
-              onPreviewPosition={previewMapPosition}
-              onCommitPosition={saveMapPosition}
-            />
-          ) : activeGoalMap && presentationMode === "sunburst" ? (
-            <SunburstGoalMap
-              goals={visibleTree}
-              selectedId={selectedId}
-              centerId={mapCenterId}
-              centerTitle={goalMapCenterTitle(activeGoalMap)}
-              importanceOverrides={importancePreview}
-              progressOverrides={progressPreview}
-              visibleDepth={sunburstVisibleDepth}
-              onSelect={selectGoal}
-              onVisibleDepthChange={setSunburstVisibleDepth}
-            />
-          ) : null}
+            <div className="starfield" aria-hidden="true" />
+            {authRequired ? (
+              <AuthRequiredState />
+            ) : loading ? (
+              <div className="loading-state">
+                <Loader2 className="spin" />
+                正在读取 Obsidian 目标
+              </div>
+            ) : shouldShowFirstGoalMapCta(goals.goalMaps, loading) ? (
+              <div className="first-map-empty" role="status">
+                <button type="button" className="first-map-cta" onClick={() => setCreateGoalMapOpen(true)} disabled={saving}>
+                  <Sparkles />
+                  开始你的第一个目标
+                </button>
+              </div>
+            ) : activeGoalMap && presentationMode === "sphere" ? (
+              <GoalMap
+                goals={mapGoals}
+                selectedId={selectedId}
+                importanceOverrides={importancePreview}
+                progressOverrides={progressPreview}
+                positionOverrides={activeMapPositionPreview}
+                mapContextId={mapContextId}
+                centerId={mapCenterId}
+                centerTitle={mapCenterTitle}
+                centerGoal={focusGoal}
+                emptyLabel={mapEmptyLabel}
+                onSelect={selectGoal}
+                onDrill={drillGoal}
+                onAscend={ascendGoal}
+                onPreviewPosition={previewMapPosition}
+                onCommitPosition={saveMapPosition}
+              />
+            ) : activeGoalMap && presentationMode === "sunburst" ? (
+              <SunburstGoalMap
+                goals={visibleTree}
+                selectedId={selectedId}
+                centerId={mapCenterId}
+                centerTitle={goalMapCenterTitle(activeGoalMap)}
+                importanceOverrides={importancePreview}
+                progressOverrides={progressPreview}
+                visibleDepth={sunburstVisibleDepth}
+                onSelect={selectGoal}
+                onVisibleDepthChange={setSunburstVisibleDepth}
+              />
+            ) : null}
             {!loading && activeGoalMap && visibleTree.length === 0 && (
             <div className="empty-scape map-empty-scape" role="status">
               <button type="button" className="empty-scape-cta secondary" onClick={openCreateTopGoalDialog} disabled={saving}>
@@ -1163,133 +1260,185 @@ export function GoalApp() {
           </div>
         </section>
 
-        <div
-          className={`pane-resizer ${stackedLayout ? "horizontal" : "vertical"}`}
-          role="separator"
-          aria-label={stackedLayout ? "调整上方地图窗口高度" : "调整右侧窗口宽度"}
-          aria-orientation={stackedLayout ? "horizontal" : "vertical"}
-          aria-valuenow={stackedLayout ? mapPaneHeight : detailWidth}
-          aria-valuemin={stackedLayout ? 320 : 340}
-          aria-valuemax={stackedLayout ? clampMapPaneHeight(Number.MAX_SAFE_INTEGER) : clampDetailWidth(Number.MAX_SAFE_INTEGER)}
-          tabIndex={0}
-          onPointerDown={startPanelResize}
-          onKeyDown={(event) => {
-            if (stackedLayout) {
-              if (event.key === "ArrowUp") {
-                event.preventDefault();
-                nudgeMapPaneHeight(-24);
-              }
-              if (event.key === "ArrowDown") {
-                event.preventDefault();
-                nudgeMapPaneHeight(24);
-              }
-              return;
-            }
+        {!authRequired && (
+          <>
+            <div
+              className={`pane-resizer ${stackedLayout ? "horizontal" : "vertical"}`}
+              role="separator"
+              aria-label={stackedLayout ? "调整上方地图窗口高度" : "调整右侧窗口宽度"}
+              aria-orientation={stackedLayout ? "horizontal" : "vertical"}
+              aria-valuenow={stackedLayout ? mapPaneHeight : detailWidth}
+              aria-valuemin={stackedLayout ? 320 : 340}
+              aria-valuemax={stackedLayout ? clampMapPaneHeight(Number.MAX_SAFE_INTEGER) : clampDetailWidth(Number.MAX_SAFE_INTEGER)}
+              tabIndex={0}
+              onPointerDown={startPanelResize}
+              onKeyDown={(event) => {
+                if (stackedLayout) {
+                  if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    nudgeMapPaneHeight(-24);
+                  }
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    nudgeMapPaneHeight(24);
+                  }
+                  return;
+                }
 
-            if (event.key === "ArrowLeft") {
-              event.preventDefault();
-              nudgeDetailWidth(24);
-            }
-            if (event.key === "ArrowRight") {
-              event.preventDefault();
-              nudgeDetailWidth(-24);
-            }
-          }}
-        >
-          <span className="resizer-grip" aria-hidden="true">
-            {stackedLayout ? <GripHorizontal /> : <GripVertical />}
-          </span>
-        </div>
+                if (event.key === "ArrowLeft") {
+                  event.preventDefault();
+                  nudgeDetailWidth(24);
+                }
+                if (event.key === "ArrowRight") {
+                  event.preventDefault();
+                  nudgeDetailWidth(-24);
+                }
+              }}
+            >
+              <span className="resizer-grip" aria-hidden="true">
+                {stackedLayout ? <GripHorizontal /> : <GripVertical />}
+              </span>
+            </div>
 
-        <GoalDetailPanel
-          selectedGoal={selectedGoal}
-          activeGoalMap={activeGoalMap}
-          cachedDraft={selectedGoal ? draftCacheRef.current[selectedGoal.id] : undefined}
-          topGoals={visibleTree}
-          saving={saving}
-          importanceOverrides={importancePreview}
-          progressOverrides={progressPreview}
-          onSelect={selectGoal}
-          onSave={saveGoal}
-          onPreviewImportance={previewImportance}
-          onPreviewProgress={previewProgress}
-          onDraftChange={registerPendingEdit}
-        />
+            <GoalDetailPanel
+              selectedGoal={selectedGoal}
+              activeGoalMap={activeGoalMap}
+              cachedDraft={selectedGoal ? draftCacheRef.current[selectedGoal.id] : undefined}
+              topGoals={visibleTree}
+              saving={saving}
+              importanceOverrides={importancePreview}
+              progressOverrides={progressPreview}
+              onSelect={selectGoal}
+              onSave={saveGoal}
+              onPreviewImportance={previewImportance}
+              onPreviewProgress={previewProgress}
+              onDraftChange={registerPendingEdit}
+            />
+          </>
+        )}
       </main>
       <FloatingAiAssistantButton goal={floatingAiGoal} open={aiOpen} onOpen={openAiAssistant} />
-      {aiOpen && activeAiGoal && (
-        <AiAssistantDialog
-          goal={activeAiGoal}
-          flatGoals={goals.flatGoals}
-          saving={saving}
-          onClose={() => setAiOpen(false)}
-          onBeforeGenerate={queuePendingEditSave}
-          onPatchGoal={patchGoalFromAi}
-          onCreateGoal={createGoal}
-          onCreateWeeklyAction={createWeeklyActionFromAi}
-        />
-      )}
-      {createGoalDialogContext && (
-        <CreateGoalDialog
-          context={createGoalDialogContext}
-          saving={saving}
-          onCancel={() => setCreateGoalDialogContext(null)}
-          onBeforeSubmit={queuePendingEditSave}
-          onBeforeGenerate={queuePendingEditSave}
-          onCreate={createGoal}
-        />
-      )}
-      <RenameGoalDialog
-        goal={renameOpen ? selectedGoalFull ?? null : null}
-        saving={saving}
-        onCancel={() => setRenameOpen(false)}
-        onConfirm={(title) => void submitRename(title)}
-      />
-      <GoalMapNameDialog
-        open={createGoalMapOpen}
-        title="新建目标地图"
-        initialName=""
-        saving={saving}
-        submitLabel="创建"
-        onCancel={() => setCreateGoalMapOpen(false)}
-        onConfirm={(name) => {
-          void createGoalMap(name).then((created) => {
-            if (created) setCreateGoalMapOpen(false);
-          });
-        }}
-      />
-      <GoalMapNameDialog
-        open={Boolean(renameGoalMapCandidate)}
-        title="重命名目标地图"
-        initialName={renameGoalMapCandidate?.name || ""}
-        saving={saving}
-        submitLabel="重命名"
-        onCancel={() => setRenameGoalMapCandidate(null)}
-        onConfirm={(name) => {
-          if (!renameGoalMapCandidate) return;
-          void patchGoalMap(renameGoalMapCandidate, name).then((renamed) => {
-            if (renamed) setRenameGoalMapCandidate(null);
-          });
-        }}
-      />
-      <DeleteGoalMapDialog
-        goalMap={deleteGoalMapCandidate}
-        goalCount={deleteGoalMapCandidate ? goalMapCounts[deleteGoalMapCandidate.id] ?? 0 : 0}
-        saving={saving}
-        onCancel={() => setDeleteGoalMapCandidate(null)}
-        onConfirm={() => {
-          if (!deleteGoalMapCandidate) return;
-          void deleteGoalMap(deleteGoalMapCandidate).then((deleted) => {
-            if (deleted) setDeleteGoalMapCandidate(null);
-          });
-        }}
-      />
-      <DeleteGoalDialog
-        goal={deleteCandidate}
-        saving={saving}
-        onCancel={() => setDeleteCandidate(null)}
-        onConfirm={() => deleteCandidate && void deleteGoal(deleteCandidate)}
-      />
+      <AnimatePresence initial={false}>
+        {aiOpen && activeAiGoal && (
+          <AiAssistantDialog
+            key={`ai-${activeAiGoal.id}`}
+            goal={activeAiGoal}
+            flatGoals={goals.flatGoals}
+            saving={saving}
+            onClose={() => setAiOpen(false)}
+            onBeforeGenerate={queuePendingEditSave}
+            onPatchGoal={patchGoalFromAi}
+            onCreateGoal={createGoal}
+            onCreateWeeklyAction={createWeeklyActionFromAi}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {createGoalDialogContext && (
+          <CreateGoalDialog
+            key={`create-goal-${createGoalDialogContext.goalMap.id}-${createGoalDialogContext.parentGoal?.id ?? "top"}-${createGoalDialogContext.sourceGoal?.id ?? "new"}-${createGoalDialogContext.mode}`}
+            context={createGoalDialogContext}
+            saving={saving}
+            onCancel={() => setCreateGoalDialogContext(null)}
+            onBeforeSubmit={queuePendingEditSave}
+            onBeforeGenerate={queuePendingEditSave}
+            onCreate={createGoal}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {renameOpen && selectedGoalFull && (
+          <RenameGoalDialog
+            key={`rename-${selectedGoalFull.id}`}
+            goal={selectedGoalFull}
+            saving={saving}
+            onCancel={() => setRenameOpen(false)}
+            onConfirm={(title) => void submitRename(title)}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {createGoalMapOpen && (
+          <GoalMapNameDialog
+            key="create-goal-map"
+            open
+            title="新建目标地图"
+            initialName=""
+            saving={saving}
+            submitLabel="创建"
+            onCancel={() => setCreateGoalMapOpen(false)}
+            onConfirm={(name) => {
+              void createGoalMap(name).then((created) => {
+                if (created) setCreateGoalMapOpen(false);
+              });
+            }}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {renameGoalMapCandidate && (
+          <GoalMapNameDialog
+            key={`rename-goal-map-${renameGoalMapCandidate.id}`}
+            open
+            title="重命名目标地图"
+            initialName={renameGoalMapCandidate.name}
+            saving={saving}
+            submitLabel="重命名"
+            onCancel={() => setRenameGoalMapCandidate(null)}
+            onConfirm={(name) => {
+              void patchGoalMap(renameGoalMapCandidate, name).then((renamed) => {
+                if (renamed) setRenameGoalMapCandidate(null);
+              });
+            }}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {deleteGoalMapCandidate && (
+          <DeleteGoalMapDialog
+            key={`delete-goal-map-${deleteGoalMapCandidate.id}`}
+            goalMap={deleteGoalMapCandidate}
+            goalCount={goalMapCounts[deleteGoalMapCandidate.id] ?? 0}
+            saving={saving}
+            onCancel={() => setDeleteGoalMapCandidate(null)}
+            onConfirm={() => {
+              void deleteGoalMap(deleteGoalMapCandidate).then((deleted) => {
+                if (deleted) setDeleteGoalMapCandidate(null);
+              });
+            }}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence initial={false}>
+        {deleteCandidate && (
+          <DeleteGoalDialog
+            key={`delete-${deleteCandidate.id}`}
+            goal={deleteCandidate}
+            saving={saving}
+            onCancel={() => setDeleteCandidate(null)}
+            onConfirm={() => void deleteGoal(deleteCandidate)}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function AuthRequiredState() {
+  return (
+    <div className="auth-required-state" role="status" aria-live="polite">
+      <div className="auth-required-orb" aria-hidden="true">
+        <LogIn />
+      </div>
+      <div>
+        <p className="eyebrow">需要登录</p>
+        <h2>登录后查看你的目标星图</h2>
+        <p>当前会话无法读取 Obsidian 目标。重新登录后，星图会回到这里继续展开。</p>
+      </div>
+      <a className="primary-button auth-login-link" href="/login">
+        <LogIn aria-hidden="true" />
+        前往登录
+      </a>
     </div>
   );
 }
@@ -1429,6 +1578,7 @@ function MapScopeList({
 }) {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const openMenuRef = useRef<HTMLDivElement | null>(null);
+  const listItemMotion = useListItemMotion();
 
   useEffect(() => {
     if (collapsed) setOpenMenuId(null);
@@ -1468,67 +1618,79 @@ function MapScopeList({
       {!collapsed && (
         <div className="scope-content">
           <p className="scope-title">目标地图</p>
-          {goalMaps.map((goalMap) => {
-            const active = activeGoalMapId === goalMap.id;
-            const menuOpen = openMenuId === goalMap.id;
-            return (
-              <div key={goalMap.id} className="scope-map-entry" style={{ "--scope-accent": "var(--accent)" } as React.CSSProperties}>
-                <button
-                  type="button"
-                  className={active ? "scope-item active" : "scope-item"}
-                  onClick={() => onSelectMap(goalMap.id)}
+          <AnimatePresence initial={false}>
+            {goalMaps.map((goalMap) => {
+              const active = activeGoalMapId === goalMap.id;
+              const menuOpen = openMenuId === goalMap.id;
+              return (
+                <motion.div
+                  key={goalMap.id}
+                  layout
+                  className="scope-map-entry"
+                  style={{ "--scope-accent": "var(--accent)" } as React.CSSProperties}
+                  variants={listItemMotion}
+                  initial="initial"
+                  animate="animate"
+                  exit="exit"
+                  transition={listItemTransition}
                 >
-                  <span>{goalMap.name}</span>
-                  <small>{goalCounts[goalMap.id] ?? 0} 个目标</small>
-                </button>
-                <div className="scope-item-menu-wrap" ref={menuOpen ? openMenuRef : null}>
                   <button
                     type="button"
-                    className="scope-item-menu-trigger"
-                    title="目标地图操作"
-                    aria-label={`目标地图「${goalMap.name}」操作`}
-                    aria-haspopup="menu"
-                    aria-expanded={menuOpen}
-                    disabled={saving}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setOpenMenuId((current) => (current === goalMap.id ? null : goalMap.id));
-                    }}
+                    className={active ? "scope-item active" : "scope-item"}
+                    onClick={() => onSelectMap(goalMap.id)}
                   >
-                    <Ellipsis />
+                    <span>{goalMap.name}</span>
+                    <small>{goalCounts[goalMap.id] ?? 0} 个目标</small>
                   </button>
-                  {menuOpen && (
-                    <div className="quick-menu scope-map-menu" role="menu">
-                      <button
-                        type="button"
-                        className="menu-item"
-                        disabled={saving}
-                        onClick={() => {
-                          setOpenMenuId(null);
-                          onRenameMap(goalMap);
-                        }}
-                      >
-                        <Pencil />
-                        重命名地图
-                      </button>
-                      <button
-                        type="button"
-                        className="menu-item danger-menu-item"
-                        disabled={saving}
-                        onClick={() => {
-                          setOpenMenuId(null);
-                          onDeleteMap(goalMap);
-                        }}
-                      >
-                        <Trash2 />
-                        删除地图
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+                  <div className="scope-item-menu-wrap" ref={menuOpen ? openMenuRef : null}>
+                    <button
+                      type="button"
+                      className="scope-item-menu-trigger"
+                      title="目标地图操作"
+                      aria-label={`目标地图「${goalMap.name}」操作`}
+                      aria-haspopup="menu"
+                      aria-expanded={menuOpen}
+                      disabled={saving}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setOpenMenuId((current) => (current === goalMap.id ? null : goalMap.id));
+                      }}
+                    >
+                      <Ellipsis />
+                    </button>
+                    {menuOpen && (
+                      <div className="quick-menu scope-map-menu" role="menu">
+                        <button
+                          type="button"
+                          className="menu-item"
+                          disabled={saving}
+                          onClick={() => {
+                            setOpenMenuId(null);
+                            onRenameMap(goalMap);
+                          }}
+                        >
+                          <Pencil />
+                          重命名地图
+                        </button>
+                        <button
+                          type="button"
+                          className="menu-item danger-menu-item"
+                          disabled={saving}
+                          onClick={() => {
+                            setOpenMenuId(null);
+                            onDeleteMap(goalMap);
+                          }}
+                        >
+                          <Trash2 />
+                          删除地图
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              );
+            })}
+          </AnimatePresence>
           <div className="scope-divider" />
           <button type="button" className="scope-create" onClick={onCreateMap}>
             <Plus />
@@ -1556,7 +1718,7 @@ function PresentationModeToggle({
         onClick={() => onChange("sphere")}
       >
         <Network aria-hidden="true" />
-        <span>目标圆球</span>
+        <span>目标星球</span>
       </button>
       <button
         type="button"
@@ -1565,7 +1727,7 @@ function PresentationModeToggle({
         onClick={() => onChange("sunburst")}
       >
         <ChartPie aria-hidden="true" />
-        <span>目标旭日图</span>
+        <span>目标日晷</span>
       </button>
     </div>
   );
@@ -1814,11 +1976,12 @@ function DeleteGoalDialogBody({
     onDismiss: onCancel,
     canDismiss: !saving
   });
+  const dialogMotion = useDialogMotion();
   const childCount = collectDescendants(goal).size;
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">删除目标</p>
@@ -1840,8 +2003,8 @@ function DeleteGoalDialogBody({
             彻底删除
           </button>
         </div>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 
@@ -1881,10 +2044,11 @@ function DeleteGoalMapDialogBody({
     onDismiss: onCancel,
     canDismiss: !saving
   });
+  const dialogMotion = useDialogMotion();
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-goal-map-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-goal-map-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">删除目标地图</p>
@@ -1906,8 +2070,8 @@ function DeleteGoalMapDialogBody({
             彻底删除
           </button>
         </div>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 
@@ -1960,6 +2124,7 @@ function GoalMapNameDialogBody({
     onDismiss: onCancel,
     canDismiss: !saving
   });
+  const dialogMotion = useDialogMotion();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState(initialName);
 
@@ -1975,8 +2140,8 @@ function GoalMapNameDialogBody({
   const canSubmit = !saving && trimmed.length > 0 && trimmed !== initialName.trim();
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="goal-map-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="goal-map-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">目标地图</p>
@@ -2014,8 +2179,8 @@ function GoalMapNameDialogBody({
             </button>
           </div>
         </form>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 
@@ -2049,6 +2214,7 @@ function RenameGoalDialogBody({
     onDismiss: onCancel,
     canDismiss: !saving
   });
+  const dialogMotion = useDialogMotion();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [title, setTitle] = useState(goal.title);
 
@@ -2063,8 +2229,8 @@ function RenameGoalDialogBody({
   const canSubmit = !saving && trimmed.length > 0 && trimmed !== goal.title;
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick}>
-      <section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title">
+    <motion.div className="dialog-backdrop" role="presentation" onPointerDown={onBackdropPointerDown} onClick={onBackdropClick} variants={dialogMotion.backdrop} initial="initial" animate="animate" exit="exit">
+      <motion.section ref={dialogRef} tabIndex={-1} className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title" variants={dialogMotion.panel}>
         <div className="dialog-head">
           <div>
             <p className="eyebrow">重命名目标</p>
@@ -2102,8 +2268,8 @@ function RenameGoalDialogBody({
             </button>
           </div>
         </form>
-      </section>
-    </div>
+      </motion.section>
+    </motion.div>
   );
 }
 
@@ -2340,7 +2506,7 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
       aria-labelledby="sunburst-title sunburst-desc"
       onClick={() => onSelect(centerGoal?.id || centerId)}
     >
-      <title id="sunburst-title">{centerDisplayTitle}目标旭日图</title>
+      <title id="sunburst-title">{centerDisplayTitle}目标日晷</title>
       <desc id="sunburst-desc">目标按同级重要性分配角度，子目标沿父目标扇区向外展开。</desc>
       <defs>
         <filter id="sunburst-selected-glow" x="-50%" y="-50%" width="200%" height="200%">
@@ -2742,7 +2908,8 @@ const GoalMap = React.memo(function GoalMap({
         "--node-icon-size": `${centerGoalVisual.metrics.iconSize}px`,
         "--node-icon-glyph-size": `${centerGoalVisual.metrics.iconGlyphSize}px`,
         "--node-title-size": `${centerGoalVisual.metrics.titleSize}px`,
-        "--node-depth-scale": 1
+        "--node-depth-scale": 1,
+        "--core-pulse": goalscapeCorePulse(centerGoalVisual.progress)
       } as React.CSSProperties & {
         "--center-glow": string;
         "--node-color": string;
@@ -2750,6 +2917,7 @@ const GoalMap = React.memo(function GoalMap({
         "--node-icon-glyph-size": string;
         "--node-title-size": string;
         "--node-depth-scale": number;
+        "--core-pulse": number;
       })
     : ({ "--center-glow": centerPearlTint.glow } as React.CSSProperties & { "--center-glow": string });
   const CenterGoalIcon = centerGoalVisual?.Icon ?? Network;
@@ -2806,6 +2974,15 @@ const GoalMap = React.memo(function GoalMap({
             <feMergeNode in="SourceGraphic" />
           </feMerge>
         </filter>
+        <filter id="goalscape-node-volume" x="-36%" y="-36%" width="172%" height="172%" colorInterpolationFilters="sRGB">
+          <feDropShadow dx="0" dy="7" stdDeviation="5" floodColor="#0f172a" floodOpacity="0.18" />
+        </filter>
+        <linearGradient id="goalscape-liquid-specular" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="rgba(255, 255, 255, 0)" />
+          <stop offset="18%" stopColor="rgba(255, 255, 255, 0.86)" />
+          <stop offset="52%" stopColor="rgba(255, 255, 255, 0.34)" />
+          <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
+        </linearGradient>
         <filter id="goalscape-hub-glow" x="-80%" y="-80%" width="260%" height="260%">
           <feGaussianBlur stdDeviation="16" result="blurOuter" />
           <feGaussianBlur stdDeviation="6" result="blurInner" />
@@ -3162,6 +3339,7 @@ const GoalMap = React.memo(function GoalMap({
                   "--node-icon-glyph-size": `${visualMetrics.iconGlyphSize}px`,
                   "--node-title-size": `${visualMetrics.titleSize}px`,
                   "--node-depth-scale": layout.perspectiveScale,
+                  "--core-pulse": goalscapeCorePulse(layout.progress),
                   opacity: layout.opacity
                 } as React.CSSProperties & {
                   "--node-color": string;
@@ -3169,6 +3347,7 @@ const GoalMap = React.memo(function GoalMap({
                   "--node-icon-glyph-size": string;
                   "--node-title-size": string;
                   "--node-depth-scale": number;
+                  "--core-pulse": number;
                 }
               }
             onPointerDown={(event) => startNodeDrag(event, layout)}
@@ -3359,6 +3538,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
     (draft: EditDraft) => (selectedGoal ? onSave(selectedGoal, draft) : Promise.resolve(false)),
     [onSave, selectedGoal]
   );
+  const listItemMotion = useListItemMotion();
 
   if (!selectedGoal) {
     return (
@@ -3374,18 +3554,26 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         <section className="detail-section">
           <h3>顶层目标</h3>
           <div className="child-list">
-            {topGoals.map((goal) => (
-              <button
-                key={goal.id}
-                type="button"
-                className="child-pill"
-                style={{ "--pill-accent": domainAccentToken(goal.domain || goal.title) } as React.CSSProperties}
-                onClick={() => onSelect(goal.id)}
-              >
-                <span>{goal.title}</span>
-                <small>{rootImportance[goal.id] ?? 0}%</small>
-              </button>
-            ))}
+            <AnimatePresence initial={false}>
+              {topGoals.map((goal) => (
+                <motion.button
+                  key={goal.id}
+                  layout
+                  type="button"
+                  className="child-pill"
+                  style={{ "--pill-accent": domainAccentToken(goal.domain || goal.title) } as React.CSSProperties}
+                  variants={listItemMotion}
+                  initial="initial"
+                  animate="animate"
+                  exit="exit"
+                  transition={listItemTransition}
+                  onClick={() => onSelect(goal.id)}
+                >
+                  <span>{goal.title}</span>
+                  <small>{rootImportance[goal.id] ?? 0}%</small>
+                </motion.button>
+              ))}
+            </AnimatePresence>
             {topGoals.length === 0 && <p className="muted-text">还没有顶层目标。</p>}
           </div>
         </section>
@@ -3447,18 +3635,26 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
       <section className="detail-section subgoal-section">
         <h3>子目标</h3>
         <div className="child-list">
-          {selectedGoal.children.map((child) => (
-            <button
-              key={child.id}
-              type="button"
-              className="child-pill"
-              style={{ "--pill-accent": domainAccentToken(child.domain || child.title) } as React.CSSProperties}
-              onClick={() => onSelect(child.id)}
-            >
-              <span>{child.title}</span>
-              <small>{childImportance[child.id] ?? 0}%</small>
-            </button>
-          ))}
+          <AnimatePresence initial={false}>
+            {selectedGoal.children.map((child) => (
+              <motion.button
+                key={child.id}
+                layout
+                type="button"
+                className="child-pill"
+                style={{ "--pill-accent": domainAccentToken(child.domain || child.title) } as React.CSSProperties}
+                variants={listItemMotion}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+                transition={listItemTransition}
+                onClick={() => onSelect(child.id)}
+              >
+                <span>{child.title}</span>
+                <small>{childImportance[child.id] ?? 0}%</small>
+              </motion.button>
+            ))}
+          </AnimatePresence>
           {selectedGoal.children.length === 0 && <p className="muted-text">还没有子目标。</p>}
         </div>
       </section>
