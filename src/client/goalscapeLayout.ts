@@ -26,6 +26,7 @@ import {
   resolveGoalThemeColor,
   titleFromLink,
   weightedGoalProgress,
+  type ColorOverrides,
   type ImportanceOverrides,
   type ProgressOverrides
 } from "./goalUtils";
@@ -345,6 +346,10 @@ export function goalscapeNodeColor(goal: GoalNode, fallback: string) {
   return normalizeHexColor(goal.color) || domainBaseColor(goal.domain || goal.title) || fallback;
 }
 
+function resolveGoalPreviewColor(goal: GoalNode, fallback: string, colorOverrides: ColorOverrides) {
+  return normalizeHexColor(colorOverrides[goal.id]) || resolveGoalThemeColor(goal, fallback);
+}
+
 const goalscapeMaxRenderedTreeDepth = 2;
 const goalscapeMinOrbitGap = 90;
 const goalscapeCollapseMinWidth = 52;
@@ -400,7 +405,8 @@ export function buildSunburstLayout(
   goals: GoalNode[],
   importanceOverrides: ImportanceOverrides,
   progressOverrides: ProgressOverrides,
-  requestedVisibleDepth = DEFAULT_SUNBURST_VISIBLE_DEPTH
+  requestedVisibleDepth = DEFAULT_SUNBURST_VISIBLE_DEPTH,
+  colorOverrides: ColorOverrides = {}
 ): SunburstLayout {
   const hasSyntheticRoot = goals.length !== 1;
   const maxDepth = countTreeDepth(goals);
@@ -412,7 +418,7 @@ export function buildSunburstLayout(
         title: centerGoal.title,
         depth: 1,
         radius: sunburstCenterRadius,
-        color: resolveGoalThemeColor(centerGoal, goalThemeColorForIndex(0)),
+        color: resolveGoalPreviewColor(centerGoal, goalThemeColorForIndex(0), colorOverrides),
         progress: weightedGoalProgress(centerGoal, importanceOverrides, progressOverrides),
         node: centerGoal
       }
@@ -458,7 +464,7 @@ export function buildSunburstLayout(
       const childEndAngle = index === children.length - 1 ? endAngle : cursor + adjustedSpans[index];
       const ring = sunburstRingForDepth(depth, visibleDepth, hasSyntheticRoot);
       const fallbackColor = parentId === "root" ? goalThemeColorForIndex(index) : inheritedColor;
-      const color = resolveGoalThemeColor(child, fallbackColor);
+      const color = resolveGoalPreviewColor(child, fallbackColor, colorOverrides);
       const segment: SunburstSegmentLayout = {
         id: child.id,
         node: child,
@@ -664,7 +670,8 @@ export function buildGoalscapeLayout(
   progressOverrides: ProgressOverrides,
   positionOverrides: MapPositionOverrides = {},
   mapContextId = "root",
-  selectedId?: string
+  selectedId?: string,
+  colorOverrides: ColorOverrides = {}
 ) {
   void selectedId;
   const renderDepthCounts = countGoalscapeRenderDepths(goals);
@@ -695,7 +702,7 @@ export function buildGoalscapeLayout(
       );
       const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? children.length, depth, visibleDepth);
       const childSize = goalscapeChildNodeSize(parentLayout, childIndex, depth, densityScale, 1);
-      const childColor = resolveGoalThemeColor(child, parentLayout.color);
+      const childColor = resolveGoalPreviewColor(child, parentLayout.color, colorOverrides);
       const childLayout: GoalscapeNodeLayout = {
         node: child,
         parentId: parentLayout.node.id,
@@ -732,7 +739,7 @@ export function buildGoalscapeLayout(
     const position = constrainGoalscapePositionToOrbit(goalMapPosition(goal, fallback, positionOverrides, mapContextId), orbit);
     const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? goals.length, depth, visibleDepth);
     const size = goalscapeTopNodeSize(densityScale, 1);
-    const color = resolveGoalThemeColor(goal, goalThemeColorForIndex(index));
+    const color = resolveGoalPreviewColor(goal, goalThemeColorForIndex(index), colorOverrides);
     const importance = topImportance[goal.id] ?? 0;
     const layout: GoalscapeNodeLayout = {
       node: goal,

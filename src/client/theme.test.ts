@@ -103,4 +103,21 @@ describe("floating AI assistant", () => {
     expect(styles).toMatch(/\.dialog-backdrop\s*{[\s\S]*z-index:\s*50;/);
     expect(styles).not.toMatch(/\.ai-entry-row/);
   });
+
+  it("starts from the bottom-right default instead of restoring stale drag coordinates", () => {
+    const source = clientMainSource();
+
+    expect(source).toContain("setPosition(defaultFloatingAiAssistantPosition(size));");
+    expect(source).not.toContain("readFloatingAiAssistantPosition(size) ?? defaultFloatingAiAssistantPosition(size)");
+    expect(source).toContain("writeFloatingAiAssistantPosition(nextPosition)");
+  });
+});
+
+describe("presentation mode labels", () => {
+  it("names the sphere view as the goal planet", () => {
+    const source = clientMainSource();
+
+    expect(source).toContain("目标星球");
+    expect(source).not.toContain("目标圆球");
+  });
 });

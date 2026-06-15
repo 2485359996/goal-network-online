@@ -364,6 +364,43 @@ describe("goalscape layout", () => {
     expect(childLayout?.color).toBe(GOAL_THEME_COLORS[0].value);
   });
 
+  it("maps live theme color previews to first-level goals and descendants in the sphere map", () => {
+    const previewColor = GOAL_THEME_COLORS[4].value;
+    const roots = [
+      {
+        ...goal("alpha"),
+        color: GOAL_THEME_COLORS[0].value,
+        children: [{ ...goal("alpha-child"), color: GOAL_THEME_COLORS[0].value }]
+      }
+    ];
+    const layouts = buildGoalscapeLayout(roots, {}, {}, {}, "root", undefined, {
+      alpha: previewColor,
+      "alpha-child": previewColor
+    });
+
+    expect(layouts.find((layout) => layout.node.id === "alpha")?.color).toBe(previewColor);
+    expect(layouts.find((layout) => layout.node.id === "alpha-child")?.color).toBe(previewColor);
+  });
+
+  it("exposes the seven theme colors in the goal detail panel for first-level goals", () => {
+    const source = clientMainSource();
+
+    expect(source).toContain("themeColorEditable");
+    expect(source).toContain("GOAL_THEME_COLORS.map((color)");
+    expect(source).toContain('name="goal-editor-theme-color"');
+    expect(source).toContain("detail-goal-color-option");
+    expect(source).toContain("colorPreview");
+    expect(source).toContain("onPreviewThemeColor");
+  });
+
+  it("saves first-level goal theme color changes to all descendants", () => {
+    const source = clientMainSource();
+
+    expect(source).toContain("collectDescendants(goal)");
+    expect(source).toContain("themeColorChanged");
+    expect(source).toContain("body: JSON.stringify({ color: nextThemeColor })");
+  });
+
   it("fans child goals around the parent angle without sector fields", () => {
     const parent = { ...goal("parent"), children: [goal("child-a"), goal("child-b"), goal("child-c")] };
     const layouts = buildGoalscapeLayout([parent], {}, {});
@@ -877,6 +914,15 @@ describe("sunburst layout", () => {
     expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?width:\s*min\(100cqw, calc\(100cqh \* 1\.269\), 1120px\);/);
   });
 
+  it("keeps both presentation maps inside the visual canvas without visual scale overflow", () => {
+    const css = clientStyles();
+
+    expect(css).not.toContain("--map-visual-scale");
+    expect(css).not.toContain("scale(var(--map-visual-scale))");
+    expect(css).toMatch(/\.goal-map\.goalscape-map\s*\{[\s\S]*?width:\s*min\(100%, 1160px\);/);
+    expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?width:\s*min\(100%, 1120px\);/);
+  });
+
   it("omits decorative sunburst stripe overlays that compete with segment boundaries", () => {
     const source = clientMainSource();
     const css = clientStyles();
@@ -905,6 +951,24 @@ describe("sunburst layout", () => {
 
     expect(topLevelColors).toEqual(GOAL_THEME_COLORS.slice(0, roots.length).map((item) => item.value));
     expect(childSegment?.color).toBe(GOAL_THEME_COLORS[0].value);
+  });
+
+  it("maps live theme color previews to first-level goals and descendants in the sunburst map", () => {
+    const previewColor = GOAL_THEME_COLORS[5].value;
+    const roots = [
+      {
+        ...goal("alpha"),
+        color: GOAL_THEME_COLORS[0].value,
+        children: [{ ...goal("alpha-child"), color: GOAL_THEME_COLORS[0].value }]
+      }
+    ];
+    const layout = buildSunburstLayout(roots, {}, {}, 4, {
+      alpha: previewColor,
+      "alpha-child": previewColor
+    });
+
+    expect(layout.center.color).toBe(previewColor);
+    expect(layout.segments.find((segment) => segment.node.id === "alpha-child")?.color).toBe(previewColor);
   });
 
   it("maps live progress previews to sunburst segments without changing importance angles", () => {

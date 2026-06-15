@@ -1,14 +1,28 @@
-import { AlertCircle, CheckCircle2, Loader2, Pencil, Sparkles, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, Loader2, Pencil, X } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
 import { isPrimaryGoalTitle } from "../shared/goalRules";
 import {
   draftGoalResponseSchema,
   normalizeAiActionCandidates,
+  type AiClarificationAnswer,
+  type AiClarifyingQuestion,
+  type AiConversationMessage,
   type AiDraftGoalRequest,
-  type AiDraftGoalResponse
+  type AiDraftGoalResponse,
+  type AiQuickAdjustment,
+  type AiTurn
 } from "../shared/aiContracts";
 import type { GoalActionCandidate, GoalCreateInput, GoalMap, GoalNode } from "../shared/types";
+import { AiConversationControls } from "./AiConversationControls";
 import { goalContextFromNode } from "./AiAssistantDialog";
+import {
+  availableDraftCommands,
+  availableQuickAdjustmentsForTarget,
+  buildAiTurn,
+  isClarificationOnlyResponse,
+  quickAdjustmentLabel,
+  shouldAllowDraftClarification
+} from "./aiConversation";
 import { GOAL_THEME_COLORS, nextGoalThemeColor, resolveGoalThemeColor } from "./goalUtils";
 import { useModalDialog } from "./useModalDialog";
 
@@ -42,6 +56,7 @@ const horizonOptions = [
   { value: "medium", label: "中期" },
   { value: "long", label: "长期" }
 ];
+const draftCommands = availableDraftCommands();
 
 function titleFromLink(value: string | undefined) {
   return String(value ?? "")
@@ -158,7 +173,11 @@ export function createGoalPayloadFromDraft(context: CreateGoalDialogContext, dra
   return payload;
 }
 
-export function buildCreateGoalAiRequest(context: CreateGoalDialogContext, draft: CreateGoalDraft): AiDraftGoalRequest {
+export function buildCreateGoalAiRequest(
+  context: CreateGoalDialogContext,
+  draft: CreateGoalDraft,
+  turn?: AiTurn
+): AiDraftGoalRequest {
   const { color: _color, ...aiDraft } = draft;
   return {
     mode: context.mode,
@@ -171,11 +190,12 @@ export function buildCreateGoalAiRequest(context: CreateGoalDialogContext, draft
     siblings: context.siblings.map(goalContextFromNode),
     existingTitles: context.existingGoals.map((goal) => goal.title),
     domainCandidates: context.domainCandidates,
-    draft: aiDraft
+    draft: aiDraft,
+    ...(turn ? { turn } : {})
   };
 }
 
-function mergeAiDraft(current: CreateGoalDraft, response: AiDraftGoalResponse): CreateGoalDraft {
+export function mergeAiDraft(current: CreateGoalDraft, response: AiDraftGoalResponse): CreateGoalDraft {
   return {
     ...current,
     title: response.title?.trim() || current.title,
@@ -192,11 +212,51 @@ function mergeAiDraft(current: CreateGoalDraft, response: AiDraftGoalResponse): 
   };
 }
 
-async function requestGoalDraft(context: CreateGoalDialogContext, draft: CreateGoalDraft): Promise<AiDraftGoalResponse> {
+type ResolveCreateGoalAiResponseInput = {
+  currentDraft: CreateGoalDraft;
+  response: AiDraftGoalResponse;
+  allowClarification: boolean;
+  mergeDraft?: (current: CreateGoalDraft, response: AiDraftGoalResponse) => CreateGoalDraft;
+};
+
+type CreateGoalAiResponseTransition =
+  | { kind: "formal"; draft: CreateGoalDraft; warnings: string[] }
+  | { kind: "clarification"; clarifyingQuestion: AiClarifyingQuestion; warnings: string[] }
+  | { kind: "protocol-error"; error: string; draft: CreateGoalDraft };
+
+export function resolveCreateGoalAiResponse({
+  currentDraft,
+  response,
+  allowClarification,
+  mergeDraft = mergeAiDraft
+}: ResolveCreateGoalAiResponseInput): CreateGoalAiResponseTransition {
+  if (isClarificationOnlyResponse(response)) {
+    if (!allowClarification) {
+      return {
+        kind: "protocol-error",
+        error: "AI returned a clarification question after clarification was disabled.",
+        draft: currentDraft
+      };
+    }
+    return {
+      kind: "clarification",
+      clarifyingQuestion: response.clarifyingQuestion,
+      warnings: response.warnings ?? []
+    };
+  }
+
+  return {
+    kind: "formal",
+    draft: mergeDraft(currentDraft, response),
+    warnings: response.warnings ?? []
+  };
+}
+
+async function requestGoalDraft(context: CreateGoalDialogContext, draft: CreateGoalDraft, turn?: AiTurn): Promise<AiDraftGoalResponse> {
   const response = await fetch("/api/ai/draft-goal", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(buildCreateGoalAiRequest(context, draft))
+    body: JSON.stringify(buildCreateGoalAiRequest(context, draft, turn))
   });
 
   if (response.status === 501) throw new Error("AI 后端尚未配置");
@@ -231,6 +291,10 @@ export function CreateGoalDialog({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [messages, setMessages] = useState<AiConversationMessage[]>([]);
+  const [clarifyingQuestion, setClarifyingQuestion] = useState<AiClarifyingQuestion | null>(null);
+  const [clarificationAnswered, setClarificationAnswered] = useState(false);
+  const [draftResultVisible, setDraftResultVisible] = useState(false);
   const progressVisible = shouldShowCreateGoalProgress(context, draft);
   const colorSelectable = canChooseGoalThemeColor(context);
   const inheritedColor = colorSelectable ? "" : defaultGoalThemeColor(context);
@@ -246,6 +310,10 @@ export function CreateGoalDialog({
     setError("");
     setNotice("");
     setWarnings([]);
+    setMessages([]);
+    setClarifyingQuestion(null);
+    setClarificationAnswered(false);
+    setDraftResultVisible(false);
     setDetailsOpen(false);
   }, [initialDraft]);
 
@@ -255,23 +323,127 @@ export function CreateGoalDialog({
     setWarnings([]);
   };
 
-  const generateDraft = async () => {
+  const handleDraftResponse = (
+    response: AiDraftGoalResponse,
+    allowClarification: boolean,
+    nextMessages: AiConversationMessage[]
+  ) => {
+    const transition = resolveCreateGoalAiResponse({
+      currentDraft: draft,
+      response,
+      allowClarification
+    });
+
+    if (transition.kind === "protocol-error") {
+      setError(transition.error);
+      return;
+    }
+
+    setWarnings(transition.warnings);
+
+    if (transition.kind === "clarification") {
+      setClarifyingQuestion(transition.clarifyingQuestion);
+      setMessages([...nextMessages, { role: "assistant", content: transition.clarifyingQuestion.question }]);
+      return;
+    }
+
+    setClarifyingQuestion(null);
+    setDraft(transition.draft);
+    setDraftResultVisible(true);
+    setNotice("AI 草稿已填入表单");
+    setDetailsOpen(true);
+    setMessages(nextMessages);
+  };
+
+  const runDraftTurn = async (turn: AiTurn, nextMessages: AiConversationMessage[]) => {
     setGenerating(true);
     setError("");
     setNotice("");
     setWarnings([]);
     try {
       await onBeforeGenerate?.();
-      const response = await requestGoalDraft(context, draft);
-      setDraft((current) => mergeAiDraft(current, response));
-      setWarnings(response.warnings ?? []);
-      setNotice("AI 草稿已填入表单");
-      setDetailsOpen(true);
+      const response = await requestGoalDraft(context, draft, turn);
+      handleDraftResponse(response, turn.allowClarification === true, nextMessages);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "AI 请求失败");
     } finally {
       setGenerating(false);
     }
+  };
+
+  const generateDraft = async (label = "AI 辅助填写") => {
+    const allowClarification = shouldAllowDraftClarification({
+      draft,
+      parentGoal: context.parentGoal,
+      sourceGoal: context.sourceGoal,
+      hasClarificationAnswer: clarificationAnswered
+    });
+
+    await runDraftTurn(
+      buildAiTurn({
+        intent: "generate",
+        allowClarification
+      }),
+      [...messages, { role: "user", content: label }]
+    );
+  };
+
+  const runDraftCommand = (commandId: string) => {
+    const command = draftCommands.find((item) => item.id === commandId);
+    if (!command) return;
+    void generateDraft(command.label);
+  };
+
+  const sendMessage = (message: string) => {
+    const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: message }];
+    void runDraftTurn(
+      buildAiTurn({
+        intent: "message",
+        message,
+        allowClarification: false,
+        conversation: nextMessages,
+        currentResponse: draft
+      }),
+      nextMessages
+    );
+  };
+
+  const quickAdjust = (adjustment: AiQuickAdjustment) => {
+    const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: quickAdjustmentLabel(adjustment) }];
+    void runDraftTurn(
+      buildAiTurn({
+        intent: "quick-adjust",
+        quickAdjustment: adjustment,
+        allowClarification: false,
+        conversation: nextMessages,
+        currentResponse: draft
+      }),
+      nextMessages
+    );
+  };
+
+  const answerClarification = (answer: AiClarificationAnswer) => {
+    setClarificationAnswered(true);
+    const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: answer.label }];
+    void runDraftTurn(
+      buildAiTurn({
+        intent: "clarification-answer",
+        allowClarification: false,
+        clarificationAnswer: answer,
+        conversation: nextMessages,
+        currentResponse: draft
+      }),
+      nextMessages
+    );
+  };
+
+  const skipClarification = () => {
+    if (!clarifyingQuestion) return;
+    answerClarification({
+      questionId: clarifyingQuestion.id,
+      optionId: "skip",
+      label: "按现有信息生成"
+    });
   };
 
   const submit = async () => {
@@ -308,13 +480,6 @@ export function CreateGoalDialog({
             if (canSubmit) void submit();
           }}
         >
-          <div className="create-goal-ai-row">
-            <button type="button" className="secondary-button" disabled={busy} onClick={() => void generateDraft()}>
-              {generating ? <Loader2 className="spin" /> : <Sparkles />}
-              AI 辅助填写
-            </button>
-          </div>
-
           {error && (
             <div className="ai-error" role="alert">
               <AlertCircle />
@@ -337,6 +502,27 @@ export function CreateGoalDialog({
               </ul>
             </div>
           )}
+
+          <p className="ai-conversation-hint">AI 会基于当前表单内容重写候选草稿，最终仍需要点击“创建”才会写入。</p>
+          <AiConversationControls
+            messages={messages}
+            commands={draftCommands.map((command) => ({ id: command.id, label: command.label }))}
+            quickAdjustments={availableQuickAdjustmentsForTarget("draft-goal")}
+            clarifyingQuestion={clarifyingQuestion ?? undefined}
+            busy={busy}
+            intro={{
+              title: "AI",
+              body: "我可以根据当前表单生成目标草稿，也可以按你的描述继续重写。"
+            }}
+            inputPlaceholder="描述你想创建的目标，或要求 AI 调整当前草稿"
+            onCommand={runDraftCommand}
+            onSendMessage={sendMessage}
+            onQuickAdjust={quickAdjust}
+            onAnswerClarification={answerClarification}
+            onSkipClarification={skipClarification}
+          >
+            {draftResultVisible && <DraftPreview draft={draft} />}
+          </AiConversationControls>
 
           <div className="create-goal-grid">
             <label className="rename-field">
@@ -509,6 +695,19 @@ export function CreateGoalDialog({
           </div>
         </form>
       </section>
+    </div>
+  );
+}
+
+function DraftPreview({ draft }: { draft: CreateGoalDraft }) {
+  const title = draft.title.trim() || "未命名目标";
+  return (
+    <div className="ai-draft-preview">
+      <strong>{title}</strong>
+      <p>
+        {draft.domain || "未设置领域"} · {draft.horizon || "未设置周期"} · 重要性 {draft.priority}
+      </p>
+      {draft.summary.trim() && <p>{draft.summary.trim()}</p>}
     </div>
   );
 }

@@ -36,7 +36,7 @@ export async function runAiProvider(endpoint: AiEndpoint, request: unknown, opti
       messages: [
         {
           role: "system",
-          content: systemPromptFor(endpoint)
+          content: systemPromptFor(endpoint, request)
         },
         {
           role: "user",
@@ -127,21 +127,45 @@ function readLocalEnvFile(): AiProviderEnv {
   return result;
 }
 
-function systemPromptFor(endpoint: AiEndpoint) {
-  const responseFields = {
-    "improve-goal": "summary, successSignals, actionCandidates, reviewQuestions, warnings",
-    "suggest-subgoals": "subgoals, warnings",
-    "diagnose-branch": "findings, warnings",
-    "suggest-weekly-actions": "weeklyActions, warnings",
-    "draft-goal": "title, domain, horizon, priority, progress, summary, successSignals, actionCandidates, reviewQuestions, warnings"
-  } satisfies Record<AiEndpoint, string>;
+export function systemPromptFor(endpoint: AiEndpoint, request: unknown) {
+  const resultFields = {
+    "improve-goal": ["summary", "successSignals", "actionCandidates", "reviewQuestions"],
+    "suggest-subgoals": ["subgoals"],
+    "diagnose-branch": ["findings"],
+    "suggest-weekly-actions": ["weeklyActions"],
+    "draft-goal": ["title", "domain", "horizon", "priority", "progress", "summary", "successSignals", "actionCandidates", "reviewQuestions"]
+  } satisfies Record<AiEndpoint, string[]>;
+  const allowClarification = Boolean(
+    request &&
+      typeof request === "object" &&
+      "turn" in request &&
+      (request as { turn?: { allowClarification?: boolean } }).turn?.allowClarification === true
+  );
+  const allowedFields = [
+    ...resultFields[endpoint],
+    "warnings",
+    ...(allowClarification ? ["clarifyingQuestion"] : [])
+  ];
+  const clarificationRules = allowClarification
+    ? [
+        "You may return clarifyingQuestion only when one multiple-choice question would materially improve the result.",
+        "When returning clarifyingQuestion, include only clarifyingQuestion and optional warnings; do not include any result fields."
+      ]
+    : ["Use the available request context to produce the best structured result now."];
 
   return [
-    "你是 Obsidian 目标网络的 AI 助手，只返回一个 JSON object。",
-    `当前任务：${endpoint}。`,
-    `允许的顶层字段仅限：${responseFields[endpoint]}。`,
-    "不要返回 Markdown 文件内容，不要新增自定义 section，不要解释 JSON 之外的内容。",
-    "actionCandidates 可以是字符串数组或 { text, done } 数组；subgoals 必须是独立目标建议；weeklyActions 必须可转成周行动。"
+    "You are the AI assistant for a personal goal network.",
+    "Return exactly one JSON object and no markdown, prose, or custom sections.",
+    `Current endpoint: ${endpoint}.`,
+    `Allowed top-level fields: ${allowedFields.join(", ")}.`,
+    ...clarificationRules,
+    "For turn.intent message, quick-adjust, or clarification-answer, revise turn.currentResponse when present and preserve unaffected fields.",
+    "Quick adjustment meanings:",
+    "- too-hard: reduce difficulty, scope, prerequisites, or action intensity.",
+    "- not-enough-time: shrink the current cycle scope and prefer the next smallest useful step.",
+    "- lower-frequency: lower cadence or review/action frequency where the endpoint has cadence semantics.",
+    "- fewer-actions: keep only the highest-leverage items.",
+    "actionCandidates may be strings or { text, done } objects; subgoals must be independent goal suggestions; weeklyActions must be actionable weekly items."
   ].join("\n");
 }
 
@@ -185,5 +209,43 @@ function parseJsonObject(content: string) {
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
-  return JSON.parse(withoutFence);
+  return JSON.parse(firstJsonObject(withoutFence));
+}
+
+function firstJsonObject(content: string) {
+  const start = content.indexOf("{");
+  if (start < 0) return content;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < content.length; index += 1) {
+    const char = content[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === "\"") inString = false;
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return content.slice(start, index + 1);
+    }
+  }
+
+  return content;
 }

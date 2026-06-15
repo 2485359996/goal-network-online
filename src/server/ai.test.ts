@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { registerAiRoutes, runAiProvider } from "./ai";
+import { registerAiRoutes, runAiProvider, systemPromptFor } from "./ai";
 
 const validGoalContext = {
   id: "goal-delivery",
@@ -24,13 +24,13 @@ type AiHandler = (
   reply: { code: (status: number) => { send: (payload: unknown) => unknown } }
 ) => Promise<unknown>;
 
-function buildRoutes() {
+function buildRoutes(options: Parameters<typeof registerAiRoutes>[1] = { readLocalEnv: () => ({}) }) {
   const routes = new Map<string, AiHandler>();
   registerAiRoutes({
     post: (path, handler) => {
       routes.set(path, handler);
     }
-  }, { readLocalEnv: () => ({}) });
+  }, options);
   return routes;
 }
 
@@ -216,6 +216,163 @@ describe("AI routes", () => {
     expect(JSON.parse(String(calls[0].init.body))).toMatchObject({
       model: "test-model",
       response_format: { type: "json_object" }
+    });
+  });
+
+  it("parses the first JSON object when a provider appends non-JSON text", async () => {
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: []
+    };
+
+    const result = await runAiProvider("improve-goal", request, {
+      env: {
+        AI_PROVIDER_URL: "https://provider.example/v1",
+        AI_PROVIDER_KEY: "test-key",
+        AI_PROVIDER_MODEL: "test-model"
+      },
+      readLocalEnv: () => ({}),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: '{"summary":"Sharper delivery goal"}\n\n说明：已按 JSON 返回。'
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    });
+
+    expect(result).toEqual({
+      summary: "Sharper delivery goal"
+    });
+  });
+
+  it("includes turn metadata inside the provider user message JSON", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: [],
+      turn: {
+        intent: "quick-adjust",
+        allowClarification: false,
+        quickAdjustment: "too-hard",
+        currentResponse: { summary: "Current summary" }
+      }
+    };
+
+    await runAiProvider("improve-goal", request, {
+      env: {
+        AI_PROVIDER_URL: "https://provider.example/v1",
+        AI_PROVIDER_KEY: "test-key",
+        AI_PROVIDER_MODEL: "test-model"
+      },
+      readLocalEnv: () => ({}),
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({ summary: "Adjusted summary" }) } }]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+    });
+
+    const body = JSON.parse(String(calls[0].init.body)) as { messages: Array<{ role: string; content: string }> };
+    const userMessage = body.messages.find((message) => message.role === "user");
+    expect(JSON.parse(userMessage?.content ?? "{}")).toMatchObject({
+      endpoint: "improve-goal",
+      request: {
+        turn: {
+          intent: "quick-adjust",
+          quickAdjustment: "too-hard",
+          currentResponse: { summary: "Current summary" }
+        }
+      }
+    });
+  });
+
+  it("only allows clarifyingQuestion in the system prompt when turn explicitly allows it", () => {
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: []
+    };
+
+    expect(systemPromptFor("improve-goal", request)).not.toContain("clarifyingQuestion");
+    expect(systemPromptFor("improve-goal", {
+      ...request,
+      turn: { intent: "generate", allowClarification: true }
+    })).toContain("clarifyingQuestion");
+    expect(systemPromptFor("improve-goal", {
+      ...request,
+      turn: { intent: "generate", allowClarification: false }
+    })).not.toContain("clarifyingQuestion");
+  });
+
+  it("parses provider clarification responses through route contracts", async () => {
+    const routes = buildRoutes({
+      env: {
+        AI_PROVIDER_URL: "https://provider.example/v1",
+        AI_PROVIDER_KEY: "test-key",
+        AI_PROVIDER_MODEL: "test-model"
+      },
+      readLocalEnv: () => ({}),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    clarifyingQuestion: {
+                      id: "scope",
+                      question: "你更想先调整哪一部分？",
+                      options: [
+                        { id: "scope", label: "缩小范围" },
+                        { id: "cadence", label: "降低频率" }
+                      ]
+                    }
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    });
+
+    const response = await inject(routes, "/api/ai/improve-goal", {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: [],
+      turn: { intent: "generate", allowClarification: true }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      clarifyingQuestion: {
+        id: "scope",
+        options: [
+          { id: "scope", label: "缩小范围" },
+          { id: "cadence", label: "降低频率" }
+        ]
+      }
     });
   });
 });

@@ -3,6 +3,7 @@ import { isPrimaryGoalNode } from "../shared/goalRules";
 
 export type ImportanceOverrides = Record<string, number>;
 export type ProgressOverrides = Record<string, number>;
+export type ColorOverrides = Record<string, string>;
 
 export function mediaQueryMatches(query: string, fallback = false) {
   return typeof window === "undefined" ? fallback : window.matchMedia(query).matches;

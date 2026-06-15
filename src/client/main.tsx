@@ -75,18 +75,23 @@ import {
   findGoalById,
   flattenGoals,
   formatEmpty,
+  GOAL_THEME_COLORS,
   goalMapCenterTitle,
   goalPath,
+  goalThemeColorForIndex,
   mediaQueryMatches,
+  normalizeHexColor,
   normalizedImportance,
   parentGoal,
   rebalanceImportance,
+  resolveGoalThemeColor,
   shouldApplyGoalsResponse,
   shouldShowFirstGoalMapCta,
   siblingGoals,
   titleFromLink,
   uniqueDomainTitles,
   weightedGoalProgress,
+  type ColorOverrides,
   type ImportanceOverrides,
   type ProgressOverrides
 } from "./goalUtils";
@@ -203,6 +208,10 @@ export const SUNBURST_DEPTH_CONTROL_GEOMETRY = {
 };
 
 const STACKED_LAYOUT_QUERY = "(max-width: 1120px)";
+const DETAIL_PANEL_MIN_WIDTH = 340;
+const DETAIL_PANEL_MAX_WIDTH = 560;
+const MAP_PANE_MIN_HEIGHT = 320;
+const MAP_PANE_MAX_HEIGHT = 720;
 
 export type GoalPresentationMode = "sphere" | "sunburst";
 
@@ -261,21 +270,6 @@ function defaultFloatingAiAssistantPosition(size = FLOATING_AI_ASSISTANT_SIZE) {
   }, size);
 }
 
-function readFloatingAiAssistantPosition(size = FLOATING_AI_ASSISTANT_SIZE) {
-  const storage = safeLocalStorage();
-  if (!storage) return null;
-
-  try {
-    const raw = storage.getItem(FLOATING_AI_ASSISTANT_POSITION_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<FloatingAiAssistantPosition>;
-    if (!Number.isFinite(parsed.x) || !Number.isFinite(parsed.y)) return null;
-    return clampFloatingAiAssistantPosition({ x: Number(parsed.x), y: Number(parsed.y) }, size);
-  } catch {
-    return null;
-  }
-}
-
 function writeFloatingAiAssistantPosition(position: FloatingAiAssistantPosition) {
   const storage = safeLocalStorage();
   if (!storage) return;
@@ -303,6 +297,7 @@ const themeLabels: Record<ThemePreference, string> = {
 type EditDraft = {
   importance: number;
   progress: number;
+  color: string;
   notes: string;
   actions: GoalActionCandidate[];
 };
@@ -346,6 +341,7 @@ export function GoalApp() {
   const [error, setError] = useState("");
   const [importancePreview, setImportancePreview] = useState<ImportanceOverrides>({});
   const [progressPreview, setProgressPreview] = useState<ProgressOverrides>({});
+  const [colorPreview, setColorPreview] = useState<ColorOverrides>({});
   const [mapPositionPreview, setMapPositionPreview] = useState<MapPositionPreviewOverrides>({});
   const [focusRootId, setFocusRootId] = useState<string | null>(null);
   const [presentationMode, setPresentationMode] = useState<GoalPresentationMode>("sphere");
@@ -364,6 +360,7 @@ export function GoalApp() {
   // 这三个初值必须与服务端 SSR 输出一致（确定值），否则水合那一帧渲染的图标/aria/布局会和服务端不符 → hydration mismatch。
   // 客户端真实值在挂载后由各自的 effect 纠正（stacked→layout effect、systemPrefersDark/themePreference→theme effect）。
   const [stackedLayout, setStackedLayout] = useState(false);
+  const [layoutReady, setLayoutReady] = useState(false);
   const [resizingPanelAxis, setResizingPanelAxis] = useState<"width" | "height" | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [systemPrefersDark, setSystemPrefersDark] = useState(false);
@@ -539,6 +536,7 @@ export function GoalApp() {
   useEffect(() => {
     setImportancePreview((current) => (Object.keys(current).length ? {} : current));
     setProgressPreview((current) => (Object.keys(current).length ? {} : current));
+    setColorPreview((current) => (Object.keys(current).length ? {} : current));
   }, [selectedId]);
 
   useEffect(() => {
@@ -548,14 +546,14 @@ export function GoalApp() {
   const clampDetailWidth = useCallback((value: number) => {
     const workspaceWidth =
       workspaceRef.current?.getBoundingClientRect().width ?? (typeof window === "undefined" ? 1080 : window.innerWidth);
-    const maxWidth = Math.max(340, Math.min(560, workspaceWidth - 520));
-    return clamp(Math.round(value), 340, maxWidth);
+    const maxWidth = Math.max(DETAIL_PANEL_MIN_WIDTH, Math.min(DETAIL_PANEL_MAX_WIDTH, workspaceWidth - 520));
+    return clamp(Math.round(value), DETAIL_PANEL_MIN_WIDTH, maxWidth);
   }, []);
 
   const clampMapPaneHeight = useCallback((value: number) => {
     const viewportHeight = typeof window === "undefined" ? 940 : window.innerHeight;
-    const maxHeight = Math.max(320, Math.min(720, viewportHeight - 220));
-    return clamp(Math.round(value), 320, maxHeight);
+    const maxHeight = Math.max(MAP_PANE_MIN_HEIGHT, Math.min(MAP_PANE_MAX_HEIGHT, viewportHeight - 220));
+    return clamp(Math.round(value), MAP_PANE_MIN_HEIGHT, maxHeight);
   }, []);
 
   useEffect(() => {
@@ -568,6 +566,7 @@ export function GoalApp() {
     };
 
     syncLayout();
+    setLayoutReady(true);
     mediaQuery.addEventListener("change", syncLayout);
     window.addEventListener("resize", syncLayout);
     return () => {
@@ -648,10 +647,18 @@ export function GoalApp() {
     return runWrite(async () => {
       const nextImportance = rebalanceImportance(visibleTree, goal.id, draft.importance);
       const primaryGoal = isPrimaryGoalNode(goal);
+      const topLevelIndex = visibleTree.findIndex((topGoal) => topGoal.id === goal.id);
+      const themeColorEditable = topLevelIndex >= 0;
+      const currentThemeColor = themeColorEditable ? resolveGoalThemeColor(goal, goalThemeColorForIndex(topLevelIndex)) : "";
+      const nextThemeColor = themeColorEditable ? normalizeHexColor(draft.color) : "";
+      const themeColorChanged = Boolean(nextThemeColor && nextThemeColor !== currentThemeColor);
       const patch: GoalPatchInput = {
         priority: Number(nextImportance[goal.id] ?? draft.importance),
         summary: draft.notes
       };
+      if (themeColorChanged) {
+        patch.color = nextThemeColor;
+      }
       if (!primaryGoal && goal.children.length === 0) {
         patch.clarity = Math.max(1, Math.ceil(Number(draft.progress) / 20));
         patch.progress = Number(draft.progress);
@@ -672,10 +679,21 @@ export function GoalApp() {
               body: JSON.stringify({ priority })
             })
           )
+          .concat(
+            themeColorChanged
+              ? Array.from(collectDescendants(goal)).map((id) =>
+                  api(`/api/goals/${encodeURIComponent(id)}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ color: nextThemeColor })
+                  })
+                )
+              : []
+          )
       );
       const next = await loadGoals();
       setImportancePreview({});
       setProgressPreview({});
+      setColorPreview({});
       clearCachedDraft(goal.id, draft);
       if (options.selectAfterSave !== false) {
         const nextSelectedId = options.selectAfterSave ?? (next.flatGoals.some((item) => item.id === goal.id) ? goal.id : "root");
@@ -781,6 +799,7 @@ export function GoalApp() {
     setFocusRootId(null);
     setImportancePreview({});
     setProgressPreview({});
+    setColorPreview({});
     setMapPositionPreview({});
     if (typeof window !== "undefined") window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, goalMapId);
   }, [queuePendingEditSave]);
@@ -828,6 +847,7 @@ export function GoalApp() {
       setSelectedId(nextActiveId || "root");
       setImportancePreview({});
       setProgressPreview({});
+      setColorPreview({});
       setMapPositionPreview({});
       if (typeof window !== "undefined") {
         if (nextActiveId) window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, nextActiveId);
@@ -880,6 +900,17 @@ export function GoalApp() {
 
   const previewProgress = useCallback((goalId: string, value: number) => {
     setProgressPreview({ [goalId]: clamp(Math.round(value), 0, 100) });
+  }, []);
+
+  const previewThemeColor = useCallback((goal: GoalNode, value: string) => {
+    const color = normalizeHexColor(value);
+    if (!color) {
+      setColorPreview({});
+      return;
+    }
+
+    const ids = [goal.id, ...collectDescendants(goal)];
+    setColorPreview(Object.fromEntries(ids.map((id) => [id, color])));
   }, []);
 
   const previewMapPosition = useCallback((goalId: string, position: MapPosition) => {
@@ -981,6 +1012,8 @@ export function GoalApp() {
     [detailWidth, mapPaneHeight]
   );
   const resizingClass = resizingPanelAxis ? ` is-resizing is-resizing-${resizingPanelAxis}` : "";
+  const detailWidthMax = layoutReady ? clampDetailWidth(Number.MAX_SAFE_INTEGER) : DETAIL_PANEL_MAX_WIDTH;
+  const mapPaneHeightMax = layoutReady ? clampMapPaneHeight(Number.MAX_SAFE_INTEGER) : MAP_PANE_MAX_HEIGHT;
   const appliedTheme = resolvedTheme(themePreference, systemPrefersDark);
   const nextThemeLabel = themeLabels[nextThemePreference(themePreference)];
   const themeButtonLabel = `主题：${themeLabels[themePreference]}，当前${themeLabels[appliedTheme]}，点击切换为${nextThemeLabel}`;
@@ -1112,7 +1145,7 @@ export function GoalApp() {
             {loading ? (
             <div className="loading-state">
               <Loader2 className="spin" />
-              正在读取 Obsidian 目标
+              正在读取目标网络
             </div>
           ) : shouldShowFirstGoalMapCta(goals.goalMaps, loading) ? (
             <div className="first-map-empty" role="status">
@@ -1127,6 +1160,7 @@ export function GoalApp() {
               selectedId={selectedId}
               importanceOverrides={importancePreview}
               progressOverrides={progressPreview}
+              colorOverrides={colorPreview}
               positionOverrides={activeMapPositionPreview}
               mapContextId={mapContextId}
               centerId={mapCenterId}
@@ -1147,6 +1181,7 @@ export function GoalApp() {
               centerTitle={goalMapCenterTitle(activeGoalMap)}
               importanceOverrides={importancePreview}
               progressOverrides={progressPreview}
+              colorOverrides={colorPreview}
               visibleDepth={sunburstVisibleDepth}
               onSelect={selectGoal}
               onVisibleDepthChange={setSunburstVisibleDepth}
@@ -1169,8 +1204,8 @@ export function GoalApp() {
           aria-label={stackedLayout ? "调整上方地图窗口高度" : "调整右侧窗口宽度"}
           aria-orientation={stackedLayout ? "horizontal" : "vertical"}
           aria-valuenow={stackedLayout ? mapPaneHeight : detailWidth}
-          aria-valuemin={stackedLayout ? 320 : 340}
-          aria-valuemax={stackedLayout ? clampMapPaneHeight(Number.MAX_SAFE_INTEGER) : clampDetailWidth(Number.MAX_SAFE_INTEGER)}
+          aria-valuemin={stackedLayout ? MAP_PANE_MIN_HEIGHT : DETAIL_PANEL_MIN_WIDTH}
+          aria-valuemax={stackedLayout ? mapPaneHeightMax : detailWidthMax}
           tabIndex={0}
           onPointerDown={startPanelResize}
           onKeyDown={(event) => {
@@ -1213,6 +1248,7 @@ export function GoalApp() {
           onSave={saveGoal}
           onPreviewImportance={previewImportance}
           onPreviewProgress={previewProgress}
+          onPreviewThemeColor={previewThemeColor}
           onDraftChange={registerPendingEdit}
         />
       </main>
@@ -1317,7 +1353,7 @@ const FloatingAiAssistantButton = React.memo(function FloatingAiAssistantButton(
 
   useEffect(() => {
     const size = buttonRef.current?.offsetWidth || FLOATING_AI_ASSISTANT_SIZE;
-    setPosition(readFloatingAiAssistantPosition(size) ?? defaultFloatingAiAssistantPosition(size));
+    setPosition(defaultFloatingAiAssistantPosition(size));
   }, []);
 
   useEffect(() => {
@@ -1556,7 +1592,7 @@ function PresentationModeToggle({
         onClick={() => onChange("sphere")}
       >
         <Network aria-hidden="true" />
-        <span>目标圆球</span>
+        <span>目标星球</span>
       </button>
       <button
         type="button"
@@ -1784,6 +1820,10 @@ function MapActions({
   );
 }
 
+export function deleteGoalWarningText(childCount: number) {
+  return `这会直接删除目标数据${childCount ? `，并一并删除 ${childCount} 个子目标` : ""}。此操作无法在应用内撤销。`;
+}
+
 function DeleteGoalDialog({
   goal,
   saving,
@@ -1828,9 +1868,7 @@ function DeleteGoalDialogBody({
             <X />
           </button>
         </div>
-        <p className="dialog-copy">
-          这会直接删除对应 Markdown 文件{childCount ? `，并一并删除 ${childCount} 个子目标` : ""}。此操作无法在应用内撤销。
-        </p>
+        <p className="dialog-copy">{deleteGoalWarningText(childCount)}</p>
         <div className="dialog-actions">
           <button type="button" className="secondary-button" disabled={saving} onClick={onCancel}>
             取消
@@ -2267,6 +2305,7 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   centerTitle,
   importanceOverrides,
   progressOverrides,
+  colorOverrides,
   visibleDepth,
   onSelect,
   onVisibleDepthChange
@@ -2277,13 +2316,14 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   centerTitle: string;
   importanceOverrides: ImportanceOverrides;
   progressOverrides: ProgressOverrides;
+  colorOverrides: ColorOverrides;
   visibleDepth: number;
   onSelect: (id: string) => void;
   onVisibleDepthChange: React.Dispatch<React.SetStateAction<number>>;
 }) {
   const layout = useMemo(
-    () => buildSunburstLayout(goals, importanceOverrides, progressOverrides, visibleDepth),
-    [goals, importanceOverrides, progressOverrides, visibleDepth]
+    () => buildSunburstLayout(goals, importanceOverrides, progressOverrides, visibleDepth, colorOverrides),
+    [goals, importanceOverrides, progressOverrides, visibleDepth, colorOverrides]
   );
   const centerGoal = layout.center.node;
   const centerDisplayTitle = centerGoal?.title || centerTitle;
@@ -2532,6 +2572,7 @@ const GoalMap = React.memo(function GoalMap({
   selectedId,
   importanceOverrides,
   progressOverrides,
+  colorOverrides,
   positionOverrides,
   mapContextId,
   centerId,
@@ -2548,6 +2589,7 @@ const GoalMap = React.memo(function GoalMap({
   selectedId: string;
   importanceOverrides: ImportanceOverrides;
   progressOverrides: ProgressOverrides;
+  colorOverrides: ColorOverrides;
   positionOverrides: MapPositionOverrides;
   mapContextId: string;
   centerId: string;
@@ -2561,12 +2603,17 @@ const GoalMap = React.memo(function GoalMap({
   onCommitPosition: (id: string, position: MapPosition) => void;
 }) {
   const layouts = useMemo(
-    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId),
-    [goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId]
+    () => buildGoalscapeLayout(goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, undefined, colorOverrides),
+    [goals, importanceOverrides, progressOverrides, positionOverrides, mapContextId, colorOverrides]
   );
   const centerNodeId = centerId;
   const centerDisplayTitle = centerTitle;
-  const centerVisualMode = goalscapeCenterVisualMode(centerNodeId, centerGoal);
+  const centerGoalPreviewColor = centerGoal ? normalizeHexColor(colorOverrides[centerGoal.id]) : "";
+  const previewedCenterGoal = useMemo(
+    () => (centerGoal && centerGoalPreviewColor ? { ...centerGoal, color: centerGoalPreviewColor } : centerGoal),
+    [centerGoal, centerGoalPreviewColor]
+  );
+  const centerVisualMode = goalscapeCenterVisualMode(centerNodeId, previewedCenterGoal);
   const visibleLayouts = useMemo(
     () => [...layouts].sort((a, b) => a.zIndex - b.zIndex || a.depth - b.depth || a.node.id.localeCompare(b.node.id)),
     [layouts]
@@ -2578,7 +2625,7 @@ const GoalMap = React.memo(function GoalMap({
     () => Array.from(new Set(visibleLayouts.map((layout) => layout.depth))).sort((a, b) => a - b),
     [visibleLayouts]
   );
-  const centerPearlTint = useMemo(() => goalscapeCenterPearlTint(centerNodeId, centerGoal), [centerNodeId, centerGoal]);
+  const centerPearlTint = useMemo(() => goalscapeCenterPearlTint(centerNodeId, previewedCenterGoal), [centerNodeId, previewedCenterGoal]);
   const centerPearlPath = useMemo(
     () =>
       goalscapeBlobPath(
@@ -2592,13 +2639,13 @@ const GoalMap = React.memo(function GoalMap({
   );
   const centerLabel = useMemo(() => goalscapeLabelLines(centerDisplayTitle, 5, 2), [centerDisplayTitle]);
   const centerGoalVisual = useMemo(() => {
-    if (centerVisualMode !== "goal" || !centerGoal) return null;
+    if (centerVisualMode !== "goal" || !previewedCenterGoal) return null;
     const width = goalscapeTopNodeBaseSize.width;
     const height = goalscapeTopNodeBaseSize.height;
-    const color = goalscapeNodeColor(centerGoal, "#64748b");
-    const progress = weightedGoalProgress(centerGoal, importanceOverrides, progressOverrides);
+    const color = goalscapeNodeColor(previewedCenterGoal, "#64748b");
+    const progress = weightedGoalProgress(previewedCenterGoal, importanceOverrides, progressOverrides);
     const metrics = goalscapeNodeVisualMetrics({ width, height, depth: 1 });
-    const label = goalscapeLabelLines(centerGoal.title, goalscapeLabelMaxChars({ width, depth: 1 }, metrics), 2);
+    const label = goalscapeLabelLines(previewedCenterGoal.title, goalscapeLabelMaxChars({ width, depth: 1 }, metrics), 2);
     return {
       goal: centerGoal,
       x: goalscapeCenter.x,
@@ -2610,13 +2657,13 @@ const GoalMap = React.memo(function GoalMap({
       progress,
       metrics,
       label,
-      Icon: goalIconComponent(centerGoal),
+      Icon: goalIconComponent(previewedCenterGoal),
       path: goalscapeBlobPath(goalscapeCenter.x, goalscapeCenter.y, width, height, 0),
       haloPath: goalscapeBlobPath(goalscapeCenter.x, goalscapeCenter.y, width + 20, height + 18, 0),
       rimPath: goalscapeBlobPath(goalscapeCenter.x, goalscapeCenter.y, width - 12, height - 10, 2),
       progressFill: goalscapeProgressFillGeometry(goalscapeCenter.y, height, progress)
     };
-  }, [centerGoal, centerVisualMode, importanceOverrides, progressOverrides]);
+  }, [centerVisualMode, importanceOverrides, previewedCenterGoal, progressOverrides]);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{
     id: string;
@@ -3323,6 +3370,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   onSave,
   onPreviewImportance,
   onPreviewProgress,
+  onPreviewThemeColor,
   onDraftChange
 }: {
   selectedGoal: GoalNode | undefined;
@@ -3336,6 +3384,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   onSave: (goal: GoalNode, draft: EditDraft) => Promise<boolean>;
   onPreviewImportance: (goalId: string, value: number) => void;
   onPreviewProgress: (goalId: string, value: number) => void;
+  onPreviewThemeColor: (goal: GoalNode, value: string) => void;
   onDraftChange: (goal: GoalNode, draft: EditDraft, dirty: boolean) => void;
 }) {
   const rootImportance = useMemo(() => normalizedImportance(topGoals), [topGoals]);
@@ -3354,6 +3403,11 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
     () => (selectedGoal ? normalizedImportance(selectedGoal.children) : {}),
     [selectedGoal]
   );
+  const selectedTopGoalIndex = selectedGoal ? topGoals.findIndex((goal) => goal.id === selectedGoal.id) : -1;
+  const themeColorEditable = selectedTopGoalIndex >= 0;
+  const selectedThemeColor = selectedGoal
+    ? resolveGoalThemeColor(selectedGoal, themeColorEditable ? goalThemeColorForIndex(selectedTopGoalIndex) : "")
+    : "";
   const editFormId = selectedGoal ? `goal-editor-${encodeURIComponent(selectedGoal.id)}` : "";
   const saveSelectedGoal = useCallback(
     (draft: EditDraft) => (selectedGoal ? onSave(selectedGoal, draft) : Promise.resolve(false)),
@@ -3437,9 +3491,12 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         cachedDraft={cachedDraft}
         importance={selectedSiblingImportance}
         hasSiblings={hasSiblings}
+        themeColor={selectedThemeColor}
+        themeColorEditable={themeColorEditable}
         saving={saving}
         onPreviewImportance={onPreviewImportance}
         onPreviewProgress={onPreviewProgress}
+        onPreviewThemeColor={onPreviewThemeColor}
         onDraftChange={onDraftChange}
         onSave={saveSelectedGoal}
       />
@@ -3469,6 +3526,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
 const editDraftKeys: (keyof EditDraft)[] = [
   "importance",
   "progress",
+  "color",
   "notes",
   "actions"
 ];
@@ -3485,9 +3543,12 @@ const GoalEditForm = React.memo(function GoalEditForm({
   cachedDraft,
   importance,
   hasSiblings,
+  themeColor,
+  themeColorEditable,
   saving,
   onPreviewImportance,
   onPreviewProgress,
+  onPreviewThemeColor,
   onDraftChange,
   onSave
 }: {
@@ -3496,13 +3557,16 @@ const GoalEditForm = React.memo(function GoalEditForm({
   cachedDraft?: EditDraft;
   importance: number;
   hasSiblings: boolean;
+  themeColor: string;
+  themeColorEditable: boolean;
   saving: boolean;
   onPreviewImportance: (goalId: string, value: number) => void;
   onPreviewProgress: (goalId: string, value: number) => void;
+  onPreviewThemeColor: (goal: GoalNode, value: string) => void;
   onDraftChange: (goal: GoalNode, draft: EditDraft, dirty: boolean) => void;
   onSave: (draft: EditDraft) => Promise<boolean>;
 }) {
-  const baselineDraft = useMemo(() => draftFromGoal(goal, importance), [goal, importance]);
+  const baselineDraft = useMemo(() => draftFromGoal(goal, importance, themeColor), [goal, importance, themeColor]);
   const initialDraft = cachedDraft ?? baselineDraft;
   const [draft, setDraft] = useState<EditDraft>(() => initialDraft);
   const primaryGoal = isPrimaryGoalNode(goal);
@@ -3547,6 +3611,39 @@ const GoalEditForm = React.memo(function GoalEditForm({
         {hasSiblings && (
           <p className="field-hint">调整后会在同级目标间按 100% 自动重新分配占比。</p>
         )}
+        {themeColorEditable && (
+          <fieldset className="detail-goal-color-field">
+            <legend className="field-label">主题色</legend>
+            <div className="create-goal-color-options detail-goal-color-options">
+              {GOAL_THEME_COLORS.map((color) => (
+                <label
+                  key={color.value}
+                  className={draft.color === color.value ? "create-goal-color-option detail-goal-color-option selected" : "create-goal-color-option detail-goal-color-option"}
+                  title={color.label}
+                  aria-label={color.label}
+                  style={
+                    {
+                      "--goal-theme-color": color.value
+                    } as React.CSSProperties & { "--goal-theme-color": string }
+                  }
+                >
+                  <input
+                    type="radio"
+                    name="goal-editor-theme-color"
+                    value={color.value}
+                    checked={draft.color === color.value}
+                    disabled={saving}
+                    onChange={(event) => {
+                      updateDraft({ color: event.target.value });
+                      onPreviewThemeColor(goal, event.target.value);
+                    }}
+                  />
+                  <span className="create-goal-color-swatch" aria-hidden="true" />
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
         {progressEditable && (
           <RangeField
             label="进度"
@@ -3575,10 +3672,11 @@ const GoalEditForm = React.memo(function GoalEditForm({
   );
 });
 
-function draftFromGoal(goal: GoalNode, importance: number): EditDraft {
+function draftFromGoal(goal: GoalNode, importance: number, themeColor = ""): EditDraft {
   return {
     importance,
     progress: weightedGoalProgress(goal),
+    color: normalizeHexColor(themeColor) || resolveGoalThemeColor(goal),
     notes: goal.sections.summary,
     actions: goal.sections.actionCandidates.map((action) => ({ ...action }))
   };

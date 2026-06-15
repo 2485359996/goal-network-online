@@ -6,9 +6,12 @@ import {
   buildInitialCreateGoalDraft,
   canSubmitCreateGoalDraft,
   createGoalPayloadFromDraft,
+  mergeAiDraft,
+  resolveCreateGoalAiResponse,
   shouldShowCreateGoalProgress,
   type CreateGoalDialogContext
 } from "./CreateGoalDialog";
+import { availableDraftCommands, shouldAllowDraftClarification } from "./aiConversation";
 import { GOAL_THEME_COLORS } from "./goalUtils";
 
 const goalMap: GoalMap = { id: "map-1", name: "目标网络", sortOrder: 0 };
@@ -199,5 +202,127 @@ describe("CreateGoalDialog helpers", () => {
       draft: { title: "Improve release confidence" }
     });
     expect(request.parentGoal?.title).toBe("Launch");
+  });
+
+  it("includes optional turns in draft-goal AI requests", () => {
+    const draft = {
+      ...buildInitialCreateGoalDraft(context()),
+      title: "Improve release confidence"
+    };
+    const turn = {
+      intent: "message" as const,
+      allowClarification: false,
+      message: "Make it smaller",
+      currentResponse: { title: draft.title }
+    };
+
+    expect(buildCreateGoalAiRequest(context(), draft, turn)).toMatchObject({
+      turn: {
+        intent: "message",
+        allowClarification: false,
+        message: "Make it smaller",
+        currentResponse: { title: "Improve release confidence" }
+      }
+    });
+  });
+
+  it("uses draft-specific commands in the create goal AI conversation", () => {
+    expect(availableDraftCommands()).toEqual([
+      { id: "draft-goal", label: "AI 辅助填写" }
+    ]);
+  });
+
+  it("keeps the selected color when merging AI draft updates", () => {
+    const current = {
+      ...buildInitialCreateGoalDraft(context()),
+      title: "Current title",
+      color: GOAL_THEME_COLORS[4].value
+    };
+
+    expect(
+      mergeAiDraft(current, {
+        title: "AI title",
+        summary: "AI summary"
+      })
+    ).toMatchObject({
+      title: "AI title",
+      summary: "AI summary",
+      color: GOAL_THEME_COLORS[4].value
+    });
+  });
+
+  it("does not allow draft clarification after an answer was already supplied", () => {
+    const parent = goalFixture({ title: "Launch" });
+    const draft = {
+      ...buildInitialCreateGoalDraft(context({ parentGoal: parent })),
+      title: "",
+      horizon: "long",
+      summary: "",
+      successSignals: [],
+      actionCandidates: [],
+      reviewQuestions: []
+    };
+
+    expect(
+      shouldAllowDraftClarification({
+        draft,
+        parentGoal: parent,
+        sourceGoal: parent,
+        hasClarificationAnswer: true
+      })
+    ).toBe(false);
+  });
+
+  it("allows draft clarification for sparse sibling drafts when no answer exists", () => {
+    const selected = goalFixture({ title: "Release notes", horizon: "medium" });
+    const siblingContext = context({
+      mode: "sibling",
+      sourceGoal: selected,
+      siblings: [selected]
+    });
+    const draft = {
+      ...buildInitialCreateGoalDraft(siblingContext),
+      title: "",
+      summary: "",
+      successSignals: [],
+      actionCandidates: [],
+      reviewQuestions: []
+    };
+
+    expect(
+      shouldAllowDraftClarification({
+        draft,
+        sourceGoal: selected,
+        hasClarificationAnswer: false
+      })
+    ).toBe(true);
+  });
+
+  it("does not overwrite the current draft on disallowed clarification responses", () => {
+    const current = {
+      ...buildInitialCreateGoalDraft(context()),
+      title: "Keep this draft",
+      color: GOAL_THEME_COLORS[3].value
+    };
+    const transition = resolveCreateGoalAiResponse({
+      currentDraft: current,
+      response: {
+        clarifyingQuestion: {
+          id: "scope",
+          question: "你更想先调整哪一部分？",
+          options: [
+            { id: "scope", label: "缩小范围" },
+            { id: "cadence", label: "降低频率" }
+          ]
+        }
+      },
+      allowClarification: false
+    });
+
+    expect(transition.kind).toBe("protocol-error");
+    expect(transition).toMatchObject({
+      kind: "protocol-error",
+      draft: current
+    });
   });
 });

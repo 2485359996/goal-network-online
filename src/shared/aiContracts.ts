@@ -9,6 +9,50 @@ export const aiActionCandidateSchema = z.object({
 
 export const aiActionCandidateInputSchema = z.union([z.string(), aiActionCandidateSchema]);
 
+export const aiTurnIntentSchema = z.enum([
+  "generate",
+  "message",
+  "quick-adjust",
+  "clarification-answer"
+]);
+
+export const aiQuickAdjustmentSchema = z.enum([
+  "too-hard",
+  "not-enough-time",
+  "lower-frequency",
+  "fewer-actions"
+]);
+
+export const aiConversationMessageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1)
+}).strict();
+
+export const aiClarificationAnswerSchema = z.object({
+  questionId: z.string().min(1),
+  optionId: z.string().min(1),
+  label: z.string().min(1)
+}).strict();
+
+export const aiTurnSchema = z.object({
+  intent: aiTurnIntentSchema,
+  allowClarification: z.boolean().optional(),
+  message: z.string().optional(),
+  quickAdjustment: aiQuickAdjustmentSchema.optional(),
+  clarificationAnswer: aiClarificationAnswerSchema.optional(),
+  conversation: z.array(aiConversationMessageSchema).optional(),
+  currentResponse: z.unknown().optional()
+}).strict();
+
+export const aiClarifyingQuestionSchema = z.object({
+  id: z.string().min(1),
+  question: z.string().min(1),
+  options: z.array(z.object({
+    id: z.string().min(1),
+    label: z.string().min(1)
+  }).strict()).min(2).max(4)
+}).strict();
+
 export const aiGoalContextSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
@@ -32,7 +76,8 @@ const baseGoalRequestSchema = z.object({
   goal: aiGoalContextSchema,
   parentChain: z.array(aiGoalContextSchema),
   children: z.array(aiGoalContextSchema),
-  siblings: z.array(aiGoalContextSchema)
+  siblings: z.array(aiGoalContextSchema),
+  turn: aiTurnSchema.optional()
 }).strict();
 
 const aiGoalMapContextSchema = z.object({
@@ -68,7 +113,8 @@ export const draftGoalRequestSchema = z.object({
   siblings: z.array(aiGoalContextSchema),
   existingTitles: z.array(z.string()),
   domainCandidates: z.array(z.string()),
-  draft: aiGoalDraftSchema
+  draft: aiGoalDraftSchema,
+  turn: aiTurnSchema.optional()
 }).strict();
 
 export const aiSubgoalSuggestionSchema = z.object({
@@ -97,31 +143,47 @@ export const aiWeeklyActionSchema = z.object({
 
 const warningsSchema = z.array(z.string()).optional();
 
-export const improveGoalResponseSchema = z.object({
+function withClarification<T extends z.ZodRawShape>(
+  shape: T,
+  resultFields: Array<keyof T>
+) {
+  return z.object({
+    ...shape,
+    clarifyingQuestion: aiClarifyingQuestionSchema.optional(),
+    warnings: warningsSchema
+  }).strict().superRefine((value, ctx) => {
+    const output = value as Record<string, unknown> & { clarifyingQuestion?: unknown };
+    if (!output.clarifyingQuestion) return;
+    if (resultFields.some((field) => output[String(field)] !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "clarifyingQuestion cannot be returned with result fields"
+      });
+    }
+  });
+}
+
+export const improveGoalResponseSchema = withClarification({
   summary: z.string().optional(),
   successSignals: z.array(z.string()).optional(),
   actionCandidates: z.array(aiActionCandidateInputSchema).optional(),
-  reviewQuestions: z.array(z.string()).optional(),
-  warnings: warningsSchema
-}).strict();
+  reviewQuestions: z.array(z.string()).optional()
+}, ["summary", "successSignals", "actionCandidates", "reviewQuestions"]);
 
-export const suggestSubgoalsResponseSchema = z.object({
-  subgoals: z.array(aiSubgoalSuggestionSchema).optional(),
-  warnings: warningsSchema
-}).strict();
+export const suggestSubgoalsResponseSchema = withClarification({
+  subgoals: z.array(aiSubgoalSuggestionSchema).optional()
+}, ["subgoals"]);
 
-export const diagnoseBranchResponseSchema = z.object({
-  findings: z.array(aiFindingSchema).optional(),
-  warnings: warningsSchema
-}).strict();
+export const diagnoseBranchResponseSchema = withClarification({
+  findings: z.array(aiFindingSchema).optional()
+}, ["findings"]);
 
-export const suggestWeeklyActionsResponseSchema = z.object({
-  weeklyActions: z.array(aiWeeklyActionSchema).optional(),
-  warnings: warningsSchema
-}).strict();
+export const suggestWeeklyActionsResponseSchema = withClarification({
+  weeklyActions: z.array(aiWeeklyActionSchema).optional()
+}, ["weeklyActions"]);
 
-export const draftGoalResponseSchema = z.object({
-  title: z.string().min(1),
+export const draftGoalResponseSchema = withClarification({
+  title: z.string().min(1).optional(),
   domain: z.string().optional(),
   horizon: z.string().optional(),
   priority: z.number().min(0).max(100).optional(),
@@ -129,9 +191,8 @@ export const draftGoalResponseSchema = z.object({
   summary: z.string().optional(),
   successSignals: z.array(z.string()).optional(),
   actionCandidates: z.array(aiActionCandidateInputSchema).optional(),
-  reviewQuestions: z.array(z.string()).optional(),
-  warnings: warningsSchema
-}).strict();
+  reviewQuestions: z.array(z.string()).optional()
+}, ["title", "domain", "horizon", "priority", "progress", "summary", "successSignals", "actionCandidates", "reviewQuestions"]);
 
 export const aiRouteContracts = {
   "improve-goal": {
@@ -162,6 +223,12 @@ export const aiRouteContracts = {
 } as const;
 
 export type AiEndpoint = keyof typeof aiRouteContracts;
+export type AiTurn = z.infer<typeof aiTurnSchema>;
+export type AiTurnIntent = z.infer<typeof aiTurnIntentSchema>;
+export type AiQuickAdjustment = z.infer<typeof aiQuickAdjustmentSchema>;
+export type AiConversationMessage = z.infer<typeof aiConversationMessageSchema>;
+export type AiClarifyingQuestion = z.infer<typeof aiClarifyingQuestionSchema>;
+export type AiClarificationAnswer = z.infer<typeof aiClarificationAnswerSchema>;
 export type AiGoalContext = z.infer<typeof aiGoalContextSchema>;
 export type AiActionCandidateInput = z.infer<typeof aiActionCandidateInputSchema>;
 export type AiActionCandidate = z.infer<typeof aiActionCandidateSchema>;
