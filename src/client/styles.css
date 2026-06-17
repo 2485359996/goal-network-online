@@ -671,15 +671,16 @@ h3 {
 }
 
 .map-scope-list {
+  --scope-list-open-width: clamp(280px, 42cqw, 340px);
   position: relative;
   z-index: 4;
   top: auto;
   bottom: auto;
   left: auto;
-  width: min(420px, 100%);
+  width: min(var(--scope-list-open-width), calc(100cqw - 20px));
   max-width: 100%;
   display: flex;
-  flex: 1 1 320px;
+  flex: 0 1 var(--scope-list-open-width);
   align-items: stretch;
   border: 1px solid var(--dream-line);
   border-radius: 12px;
@@ -690,7 +691,7 @@ h3 {
 
 .map-scope-list.collapsed {
   width: 38px;
-  flex: 0 0 auto;
+  flex: 0 0 38px;
 }
 
 .scope-toggle {
@@ -2919,12 +2920,13 @@ textarea::placeholder {
   }
 
   .map-scope-list {
+    --scope-list-open-width: clamp(280px, 52cqw, 360px);
     top: auto;
     right: auto;
     bottom: auto;
     left: auto;
-    width: min(100%, 520px);
-    flex: 1 1 420px;
+    width: min(var(--scope-list-open-width), calc(100cqw - 20px));
+    flex: 0 1 var(--scope-list-open-width);
   }
 
   .map-scope-list:not(.collapsed) {
@@ -2933,7 +2935,7 @@ textarea::placeholder {
 
   .map-scope-list.collapsed {
     right: auto;
-    flex: 0 0 auto;
+    flex: 0 0 38px;
   }
 
   .scope-content {
@@ -3016,8 +3018,9 @@ textarea::placeholder {
   }
 
   .map-scope-list:not(.collapsed) {
-    width: 100%;
-    flex-basis: 100%;
+    --scope-list-open-width: min(320px, calc(100cqw - 20px));
+    width: var(--scope-list-open-width);
+    flex-basis: var(--scope-list-open-width);
   }
 
   .quick-menu {
@@ -3648,7 +3651,22 @@ textarea::placeholder {
   }
 }
 
-/* ── 日晷美化：天光 / 放射光芒 / 日核发光 / 扇区绽放 ───────── */
+.goal-map.goalscape-map,
+.goal-map.sunburst-map {
+  --map-visual-scale: 1.1;
+  transform: scale(var(--map-visual-scale));
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@media (max-width: 1120px) {
+  .goal-map.goalscape-map,
+  .goal-map.sunburst-map {
+    --map-visual-scale: 1.14;
+  }
+}
+
+/* ── 旭日图美化：天光 / 放射光芒 / 日核发光 / 扇区绽放 ───────── */
 .sunburst-sky-wash,
 .sunburst-center-aura,
 .sunburst-center-body,
@@ -4111,12 +4129,13 @@ textarea::placeholder {
   }
 
   .map-scope-list {
+    --scope-list-open-width: clamp(280px, 42cqw, 340px);
     position: relative;
     top: auto;
     left: auto;
     bottom: auto;
-    width: min(420px, 100%);
-    flex: 1 1 320px;
+    width: min(var(--scope-list-open-width), calc(100cqw - 20px));
+    flex: 0 1 var(--scope-list-open-width);
     border-color: var(--line);
     border-radius: 12px;
     background: var(--dream-panel);
@@ -4126,6 +4145,7 @@ textarea::placeholder {
 
   .map-scope-list.collapsed {
     width: 38px;
+    flex: 0 0 38px;
   }
 
   .scope-toggle {

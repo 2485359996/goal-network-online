@@ -185,7 +185,6 @@ const emptyGoals: GoalsResponse = {
 const ACTIVE_GOAL_MAP_STORAGE_KEY = "goal-network.activeGoalMapId";
 const GOAL_EDIT_AUTOSAVE_DELAY_MS = 700;
 export const GOAL_PRESENTATION_STORAGE_KEY = "goal-network.presentationByGoalMapId";
-const FLOATING_AI_ASSISTANT_POSITION_STORAGE_KEY = "goal-network.floatingAiAssistantPosition";
 const FLOATING_AI_ASSISTANT_SIZE = 56;
 const FLOATING_AI_ASSISTANT_MARGIN = 16;
 export const SUNBURST_VIEW_BOX = { x: 100, y: -14, width: 1000, height: 788 } as const;
@@ -271,17 +270,6 @@ function defaultFloatingAiAssistantPosition(size = FLOATING_AI_ASSISTANT_SIZE) {
     x: window.innerWidth - size - 28,
     y: window.innerHeight - size - 28
   }, size);
-}
-
-function writeFloatingAiAssistantPosition(position: FloatingAiAssistantPosition) {
-  const storage = safeLocalStorage();
-  if (!storage) return;
-
-  try {
-    storage.setItem(FLOATING_AI_ASSISTANT_POSITION_STORAGE_KEY, JSON.stringify(position));
-  } catch {
-    // Drag position is a convenience preference only.
-  }
 }
 
 const statusLabels: Record<GoalStatus, string> = {
@@ -1601,7 +1589,6 @@ const FloatingAiAssistantButton = React.memo(function FloatingAiAssistantButton(
     }, drag.size);
     suppressClickRef.current = true;
     setPosition(nextPosition);
-    writeFloatingAiAssistantPosition(nextPosition);
   };
 
   return (

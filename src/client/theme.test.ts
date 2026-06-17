@@ -214,20 +214,19 @@ describe("floating AI assistant", () => {
     expect(styles).not.toMatch(/\.ai-entry-row/);
   });
 
-  it("starts from the bottom-right default instead of restoring stale drag coordinates", () => {
+  it("starts the draggable assistant from the bottom-right default instead of stale storage", () => {
     const source = clientMainSource();
 
     expect(source).toContain("setPosition(defaultFloatingAiAssistantPosition(size));");
-    expect(source).not.toContain("readFloatingAiAssistantPosition(size) ?? defaultFloatingAiAssistantPosition(size)");
-    expect(source).toContain("writeFloatingAiAssistantPosition(nextPosition)");
+    expect(source).not.toContain("setPosition(readFloatingAiAssistantPosition(size) ?? defaultFloatingAiAssistantPosition(size));");
+    expect(source).not.toContain("readFloatingAiAssistantPosition");
+    expect(source).not.toContain("writeFloatingAiAssistantPosition");
   });
-});
 
-describe("presentation mode labels", () => {
-  it("names the sphere view as the goal planet", () => {
+  it("names the sphere presentation as the goal planet", () => {
     const source = clientMainSource();
 
-    expect(source).toContain("目标星球");
+    expect(source).toContain("<span>目标星球</span>");
     expect(source).not.toContain("目标圆球");
   });
 });

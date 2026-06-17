@@ -1027,22 +1027,32 @@ describe("sunburst layout", () => {
     expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?width:\s*min\(100cqw, calc\(100cqh \* 1\.269\), 1120px\);/);
   });
 
-  it("keeps both presentation maps inside the visual canvas without visual scale overflow", () => {
-    const css = clientStyles();
-
-    expect(css).not.toContain("--map-visual-scale");
-    expect(css).not.toContain("scale(var(--map-visual-scale))");
-    expect(css).toMatch(/\.goal-map\.goalscape-map\s*\{[\s\S]*?width:\s*min\(100%, 1160px\);/);
-    expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?width:\s*min\(100%, 1120px\);/);
-  });
-
-  it("keeps the map toolbar floating over the canvas instead of reserving layout height", () => {
+  it("floats the expanded goal map list without spending canvas height", () => {
     const css = clientStyles();
 
     expect(css).toMatch(/\.map-pane-toolbar\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*var\(--map-pane-padding\) var\(--map-pane-padding\) auto var\(--map-pane-padding\);/);
+    expect(css).toMatch(/\.map-pane-toolbar\s*\{[\s\S]*?pointer-events:\s*none;/);
+    expect(css).toMatch(/\.map-pane-toolbar\s*>\s*\*\s*\{[\s\S]*?pointer-events:\s*auto;/);
     expect(css).toMatch(/\.map-canvas\s*\{[\s\S]*?grid-row:\s*1 \/ -1;/);
   });
 
+  it("keeps the expanded goal map list width compact across breakpoints", () => {
+    const css = clientStyles();
+
+    expect(css).toMatch(/\.map-scope-list\s*\{[\s\S]*?--scope-list-open-width:\s*clamp\(280px, 42cqw, 340px\);/);
+    expect(css).toMatch(/\.map-scope-list\s*\{[\s\S]*?width:\s*min\(var\(--scope-list-open-width\), calc\(100cqw - 20px\)\);/);
+    expect(css).toMatch(/\.map-scope-list\s*\{[\s\S]*?flex:\s*0 1 var\(--scope-list-open-width\);/);
+    expect(css).toMatch(/@media \(max-width: 680px\)\s*\{[\s\S]*?\.map-scope-list:not\(\.collapsed\)\s*\{[\s\S]*?width:\s*var\(--scope-list-open-width\);[\s\S]*?flex-basis:\s*var\(--scope-list-open-width\);/);
+    expect(css).not.toMatch(/\.map-scope-list:not\(\.collapsed\)\s*\{[\s\S]*?width:\s*100%;[\s\S]*?flex-basis:\s*100%;/);
+  });
+
+  it("scales both presentation maps up inside the visual canvas", () => {
+    const css = clientStyles();
+
+    expect(css).toMatch(/\.goal-map\.goalscape-map,\s*\.goal-map\.sunburst-map\s*\{[\s\S]*?--map-visual-scale:\s*1\.1;/);
+    expect(css).toMatch(/\.goal-map\.goalscape-map,\s*\.goal-map\.sunburst-map\s*\{[\s\S]*?transform:\s*scale\(var\(--map-visual-scale\)\);/);
+    expect(css).toMatch(/@media \(max-width: 1120px\)\s*\{[\s\S]*?--map-visual-scale:\s*1\.14;/);
+  });
   it("omits decorative sunburst stripe overlays that compete with segment boundaries", () => {
     const source = clientMainSource();
     const css = clientStyles();
