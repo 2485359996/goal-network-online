@@ -1046,13 +1046,44 @@ describe("sunburst layout", () => {
     expect(css).not.toMatch(/\.map-scope-list:not\(\.collapsed\)\s*\{[\s\S]*?width:\s*100%;[\s\S]*?flex-basis:\s*100%;/);
   });
 
-  it("scales both presentation maps up inside the visual canvas", () => {
+  it("maximizes the sunburst map inside the visual canvas without transform overflow", () => {
     const css = clientStyles();
 
-    expect(css).toMatch(/\.goal-map\.goalscape-map,\s*\.goal-map\.sunburst-map\s*\{[\s\S]*?--map-visual-scale:\s*1\.1;/);
-    expect(css).toMatch(/\.goal-map\.goalscape-map,\s*\.goal-map\.sunburst-map\s*\{[\s\S]*?transform:\s*scale\(var\(--map-visual-scale\)\);/);
-    expect(css).toMatch(/@media \(max-width: 1120px\)\s*\{[\s\S]*?--map-visual-scale:\s*1\.14;/);
+    expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?width:\s*min\(100%, 1120px\);/);
+    expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?aspect-ratio:\s*1000 \/ 788;/);
+    expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?max-height:\s*100%;/);
+    expect(css).toMatch(/\.goal-map\.sunburst-map\s*\{[\s\S]*?width:\s*min\(100cqw, calc\(100cqh \* 1\.269\), 1120px\);/);
+    expect(css).not.toMatch(/\.goal-map\.goalscape-map,\s*\.goal-map\.sunburst-map\s*\{[\s\S]*?transform:\s*scale/);
+    expect(css).not.toMatch(/@media \(max-width: 1120px\)\s*\{[\s\S]*?\.goal-map\.goalscape-map,\s*\.goal-map\.sunburst-map\s*\{/);
   });
+
+  it("does not render visible progress percentages in the sunburst map", () => {
+    const source = clientMainSource();
+    const css = clientStyles();
+
+    expect(source).not.toContain("sunburst-center-progress-text");
+    expect(source).not.toContain("sunburst-segment-percent");
+    expect(css).not.toContain(".sunburst-center-progress-text");
+    expect(css).not.toContain(".sunburst-segment-percent");
+  });
+
+  it("uses a custom card tooltip for sunburst goals instead of native svg titles", () => {
+    const source = clientMainSource();
+    const css = clientStyles();
+
+    expect(source).toContain("sunburstTooltipForSegment");
+    expect(source).toContain("sunburst-tooltip-card");
+    expect(source).toContain("setSunburstTooltip");
+    expect(source).toMatch(/const top = clamp\(preferredTop >= minTop \? preferredTop : fallbackTop, minTop, maxTop\);/);
+    expect(source).toMatch(/const selectSegment = useCallback\([\s\S]*?setSunburstTooltip\(null\);[\s\S]*?segment\.collapsed/);
+    expect(source).toMatch(/event\.key === "Enter" && event\.shiftKey[\s\S]*?setSunburstTooltip\(null\);/);
+    expect(source).not.toContain("<title>{centerDisplayTitle}</title>");
+    expect(source).not.toContain("<title>{segment.collapsed");
+    expect(css).toMatch(/\.sunburst-tooltip-card\s*\{[\s\S]*?border-radius:\s*8px;/);
+    expect(css).toMatch(/\.sunburst-tooltip-card\s*\{[\s\S]*?box-shadow:/);
+    expect(css).toMatch(/\.sunburst-tooltip\s*\{[\s\S]*?pointer-events:\s*none;/);
+  });
+
   it("omits decorative sunburst stripe overlays that compete with segment boundaries", () => {
     const source = clientMainSource();
     const css = clientStyles();

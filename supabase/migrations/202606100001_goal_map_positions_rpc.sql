@@ -138,7 +138,7 @@ begin
 end;
 $$;
 
-revoke all on function public.set_goal_map_positions(uuid, uuid, text, jsonb) from public;
+revoke all on function public.set_goal_map_positions(uuid, uuid, text, jsonb) from public, anon, authenticated;
 grant execute on function public.set_goal_map_positions(uuid, uuid, text, jsonb) to service_role;
 
 create or replace function public.clear_goal_map_positions(
@@ -270,5 +270,5 @@ begin
 end;
 $$;
 
-revoke all on function public.clear_goal_map_positions(uuid, uuid, text, jsonb) from public;
+revoke all on function public.clear_goal_map_positions(uuid, uuid, text, jsonb) from public, anon, authenticated;
 grant execute on function public.clear_goal_map_positions(uuid, uuid, text, jsonb) to service_role;
