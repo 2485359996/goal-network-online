@@ -188,8 +188,17 @@ export const GOAL_PRESENTATION_STORAGE_KEY = "goal-network.presentationByGoalMap
 const FLOATING_AI_ASSISTANT_SIZE = 56;
 const FLOATING_AI_ASSISTANT_MARGIN = 16;
 export const SUNBURST_VIEW_BOX = { x: 100, y: -14, width: 1000, height: 788 } as const;
+const SUNBURST_TOOLTIP_BOX = { width: 220, height: 64, margin: 18, gap: 18 } as const;
 type SunburstDepthControlPoint = { x: number; y: number };
 type SunburstDepthControlTriangle = readonly [SunburstDepthControlPoint, SunburstDepthControlPoint, SunburstDepthControlPoint];
+type SunburstTooltip = {
+  id: string;
+  title: string;
+  eyebrow: string;
+  color: string;
+  x: number;
+  y: number;
+};
 type FloatingAiAssistantPosition = { x: number; y: number };
 export const SUNBURST_DEPTH_CONTROL_GEOMETRY = {
   arcPath: "M 950 88 C 990 117 1018 162 1036 224",
@@ -2502,6 +2511,46 @@ function sunburstSegmentLabel(segment: SunburstSegmentLayout) {
   };
 }
 
+function sunburstTooltipPosition(anchor: { x: number; y: number }) {
+  const left = clamp(
+    anchor.x - SUNBURST_TOOLTIP_BOX.width / 2,
+    SUNBURST_VIEW_BOX.x + SUNBURST_TOOLTIP_BOX.margin,
+    SUNBURST_VIEW_BOX.x + SUNBURST_VIEW_BOX.width - SUNBURST_TOOLTIP_BOX.width - SUNBURST_TOOLTIP_BOX.margin
+  );
+  const minTop = SUNBURST_VIEW_BOX.y + SUNBURST_TOOLTIP_BOX.margin;
+  const maxTop = SUNBURST_VIEW_BOX.y + SUNBURST_VIEW_BOX.height - SUNBURST_TOOLTIP_BOX.height - SUNBURST_TOOLTIP_BOX.margin;
+  const preferredTop = anchor.y - SUNBURST_TOOLTIP_BOX.height - SUNBURST_TOOLTIP_BOX.gap;
+  const fallbackTop = anchor.y + SUNBURST_TOOLTIP_BOX.gap;
+  const top = clamp(preferredTop >= minTop ? preferredTop : fallbackTop, minTop, maxTop);
+
+  return {
+    x: Number(left.toFixed(1)),
+    y: Number(top.toFixed(1))
+  };
+}
+
+function sunburstTooltipForCenter(title: string, color: string): SunburstTooltip {
+  return {
+    id: "center",
+    title,
+    eyebrow: "中心目标",
+    color,
+    ...sunburstTooltipPosition({ x: goalscapeCenter.x, y: goalscapeCenter.y - sunburstCenterRadius })
+  };
+}
+
+function sunburstTooltipForSegment(segment: SunburstSegmentLayout): SunburstTooltip {
+  const angle = (segment.startAngle + segment.endAngle) / 2;
+  const point = sunburstPoint(segment.outerRadius + 28, angle);
+  return {
+    id: segment.id,
+    title: segment.node.title,
+    eyebrow: segment.collapsed ? `折叠 ${segment.hiddenDescendantCount} 个目标` : `第 ${segment.depth} 层`,
+    color: segment.color,
+    ...sunburstTooltipPosition(point)
+  };
+}
+
 function trianglePath(points: SunburstDepthControlTriangle) {
   return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y} L ${points[2].x} ${points[2].y} Z`;
 }
@@ -2567,6 +2616,12 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   const controlState = sunburstDepthControlState(layout.visibleDepth, layout.maxDepth);
   const centerTargetId = centerGoal?.id || centerId;
   const lastSegmentClickRef = useRef<{ id: string; time: number } | null>(null);
+  const [sunburstTooltip, setSunburstTooltip] = useState<SunburstTooltip | null>(null);
+  const centerTooltip = useMemo(
+    () => sunburstTooltipForCenter(centerDisplayTitle, layout.center.color),
+    [centerDisplayTitle, layout.center.color]
+  );
+  const clearSunburstTooltip = useCallback(() => setSunburstTooltip(null), []);
 
   const changeVisibleDepth = useCallback(
     (delta: 1 | -1) => {
@@ -2577,6 +2632,7 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
 
   const selectSegment = useCallback(
     (segment: SunburstSegmentLayout) => {
+      setSunburstTooltip(null);
       if (segment.collapsed) {
         lastSegmentClickRef.current = null;
         changeVisibleDepth(1);
@@ -2599,6 +2655,7 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
     (event: React.KeyboardEvent<SVGGElement>, segment: SunburstSegmentLayout) => {
       if (event.key === "Enter" && event.shiftKey) {
         event.preventDefault();
+        setSunburstTooltip(null);
         lastSegmentClickRef.current = null;
         if (segment.collapsed) {
           changeVisibleDepth(1);
@@ -2616,6 +2673,7 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   );
 
   const activateCenter = useCallback(() => {
+    setSunburstTooltip(null);
     if (canAscend) onAscend();
     onSelect(centerTargetId);
   }, [canAscend, centerTargetId, onAscend, onSelect]);
@@ -2635,10 +2693,13 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
       className="goal-map sunburst-map"
       viewBox={`${SUNBURST_VIEW_BOX.x} ${SUNBURST_VIEW_BOX.y} ${SUNBURST_VIEW_BOX.width} ${SUNBURST_VIEW_BOX.height}`}
       role="img"
-      aria-labelledby="sunburst-title sunburst-desc"
-      onClick={() => onSelect(centerTargetId)}
+      aria-label={`${centerDisplayTitle}目标日晷`}
+      aria-describedby="sunburst-desc"
+      onClick={() => {
+        setSunburstTooltip(null);
+        onSelect(centerTargetId);
+      }}
     >
-      <title id="sunburst-title">{centerDisplayTitle}目标日晷</title>
       <desc id="sunburst-desc">目标按同级重要性分配角度，子目标沿父目标扇区向外展开。</desc>
       <defs>
         <filter id="sunburst-selected-glow" x="-50%" y="-50%" width="200%" height="200%">
@@ -2688,13 +2749,16 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
           event.stopPropagation();
           activateCenter();
         }}
+        onPointerEnter={() => setSunburstTooltip(centerTooltip)}
+        onPointerLeave={clearSunburstTooltip}
+        onFocus={() => setSunburstTooltip(centerTooltip)}
+        onBlur={clearSunburstTooltip}
         onKeyDown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault();
           activateCenter();
         }}
       >
-        <title>{centerDisplayTitle}</title>
         <circle className="sunburst-center-aura" cx={goalscapeCenter.x} cy={goalscapeCenter.y} r={centerCoreRadius + 22} aria-hidden="true" />
         <circle
           cx={goalscapeCenter.x}
@@ -2737,9 +2801,6 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
             </tspan>
           ))}
         </text>
-        <text className="sunburst-center-progress-text" x={goalscapeCenter.x} y={goalscapeCenter.y + 43}>
-          {centerProgress}%
-        </text>
       </g>
 
       <g className="sunburst-segments">
@@ -2750,6 +2811,7 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
           const segmentPath = sunburstArcPath(segment);
           const progressPath = segment.collapsed ? "" : sunburstProgressArcPath(segment);
           const progressEdgePath = segment.collapsed ? "" : sunburstProgressEdgePath(segment);
+          const tooltip = sunburstTooltipForSegment(segment);
           return (
             <g
               key={segment.id}
@@ -2770,11 +2832,15 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
               }
               onClick={(event) => {
                 event.stopPropagation();
+                setSunburstTooltip(null);
                 selectSegment(segment);
               }}
+              onPointerEnter={() => setSunburstTooltip(tooltip)}
+              onPointerLeave={clearSunburstTooltip}
+              onFocus={() => setSunburstTooltip(tooltip)}
+              onBlur={clearSunburstTooltip}
               onKeyDown={(event) => handleSegmentKey(event, segment)}
             >
-              <title>{segment.collapsed ? `${segment.node.title}，${segment.hiddenDescendantCount} 个目标已折叠` : segment.node.title}</title>
               <path className="sunburst-segment-shape" d={segmentPath} />
               {progressPath && <path className="sunburst-segment-progress" d={progressPath} aria-hidden="true" />}
               {progressEdgePath && <path className="sunburst-segment-progress-edge" d={progressEdgePath} aria-hidden="true" />}
@@ -2787,9 +2853,6 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
                       {line}
                     </tspan>
                   ))}
-                  <tspan className="sunburst-segment-percent" x={label.x} dy={13}>
-                    {segment.progress}%
-                  </tspan>
                 </text>
               )}
             </g>
@@ -2839,6 +2902,25 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
             <path d={trianglePath(SUNBURST_DEPTH_CONTROL_GEOMETRY.decreaseTriangle)} />
           </g>
         </g>
+      )}
+
+      {sunburstTooltip && (
+        <foreignObject
+          className="sunburst-tooltip"
+          x={sunburstTooltip.x}
+          y={sunburstTooltip.y}
+          width={SUNBURST_TOOLTIP_BOX.width}
+          height={SUNBURST_TOOLTIP_BOX.height}
+          aria-hidden="true"
+        >
+          <div
+            className="sunburst-tooltip-card"
+            style={{ "--tooltip-color": sunburstTooltip.color } as React.CSSProperties & { "--tooltip-color": string }}
+          >
+            <span>{sunburstTooltip.eyebrow}</span>
+            <strong>{sunburstTooltip.title}</strong>
+          </div>
+        </foreignObject>
       )}
     </svg>
   );

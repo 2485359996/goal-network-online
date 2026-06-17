@@ -3651,8 +3651,7 @@ textarea::placeholder {
   }
 }
 
-.goal-map.goalscape-map,
-.goal-map.sunburst-map {
+.goal-map.goalscape-map {
   --map-visual-scale: 1.1;
   transform: scale(var(--map-visual-scale));
   transform-box: fill-box;
@@ -3660,8 +3659,7 @@ textarea::placeholder {
 }
 
 @media (max-width: 1120px) {
-  .goal-map.goalscape-map,
-  .goal-map.sunburst-map {
+  .goal-map.goalscape-map {
     --map-visual-scale: 1.14;
   }
 }
@@ -3673,8 +3671,7 @@ textarea::placeholder {
 .sunburst-center-coreglow,
 .sunburst-center-glint,
 .sunburst-center-progress-track,
-.sunburst-center-progress-ring,
-.sunburst-center-progress-text {
+.sunburst-center-progress-ring {
   pointer-events: none;
 }
 
@@ -3806,7 +3803,6 @@ textarea::placeholder {
 }
 
 .sunburst-center-title,
-.sunburst-center-progress-text,
 .sunburst-segment-label {
   pointer-events: none;
   text-anchor: middle;
@@ -3821,14 +3817,6 @@ textarea::placeholder {
   stroke-width: 3.4px;
   font-size: 13.5px;
   font-weight: 820;
-}
-
-.sunburst-center-progress-text {
-  fill: var(--ink);
-  stroke: rgba(255, 255, 255, 0.88);
-  stroke-width: 2.6px;
-  font-size: 11.5px;
-  font-weight: 860;
 }
 
 .sunburst-segment-shape {
@@ -3931,9 +3919,72 @@ textarea::placeholder {
   font-weight: 820;
 }
 
-.sunburst-segment-percent {
-  font-size: 9.5px;
-  font-weight: 900;
+.sunburst-tooltip {
+  pointer-events: none;
+  overflow: visible;
+}
+
+.sunburst-tooltip-card {
+  position: relative;
+  width: 100%;
+  min-height: 100%;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--tooltip-color, var(--accent)) 32%, rgba(255, 255, 255, 0.72));
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.9), color-mix(in oklch, var(--tooltip-color, var(--accent)) 8%, var(--dream-panel-strong)));
+  box-shadow:
+    0 14px 30px -18px rgba(15, 23, 42, 0.38),
+    0 0 0 1px rgba(255, 255, 255, 0.52) inset;
+  backdrop-filter: blur(16px) saturate(1.2);
+  color: var(--ink);
+  padding: 10px 12px 10px 18px;
+}
+
+.sunburst-tooltip-card::before {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  left: 8px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--tooltip-color, var(--accent));
+  box-shadow: 0 0 12px color-mix(in oklch, var(--tooltip-color, var(--accent)) 50%, transparent);
+}
+
+.sunburst-tooltip-card span,
+.sunburst-tooltip-card strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sunburst-tooltip-card span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 820;
+  line-height: 1.2;
+}
+
+.sunburst-tooltip-card strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 860;
+  line-height: 1.25;
+}
+
+:root[data-theme="dark"] .sunburst-tooltip-card {
+  border-color: color-mix(in oklch, var(--tooltip-color, var(--accent)) 42%, rgba(148, 163, 184, 0.3));
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.94), color-mix(in oklch, var(--tooltip-color, var(--accent)) 14%, rgba(15, 23, 42, 0.9)));
+  box-shadow:
+    0 18px 34px -20px rgba(0, 0, 0, 0.82),
+    0 0 0 1px rgba(255, 255, 255, 0.08) inset;
 }
 
 :root[data-theme="dark"] .sunburst-center-progress-track {
@@ -3942,11 +3993,6 @@ textarea::placeholder {
 
 :root[data-theme="dark"] .sunburst-center-title {
   fill: #000000;
-}
-
-:root[data-theme="dark"] .sunburst-center-progress-text {
-  fill: #020617;
-  stroke: rgba(255, 255, 255, 0.8);
 }
 
 :root[data-theme="dark"] .sunburst-segment-progress {
