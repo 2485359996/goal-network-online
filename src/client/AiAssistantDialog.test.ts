@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { PRIMARY_GOAL_TITLES } from "../shared/goalRules";
 import type { GoalNode } from "../shared/types";
-import { buildImproveGoalPatch, resolveAiAssistantResponse } from "./AiAssistantDialog";
+import { buildAgentRequest, buildImproveGoalPatch, requestAgent, resolveAiAssistantResponse } from "./AiAssistantDialog";
 import {
+  agentClarifyingQuestionFromDecision,
   availableAssistantCommands,
   availableQuickAdjustmentsForTab,
   buildAiTurn,
@@ -92,6 +93,69 @@ describe("AI assistant apply helpers", () => {
     });
   });
 
+  it("builds controlled agent router requests with current goal context", () => {
+    const goal = goalFixture({
+      id: "goal-delivery",
+      title: "Delivery",
+      children: [goalFixture({ id: "child-1", title: "Release checklist", parent: "[[Delivery]]" })]
+    });
+    const parent = goalFixture({ id: "parent-1", title: "Career", parent: "" });
+    const sibling = goalFixture({ id: "sibling-1", title: "Quality", parent: "" });
+
+    expect(
+      buildAgentRequest(goal, [parent, goal, sibling], "帮我看看这个目标", {
+        conversation: [{ role: "user", content: "帮我看看这个目标" }],
+        lastTarget: "weekly",
+        activeTarget: "weekly",
+        currentResponse: { weeklyActions: [{ description: "Draft checklist" }] }
+      })
+    ).toMatchObject({
+      goalId: "goal-delivery",
+      goal: { title: "Delivery" },
+      message: "帮我看看这个目标",
+      conversation: [{ role: "user", content: "帮我看看这个目标" }],
+      lastTarget: "weekly",
+      activeTarget: "weekly",
+      currentResponse: { weeklyActions: [{ description: "Draft checklist" }] },
+      branchGoals: expect.arrayContaining([
+        expect.objectContaining({ title: "Delivery" }),
+        expect.objectContaining({ title: "Release checklist" })
+      ])
+    });
+  });
+
+  it("prepares pending edits before requesting the agent router", async () => {
+    const goal = goalFixture();
+    const request = buildAgentRequest(goal, [goal], "help me decide");
+    const calls: string[] = [];
+
+    const result = await requestAgent(request, {
+      beforeGenerate: async () => {
+        calls.push("before-generate");
+      },
+      fetch: async (url, init) => {
+        calls.push(String(url));
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          goalId: "goal-career",
+          message: "help me decide"
+        });
+        return new Response(
+          JSON.stringify({
+            kind: "chat",
+            message: "Ready."
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+    });
+
+    expect(calls).toEqual(["before-generate", "/api/ai/agent"]);
+    expect(result).toEqual({
+      kind: "chat",
+      message: "Ready."
+    });
+  });
+
   it("infers assistant targets from natural language messages", () => {
     expect(inferAssistantTargetFromMessage("帮我拆解成几个子目标")).toBe("subgoals");
     expect(inferAssistantTargetFromMessage("体检一下这个分支有什么风险")).toBe("diagnose");
@@ -115,11 +179,28 @@ describe("AI assistant apply helpers", () => {
     });
   });
 
-  it("treats greetings as chat instead of defaulting to goal suggestions", () => {
+  it("leaves greetings undecided so the agent router can answer them", () => {
     expect(inferAssistantTargetFromMessage("你好")).toBeNull();
     expect(resolveAssistantMessageRoute(null, "你好")).toEqual({
-      kind: "chat",
-      reply: "你好，我可以帮你优化目标、拆解子目标、体检分支，或安排本周行动。你可以直接说想做哪一件。"
+      kind: "needs-command",
+      reply: "我还不确定你想让我执行哪类任务。请选择一个快捷指令，或直接说“优化目标 / 拆解子目标 / 分支体检 / 本周行动”。"
+    });
+  });
+
+  it("turns agent clarify decisions into clickable clarification questions", () => {
+    expect(
+      agentClarifyingQuestionFromDecision({
+        kind: "clarify",
+        message: "你更想先优化定义，还是拆解行动？",
+        options: ["优化目标", "拆解子目标"]
+      })
+    ).toEqual({
+      id: "agent-clarify",
+      question: "你更想先优化定义，还是拆解行动？",
+      options: [
+        { id: "option-0", label: "优化目标" },
+        { id: "option-1", label: "拆解子目标" }
+      ]
     });
   });
 

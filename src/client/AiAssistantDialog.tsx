@@ -5,6 +5,7 @@ import { isPrimaryGoalNode } from "../shared/goalRules";
 import type { ActionCreateInput, GoalCreateInput, GoalNode, GoalPatchInput } from "../shared/types";
 import { AiConversationControls } from "./AiConversationControls";
 import {
+  agentClarifyingQuestionFromDecision,
   availableAssistantCommands,
   availableQuickAdjustmentsForTarget,
   buildAssistantCommandTurn,
@@ -13,6 +14,7 @@ import {
   isClarificationOnlyResponse,
   quickAdjustmentLabel,
   resolveAssistantMessageRoute,
+  type AiAssistantMessageRoute,
   type AiAssistantTarget,
   shouldAllowGoalClarification
 } from "./aiConversation";
@@ -20,6 +22,7 @@ import { resolveGoalThemeColor } from "./goalUtils";
 import { useDialogMotion } from "./motion";
 import { useModalDialog } from "./useModalDialog";
 import {
+  aiAgentResponseSchema,
   aiRouteContracts,
   diagnoseBranchResponseSchema,
   improveGoalResponseSchema,
@@ -30,6 +33,8 @@ import {
   type AiFinding,
   type AiGoalContext,
   type AiImproveGoalResponse,
+  type AiAgentRequest,
+  type AiAgentResponse,
   type AiClarificationAnswer,
   type AiClarifyingQuestion,
   type AiConversationMessage,
@@ -49,9 +54,20 @@ type AiResponse =
   | AiSuggestWeeklyActionsResponse;
 type SelectionMap = Record<string, boolean>;
 type ImproveField = "summary" | "successSignals" | "actionCandidates" | "reviewQuestions";
+type ClarificationSource = "agent" | "tool";
+type RequestAgentOptions = {
+  beforeGenerate?: () => Promise<void>;
+  fetch?: typeof fetch;
+};
 
 const AI_CLIENT_TIMEOUT_MS = 60_000;
 const assistantCommands = availableAssistantCommands();
+
+class AiAgentPreparationError extends Error {
+  constructor(readonly originalError: unknown) {
+    super(originalError instanceof Error ? originalError.message : "AI request preparation failed");
+  }
+}
 
 export type ImproveDraft = {
   summary: string;
@@ -248,6 +264,7 @@ export function AiAssistantDialog({
   const [selected, setSelected] = useState<SelectionMap>({});
   const [messages, setMessages] = useState<AiConversationMessage[]>([]);
   const [clarifyingQuestion, setClarifyingQuestion] = useState<AiClarifyingQuestion | null>(null);
+  const [clarificationSource, setClarificationSource] = useState<ClarificationSource | null>(null);
   const [clarificationAnswered, setClarificationAnswered] = useState(false);
   const [improveDraft, setImproveDraft] = useState<ImproveDraft | null>(null);
   const [subgoalDrafts, setSubgoalDrafts] = useState<SubgoalDraft[]>([]);
@@ -262,6 +279,7 @@ export function AiAssistantDialog({
     setSelected({});
     setMessages([]);
     setClarifyingQuestion(null);
+    setClarificationSource(null);
     setClarificationAnswered(false);
     setImproveDraft(null);
     setSubgoalDrafts([]);
@@ -337,11 +355,13 @@ export function AiAssistantDialog({
 
     if (transition.kind === "clarification") {
       setClarifyingQuestion(transition.clarifyingQuestion);
+      setClarificationSource("tool");
       setMessages([...nextMessages, { role: "assistant", content: transition.clarifyingQuestion.question }]);
       return;
     }
 
     setClarifyingQuestion(null);
+    setClarificationSource(null);
     setResponse(transition.response);
     setResponseTarget(target);
     setSelected(transition.selected);
@@ -369,6 +389,7 @@ export function AiAssistantDialog({
         setResponseTarget(null);
         setSelected({});
         setClarifyingQuestion(null);
+        setClarificationSource(null);
         resetDrafts();
       }
       setError(aiErrorMessage(nextError));
@@ -386,6 +407,7 @@ export function AiAssistantDialog({
     setResponseTarget(null);
     setSelected({});
     setClarifyingQuestion(null);
+    setClarificationSource(null);
     resetDrafts();
     const nextParentChain = parentChain(goal, flatGoals);
     const nextSiblings = siblingGoals(goal, flatGoals);
@@ -452,31 +474,28 @@ export function AiAssistantDialog({
     setSelected((current) => ({ ...current, [key]: !current[key] }));
   };
 
-  const sendMessage = (message: string) => {
-    const route = resolveAssistantMessageRoute(lastTarget, message);
-    const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: message }];
-
-    if (route.kind !== "task") {
-      setError("");
-      setNotice("");
-      setMessages([...nextMessages, { role: "assistant", content: route.reply }]);
-      return;
-    }
-
+  const runTaskMessage = (
+    target: AiTab,
+    inferred: boolean,
+    message: string,
+    nextMessages: AiConversationMessage[]
+  ) => {
     const nextParentChain = parentChain(goal, flatGoals);
     const nextSiblings = siblingGoals(goal, flatGoals);
     const allowClarification =
       !response &&
       shouldAllowGoalClarification({
-        target: route.target,
+        target,
         goal,
         parentChain: nextParentChain,
         children: goal.children,
         siblings: nextSiblings,
         hasClarificationAnswer: clarificationAnswered
       });
-    setLastTarget(route.target);
-    if (route.inferred && route.target !== responseTarget) {
+    setClarifyingQuestion(null);
+    setClarificationSource(null);
+    setLastTarget(target);
+    if (inferred && target !== responseTarget) {
       setResponse(null);
       setResponseTarget(null);
       setSelected({});
@@ -484,16 +503,95 @@ export function AiAssistantDialog({
       resetDrafts();
     }
     void runTurn(
-      route.target,
+      target,
       buildAiTurn({
         intent: "message",
         message,
         allowClarification,
         conversation: nextMessages,
-        currentResponse: route.target === responseTarget && response ? currentResponseWithDrafts(route.target, response) : undefined
+        currentResponse: target === responseTarget && response ? currentResponseWithDrafts(target, response) : undefined
       }),
       nextMessages
     );
+  };
+
+  const runAgentMessage = async (
+    message: string,
+    nextMessages: AiConversationMessage[],
+    fallbackRoute: AiAssistantMessageRoute
+  ) => {
+    setLoading(true);
+    setError("");
+    setNotice("");
+
+    try {
+      const decision = await requestAgent(
+        buildAgentRequest(goal, flatGoals, message, {
+          conversation: nextMessages,
+          lastTarget,
+          activeTarget: responseTarget,
+          currentResponse: response && responseTarget ? currentResponseWithDrafts(responseTarget, response) : undefined
+        }),
+        { beforeGenerate: onBeforeGenerate }
+      );
+
+      if (decision.kind === "chat") {
+        setClarifyingQuestion(null);
+        setClarificationSource(null);
+        setMessages([...nextMessages, { role: "assistant", content: agentMessageText(decision) }]);
+        setLoading(false);
+        return;
+      }
+
+      if (decision.kind === "clarify") {
+        const nextQuestion = agentClarifyingQuestionFromDecision(decision);
+        if (nextQuestion) {
+          setClarifyingQuestion(nextQuestion);
+          setClarificationSource("agent");
+          setMessages([...nextMessages, { role: "assistant", content: decision.message }]);
+        } else {
+          setClarifyingQuestion(null);
+          setClarificationSource(null);
+          setMessages([...nextMessages, { role: "assistant", content: decision.message }]);
+        }
+        setLoading(false);
+        return;
+      }
+
+      const taskMessages: AiConversationMessage[] = decision.message
+        ? [...nextMessages, { role: "assistant", content: decision.message }]
+        : nextMessages;
+      setLoading(false);
+      runTaskMessage(decision.target, true, message, taskMessages);
+    } catch (nextError) {
+      if (nextError instanceof AiAgentPreparationError) {
+        setError(aiErrorMessage(nextError.originalError));
+        setLoading(false);
+        return;
+      }
+
+      if (fallbackRoute.kind === "task") {
+        setLoading(false);
+        runTaskMessage(fallbackRoute.target, fallbackRoute.inferred, message, nextMessages);
+        return;
+      }
+
+      setMessages([...nextMessages, { role: "assistant", content: fallbackRoute.reply }]);
+      const errorMessage = aiErrorMessage(nextError);
+      setError(errorMessage === "AI 后端尚未配置" ? "" : errorMessage);
+      setLoading(false);
+    }
+  };
+
+  const sendMessage = (message: string) => {
+    const fallbackRoute = resolveAssistantMessageRoute(lastTarget, message);
+    const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: message }];
+
+    if (clarificationSource === "agent") {
+      setClarifyingQuestion(null);
+      setClarificationSource(null);
+    }
+    void runAgentMessage(message, nextMessages, fallbackRoute);
   };
 
   const quickAdjust = (adjustment: AiQuickAdjustment) => {
@@ -504,6 +602,8 @@ export function AiAssistantDialog({
     }
 
     const nextMessages: AiConversationMessage[] = [...messages, { role: "user", content: quickAdjustmentLabel(adjustment) }];
+    setClarifyingQuestion(null);
+    setClarificationSource(null);
     void runTurn(
       target,
       buildAiTurn({
@@ -546,6 +646,27 @@ export function AiAssistantDialog({
       optionId: "skip",
       label: "按现有信息生成"
     });
+  };
+
+  const answerVisibleClarification = (answer: AiClarificationAnswer) => {
+    if (clarificationSource === "agent") {
+      setClarifyingQuestion(null);
+      setClarificationSource(null);
+      sendMessage(answer.label);
+      return;
+    }
+
+    answerClarification(answer);
+  };
+
+  const skipVisibleClarification = () => {
+    if (clarificationSource === "agent") {
+      setClarifyingQuestion(null);
+      setClarificationSource(null);
+      return;
+    }
+
+    skipClarification();
   };
 
   const busy = loading || applying;
@@ -593,6 +714,7 @@ export function AiAssistantDialog({
             quickAdjustments={responseTarget ? availableQuickAdjustmentsForTarget(responseTarget) : []}
             clarifyingQuestion={clarifyingQuestion ?? undefined}
             busy={busy || saving}
+            showSkipClarification={clarificationSource !== "agent"}
             intro={{
               title: "AI",
               body: "告诉我你想怎么处理这个目标。我可以直接优化目标、拆解子目标、体检分支或安排本周行动。"
@@ -601,8 +723,8 @@ export function AiAssistantDialog({
             onCommand={runCommand}
             onSendMessage={sendMessage}
             onQuickAdjust={quickAdjust}
-            onAnswerClarification={answerClarification}
-            onSkipClarification={skipClarification}
+            onAnswerClarification={answerVisibleClarification}
+            onSkipClarification={skipVisibleClarification}
           >
             {response && responseTarget && (
               <>
@@ -888,6 +1010,32 @@ export function buildAiRequest(tab: AiTab, goal: GoalNode, flatGoals: GoalNode[]
   return base;
 }
 
+export function buildAgentRequest(
+  goal: GoalNode,
+  flatGoals: GoalNode[],
+  message: string,
+  options: {
+    conversation?: AiConversationMessage[];
+    lastTarget?: AiTab | null;
+    activeTarget?: AiTab | null;
+    currentResponse?: unknown;
+  } = {}
+): AiAgentRequest {
+  return {
+    goalId: goal.id,
+    goal: goalContextFromNode(goal),
+    parentChain: parentChain(goal, flatGoals).map(goalContextFromNode),
+    children: goal.children.map(goalContextFromNode),
+    siblings: siblingGoals(goal, flatGoals).map(goalContextFromNode),
+    branchGoals: flattenBranch(goal).map(goalContextFromNode),
+    message,
+    conversation: options.conversation,
+    lastTarget: options.lastTarget ?? null,
+    activeTarget: options.activeTarget ?? null,
+    currentResponse: options.currentResponse
+  };
+}
+
 async function requestAi(tab: AiTab, payload: unknown): Promise<AiResponse> {
   const endpoint = endpointForAssistantTarget(tab);
   const contract = aiRouteContracts[endpoint];
@@ -922,6 +1070,53 @@ async function requestAi(tab: AiTab, payload: unknown): Promise<AiResponse> {
 
   const body = await response.json();
   return responseSchemas[tab].parse(body) as AiResponse;
+}
+
+export async function requestAgent(payload: AiAgentRequest, options: RequestAgentOptions = {}): Promise<AiAgentResponse> {
+  try {
+    await options.beforeGenerate?.();
+  } catch (error) {
+    throw new AiAgentPreparationError(error);
+  }
+
+  const contract = aiRouteContracts.agent;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_CLIENT_TIMEOUT_MS);
+  const fetchImpl = options.fetch ?? fetch;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(contract.path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify(payload)
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("AI 请求超时，请重试");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (response.status === 501) {
+    throw new Error("AI 后端尚未配置");
+  }
+
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error || "AI 请求失败");
+  }
+
+  const body = await response.json();
+  return aiAgentResponseSchema.parse(body);
+}
+
+function agentMessageText(decision: Extract<AiAgentResponse, { kind: "chat" | "clarify" }>) {
+  if (decision.kind !== "clarify" || !decision.options?.length) return decision.message;
+  return `${decision.message}\n${decision.options.map((option) => `- ${option}`).join("\n")}`;
 }
 
 function aiErrorMessage(error: unknown) {
