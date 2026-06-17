@@ -1,4 +1,5 @@
 import type {
+  AiAgentResponse,
   AiClarificationAnswer,
   AiClarifyingQuestion,
   AiConversationMessage,
@@ -17,7 +18,6 @@ export type AiAssistantCommand = {
 };
 export type AiAssistantMessageRoute =
   | { kind: "task"; target: AiAssistantTarget; inferred: boolean }
-  | { kind: "chat"; reply: string }
   | { kind: "needs-command"; reply: string };
 export type AiDraftCommand = {
   id: "draft-goal";
@@ -117,20 +117,6 @@ function explicitAssistantTargetFromMessage(message: string): AiAssistantTarget 
   return null;
 }
 
-function localAssistantReply(message: string): string | null {
-  const normalized = message.trim().toLowerCase();
-  if (/^(你好|您好|哈喽|hello|hi|hey|在吗)[！!。.\s]*$/i.test(normalized)) {
-    return "你好，我可以帮你优化目标、拆解子目标、体检分支，或安排本周行动。你可以直接说想做哪一件。";
-  }
-  if (/^(谢谢|感谢|thank(s| you)?|thx)[！!。.\s]*$/i.test(normalized)) {
-    return "不客气。需要我继续处理这个目标时，直接告诉我任务。";
-  }
-  if (/(你能做什么|能干什么|怎么用|帮助|help|what can you do)/i.test(normalized)) {
-    return "我能围绕当前目标做四件事：优化目标、拆解子目标、体检分支、本周行动。你可以点快捷指令，也可以直接用自然语言说。";
-  }
-  return null;
-}
-
 export function resolveAssistantMessageRoute(
   target: AiAssistantTarget | null | undefined,
   message: string
@@ -138,11 +124,6 @@ export function resolveAssistantMessageRoute(
   const explicitTarget = explicitAssistantTargetFromMessage(message);
   if (explicitTarget) {
     return { kind: "task", target: explicitTarget, inferred: true };
-  }
-
-  const reply = localAssistantReply(message);
-  if (reply) {
-    return { kind: "chat", reply };
   }
 
   if (target) {
@@ -164,6 +145,27 @@ export function resolveAssistantMessageTarget(
   return {
     target: route.target,
     inferred: route.inferred
+  };
+}
+
+export function agentClarifyingQuestionFromDecision(
+  decision: Extract<AiAgentResponse, { kind: "clarify" }>
+): AiClarifyingQuestion | null {
+  const options = (decision.options ?? [])
+    .map((label) => label.trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .map((label, index) => ({
+      id: `option-${index}`,
+      label
+    }));
+
+  if (options.length < 2) return null;
+
+  return {
+    id: "agent-clarify",
+    question: decision.message,
+    options
   };
 }
 

@@ -101,6 +101,25 @@ describe("AI routes", () => {
     expect(response.json()).toEqual({ error: "AI provider not configured" });
   });
 
+  it("returns 501 for valid agent router requests until a provider is configured", async () => {
+    const routes = buildRoutes();
+    const response = await inject(routes, "/api/ai/agent", {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: [],
+      branchGoals: [validGoalContext],
+      message: "帮我看看这个目标应该怎么处理",
+      conversation: [{ role: "user", content: "帮我看看这个目标应该怎么处理" }],
+      lastTarget: null,
+      activeTarget: null
+    });
+
+    expect(response.statusCode).toBe(501);
+    expect(response.json()).toEqual({ error: "AI provider not configured" });
+  });
+
   it("calls a configured provider for draft-goal and parses a goal draft", async () => {
     const request = {
       mode: "top",
@@ -153,6 +172,53 @@ describe("AI routes", () => {
       domain: "Career",
       priority: 60,
       summary: "Make release readiness measurable."
+    });
+  });
+
+  it("calls a configured provider for the agent router and parses a tool decision", async () => {
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: [],
+      branchGoals: [validGoalContext],
+      message: "这个目标太大了，帮我拆成几个子目标",
+      conversation: [{ role: "user", content: "这个目标太大了，帮我拆成几个子目标" }],
+      lastTarget: null,
+      activeTarget: null
+    };
+
+    const result = await runAiProvider("agent", request, {
+      env: {
+        AI_PROVIDER_URL: "https://provider.example/v1",
+        AI_PROVIDER_KEY: "test-key",
+        AI_PROVIDER_MODEL: "test-model"
+      },
+      readLocalEnv: () => ({}),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    kind: "tool",
+                    target: "subgoals",
+                    message: "我会先把它拆成几个候选子目标。"
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+    });
+
+    expect(result).toEqual({
+      kind: "tool",
+      target: "subgoals",
+      message: "我会先把它拆成几个候选子目标。"
     });
   });
 
@@ -321,6 +387,28 @@ describe("AI routes", () => {
       ...request,
       turn: { intent: "generate", allowClarification: false }
     })).not.toContain("clarifyingQuestion");
+  });
+
+  it("uses a controlled tool-routing prompt for the agent endpoint", () => {
+    const prompt = systemPromptFor("agent", {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: [],
+      branchGoals: [validGoalContext],
+      message: "帮我看看",
+      conversation: [{ role: "user", content: "帮我看看" }],
+      lastTarget: null,
+      activeTarget: null
+    });
+
+    expect(prompt).toContain("controlled goal-coach agent router");
+    expect(prompt).toContain("Do not write data");
+    expect(prompt).toContain("improve");
+    expect(prompt).toContain("subgoals");
+    expect(prompt).toContain("diagnose");
+    expect(prompt).toContain("weekly");
   });
 
   it("parses provider clarification responses through route contracts", async () => {

@@ -145,12 +145,15 @@ function readLocalEnvFile(): AiProviderEnv {
 }
 
 export function systemPromptFor(endpoint: AiEndpoint, request: unknown) {
+  if (endpoint === "agent") return agentSystemPromptFor(request);
+
   const resultFields = {
     "improve-goal": ["summary", "successSignals", "actionCandidates", "reviewQuestions"],
     "suggest-subgoals": ["subgoals"],
     "diagnose-branch": ["findings"],
     "suggest-weekly-actions": ["weeklyActions"],
-    "draft-goal": ["title", "domain", "horizon", "priority", "progress", "summary", "successSignals", "actionCandidates", "reviewQuestions"]
+    "draft-goal": ["title", "domain", "horizon", "priority", "progress", "summary", "successSignals", "actionCandidates", "reviewQuestions"],
+    agent: ["kind", "target", "message", "options"]
   } satisfies Record<AiEndpoint, string[]>;
   const allowClarification = Boolean(
     request &&
@@ -183,6 +186,31 @@ export function systemPromptFor(endpoint: AiEndpoint, request: unknown) {
     "- lower-frequency: lower cadence or review/action frequency where the endpoint has cadence semantics.",
     "- fewer-actions: keep only the highest-leverage items.",
     "actionCandidates may be strings or { text, done } objects; subgoals must be independent goal suggestions; weeklyActions must be actionable weekly items."
+  ].join("\n");
+}
+
+function agentSystemPromptFor(request: unknown) {
+  return [
+    "You are a controlled goal-coach agent router for a personal goal network.",
+    "Return exactly one JSON object and no markdown, prose, or custom sections.",
+    "Do not write data, create records, delete records, or claim that data has been saved.",
+    "Your job is to decide the next safe assistant step: chat, clarify, or select one controlled tool.",
+    "Allowed top-level fields by kind:",
+    "- chat: kind, message, warnings",
+    "- clarify: kind, message, options, warnings",
+    "- tool: kind, target, message, warnings",
+    "Allowed tool targets:",
+    "- improve: improve or rewrite the current goal definition, success signals, action candidates, or review questions.",
+    "- subgoals: split the current goal into independent child-goal candidates.",
+    "- diagnose: inspect the current branch for risks, conflicts, stale work, vague goals, or bottlenecks.",
+    "- weekly: propose actionable next-week or current-week actions.",
+    "Use chat for greetings, thanks, small talk, and capability questions.",
+    "Use clarify when the user wants help but the requested action is ambiguous and no recent target clearly applies.",
+    "Use tool when the user asks for a concrete goal operation, or when their follow-up should continue lastTarget/activeTarget.",
+    "If lastTarget or activeTarget exists and the user gives a short follow-up such as 'less', 'more concrete', or 'reduce scope', keep that target unless the user explicitly switches.",
+    "The final write still requires user confirmation outside this router.",
+    "Request JSON follows for context; use it only to route safely.",
+    JSON.stringify(request, null, 2)
   ].join("\n");
 }
 

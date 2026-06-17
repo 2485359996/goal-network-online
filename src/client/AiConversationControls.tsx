@@ -1,4 +1,4 @@
-import { Send, SlidersHorizontal } from "lucide-react";
+import { Activity, CalendarCheck, ListTree, Send, SlidersHorizontal, Sparkles } from "lucide-react";
 import React, { useState } from "react";
 import type {
   AiClarificationAnswer,
@@ -14,6 +14,8 @@ type AiConversationControlsProps = {
   quickAdjustments: AiQuickAdjustment[];
   clarifyingQuestion?: AiClarifyingQuestion;
   busy: boolean;
+  showSkipClarification?: boolean;
+  clarificationSkipLabel?: string;
   intro?: {
     title: string;
     body: string;
@@ -37,6 +39,8 @@ export function AiConversationControls({
   quickAdjustments,
   clarifyingQuestion,
   busy,
+  showSkipClarification = true,
+  clarificationSkipLabel = "按现有信息生成",
   intro,
   inputPlaceholder = "继续告诉 AI 你想怎么调整",
   children,
@@ -101,9 +105,11 @@ export function AiConversationControls({
                 {option.label}
               </button>
             ))}
-            <button type="button" className="ghost-button" disabled={busy} onClick={onSkipClarification}>
-              按现有信息生成
-            </button>
+            {showSkipClarification && (
+              <button type="button" className="ghost-button" disabled={busy} onClick={onSkipClarification}>
+                {clarificationSkipLabel}
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -118,6 +124,7 @@ export function AiConversationControls({
               disabled={busy}
               onClick={() => onCommand?.(command.id)}
             >
+              <CommandIcon id={command.id} />
               {command.label}
             </button>
           ))}
@@ -162,4 +169,11 @@ export function AiConversationControls({
       </div>
     </div>
   );
+}
+
+function CommandIcon({ id }: { id: string }) {
+  if (id === "subgoals") return <ListTree aria-hidden="true" focusable="false" />;
+  if (id === "diagnose") return <Activity aria-hidden="true" focusable="false" />;
+  if (id === "weekly") return <CalendarCheck aria-hidden="true" focusable="false" />;
+  return <Sparkles aria-hidden="true" focusable="false" />;
 }

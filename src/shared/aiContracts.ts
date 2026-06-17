@@ -23,6 +23,8 @@ export const aiQuickAdjustmentSchema = z.enum([
   "fewer-actions"
 ]);
 
+export const aiAssistantTargetSchema = z.enum(["improve", "subgoals", "diagnose", "weekly"]);
+
 export const aiConversationMessageSchema = z.object({
   role: z.enum(["user", "assistant"]),
   content: z.string().min(1)
@@ -117,6 +119,15 @@ export const draftGoalRequestSchema = z.object({
   turn: aiTurnSchema.optional()
 }).strict();
 
+export const aiAgentRequestSchema = baseGoalRequestSchema.extend({
+  branchGoals: z.array(aiGoalContextSchema).optional(),
+  message: z.string().trim().min(1),
+  conversation: z.array(aiConversationMessageSchema).optional(),
+  lastTarget: aiAssistantTargetSchema.nullable().optional(),
+  activeTarget: aiAssistantTargetSchema.nullable().optional(),
+  currentResponse: z.unknown().optional()
+}).strict();
+
 export const aiSubgoalSuggestionSchema = z.object({
   title: z.string().min(1),
   summary: z.string().optional(),
@@ -145,6 +156,26 @@ export const aiWeeklyActionSchema = z.preprocess((value) => {
 }).strip());
 
 const warningsSchema = z.array(z.string()).optional();
+
+export const aiAgentResponseSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("chat"),
+    message: z.string().min(1),
+    warnings: warningsSchema
+  }).strict(),
+  z.object({
+    kind: z.literal("clarify"),
+    message: z.string().min(1),
+    options: z.array(z.string().min(1)).min(2).max(4).optional(),
+    warnings: warningsSchema
+  }).strict(),
+  z.object({
+    kind: z.literal("tool"),
+    target: aiAssistantTargetSchema,
+    message: z.string().min(1).optional(),
+    warnings: warningsSchema
+  }).strict()
+]);
 
 function withClarification<T extends z.ZodRawShape>(
   shape: T,
@@ -222,10 +253,16 @@ export const aiRouteContracts = {
     path: "/api/ai/draft-goal",
     request: draftGoalRequestSchema,
     response: draftGoalResponseSchema
+  },
+  agent: {
+    path: "/api/ai/agent",
+    request: aiAgentRequestSchema,
+    response: aiAgentResponseSchema
   }
 } as const;
 
 export type AiEndpoint = keyof typeof aiRouteContracts;
+export type AiAssistantTarget = z.infer<typeof aiAssistantTargetSchema>;
 export type AiTurn = z.infer<typeof aiTurnSchema>;
 export type AiTurnIntent = z.infer<typeof aiTurnIntentSchema>;
 export type AiQuickAdjustment = z.infer<typeof aiQuickAdjustmentSchema>;
@@ -240,11 +277,13 @@ export type AiSuggestSubgoalsRequest = z.infer<typeof suggestSubgoalsRequestSche
 export type AiDiagnoseBranchRequest = z.infer<typeof diagnoseBranchRequestSchema>;
 export type AiSuggestWeeklyActionsRequest = z.infer<typeof suggestWeeklyActionsRequestSchema>;
 export type AiDraftGoalRequest = z.infer<typeof draftGoalRequestSchema>;
+export type AiAgentRequest = z.infer<typeof aiAgentRequestSchema>;
 export type AiImproveGoalResponse = z.infer<typeof improveGoalResponseSchema>;
 export type AiSuggestSubgoalsResponse = z.infer<typeof suggestSubgoalsResponseSchema>;
 export type AiDiagnoseBranchResponse = z.infer<typeof diagnoseBranchResponseSchema>;
 export type AiSuggestWeeklyActionsResponse = z.infer<typeof suggestWeeklyActionsResponseSchema>;
 export type AiDraftGoalResponse = z.infer<typeof draftGoalResponseSchema>;
+export type AiAgentResponse = z.infer<typeof aiAgentResponseSchema>;
 export type AiSubgoalSuggestion = z.infer<typeof aiSubgoalSuggestionSchema>;
 export type AiFinding = z.infer<typeof aiFindingSchema>;
 export type AiWeeklyActionSuggestion = z.infer<typeof aiWeeklyActionSchema>;

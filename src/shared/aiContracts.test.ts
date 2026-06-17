@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  aiAgentRequestSchema,
+  aiAgentResponseSchema,
   aiFindingSchema,
   aiWeeklyActionSchema,
   draftGoalRequestSchema,
@@ -69,6 +71,43 @@ describe("AI contracts", () => {
         }
       }).success
     ).toBe(true);
+  });
+
+  it("accepts controlled agent router requests and decisions", () => {
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: [],
+      branchGoals: [validGoalContext],
+      message: "这个目标太大了，帮我拆成几个子目标",
+      conversation: [{ role: "user", content: "这个目标太大了，帮我拆成几个子目标" }],
+      lastTarget: null,
+      activeTarget: null
+    };
+
+    expect(aiAgentRequestSchema.safeParse(request).success).toBe(true);
+    expect(aiAgentRequestSchema.safeParse({ ...request, message: "" }).success).toBe(false);
+    expect(aiAgentResponseSchema.parse({
+      kind: "tool",
+      target: "subgoals",
+      message: "我会先把它拆成几个候选子目标。"
+    })).toEqual({
+      kind: "tool",
+      target: "subgoals",
+      message: "我会先把它拆成几个候选子目标。"
+    });
+    expect(aiAgentResponseSchema.parse({
+      kind: "clarify",
+      message: "你更想先优化定义，还是拆解行动？",
+      options: ["优化目标", "拆解子目标"]
+    })).toEqual({
+      kind: "clarify",
+      message: "你更想先优化定义，还是拆解行动？",
+      options: ["优化目标", "拆解子目标"]
+    });
+    expect(aiAgentResponseSchema.safeParse({ kind: "tool", target: "delete-goal" }).success).toBe(false);
   });
 
   it("accepts clarification-only responses and rejects mixed result responses", () => {
