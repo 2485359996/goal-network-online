@@ -14,6 +14,7 @@ import {
   isClarificationOnlyResponse,
   quickAdjustmentLabel,
   resolveAssistantMessageRoute,
+  shouldUseAgentRouterForRoute,
   type AiAssistantMessageRoute,
   type AiAssistantTarget,
   shouldAllowGoalClarification
@@ -373,14 +374,17 @@ export function AiAssistantDialog({
     target: AiTab,
     turn: AiTurn,
     nextMessages: AiConversationMessage[],
-    options: { clearOnError?: boolean } = {}
+    options: { clearOnError?: boolean; skipBeforeGenerate?: boolean } = {}
   ) => {
+    setMessages(nextMessages);
     setLoading(true);
     setError("");
     setNotice("");
 
     try {
-      await onBeforeGenerate?.();
+      if (!options.skipBeforeGenerate) {
+        await onBeforeGenerate?.();
+      }
       const nextResponse = await requestAi(target, buildAiRequest(target, goal, flatGoals, turn));
       handleAiResponse(target, nextResponse, turn.allowClarification === true, nextMessages);
     } catch (nextError) {
@@ -478,7 +482,8 @@ export function AiAssistantDialog({
     target: AiTab,
     inferred: boolean,
     message: string,
-    nextMessages: AiConversationMessage[]
+    nextMessages: AiConversationMessage[],
+    options: { skipBeforeGenerate?: boolean } = {}
   ) => {
     const nextParentChain = parentChain(goal, flatGoals);
     const nextSiblings = siblingGoals(goal, flatGoals);
@@ -511,7 +516,8 @@ export function AiAssistantDialog({
         conversation: nextMessages,
         currentResponse: target === responseTarget && response ? currentResponseWithDrafts(target, response) : undefined
       }),
-      nextMessages
+      nextMessages,
+      options
     );
   };
 
@@ -520,6 +526,7 @@ export function AiAssistantDialog({
     nextMessages: AiConversationMessage[],
     fallbackRoute: AiAssistantMessageRoute
   ) => {
+    setMessages(nextMessages);
     setLoading(true);
     setError("");
     setNotice("");
@@ -562,7 +569,7 @@ export function AiAssistantDialog({
         ? [...nextMessages, { role: "assistant", content: decision.message }]
         : nextMessages;
       setLoading(false);
-      runTaskMessage(decision.target, true, message, taskMessages);
+      runTaskMessage(decision.target, true, message, taskMessages, { skipBeforeGenerate: true });
     } catch (nextError) {
       if (nextError instanceof AiAgentPreparationError) {
         setError(aiErrorMessage(nextError.originalError));
@@ -572,7 +579,7 @@ export function AiAssistantDialog({
 
       if (fallbackRoute.kind === "task") {
         setLoading(false);
-        runTaskMessage(fallbackRoute.target, fallbackRoute.inferred, message, nextMessages);
+        runTaskMessage(fallbackRoute.target, fallbackRoute.inferred, message, nextMessages, { skipBeforeGenerate: true });
         return;
       }
 
@@ -591,6 +598,12 @@ export function AiAssistantDialog({
       setClarifyingQuestion(null);
       setClarificationSource(null);
     }
+
+    if (!shouldUseAgentRouterForRoute(fallbackRoute)) {
+      runTaskMessage(fallbackRoute.target, fallbackRoute.inferred, message, nextMessages);
+      return;
+    }
+
     void runAgentMessage(message, nextMessages, fallbackRoute);
   };
 
@@ -714,6 +727,7 @@ export function AiAssistantDialog({
             quickAdjustments={responseTarget ? availableQuickAdjustmentsForTarget(responseTarget) : []}
             clarifyingQuestion={clarifyingQuestion ?? undefined}
             busy={busy || saving}
+            pending={loading}
             showSkipClarification={clarificationSource !== "agent"}
             intro={{
               title: "AI",

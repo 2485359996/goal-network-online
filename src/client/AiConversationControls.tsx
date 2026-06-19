@@ -1,4 +1,4 @@
-import { Activity, CalendarCheck, ListTree, Send, SlidersHorizontal, Sparkles } from "lucide-react";
+import { Activity, CalendarCheck, ListTree, Loader2, Send, SlidersHorizontal, Sparkles } from "lucide-react";
 import React, { useState } from "react";
 import type {
   AiClarificationAnswer,
@@ -14,6 +14,8 @@ type AiConversationControlsProps = {
   quickAdjustments: AiQuickAdjustment[];
   clarifyingQuestion?: AiClarifyingQuestion;
   busy: boolean;
+  pending?: boolean;
+  pendingLabel?: string;
   showSkipClarification?: boolean;
   clarificationSkipLabel?: string;
   intro?: {
@@ -29,6 +31,8 @@ type AiConversationControlsProps = {
   onSkipClarification: () => void;
 };
 
+export const AI_THINKING_STATUS_LABEL = "AI 正在校准星图...";
+
 export function shouldSendAiMessageFromKey(key: string, isComposing: boolean) {
   return key === "Enter" && !isComposing;
 }
@@ -39,6 +43,8 @@ export function AiConversationControls({
   quickAdjustments,
   clarifyingQuestion,
   busy,
+  pending = false,
+  pendingLabel = AI_THINKING_STATUS_LABEL,
   showSkipClarification = true,
   clarificationSkipLabel = "按现有信息生成",
   intro,
@@ -61,7 +67,7 @@ export function AiConversationControls({
 
   return (
     <div className="ai-conversation">
-      {((messages.length > 0 || children) || intro) && (
+      {((messages.length > 0 || children || pending) || intro) && (
         <div className="ai-message-list" aria-live="polite">
           {messages.length === 0 && intro && (
             <div className="ai-message assistant">
@@ -75,6 +81,19 @@ export function AiConversationControls({
               <span>{item.content}</span>
             </div>
           ))}
+          {pending && (
+            <div className="ai-message assistant ai-thinking-message" role="status" aria-live="polite" aria-label={pendingLabel}>
+              <strong>AI</strong>
+              <span className="ai-thinking-content">
+                <span className="ai-thinking-orbit" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                <span>{pendingLabel}</span>
+              </span>
+            </div>
+          )}
           {children && (
             <div className="ai-message assistant ai-result-message">
               <strong>AI</strong>
@@ -153,7 +172,7 @@ export function AiConversationControls({
           type="text"
           value={message}
           disabled={busy}
-          placeholder={inputPlaceholder}
+          placeholder={pending ? "AI 正在思考，请稍候" : inputPlaceholder}
           onChange={(event) => setMessage(event.target.value)}
           onKeyDown={(event) => {
             if (shouldSendAiMessageFromKey(event.key, event.nativeEvent.isComposing)) {
@@ -163,8 +182,8 @@ export function AiConversationControls({
           }}
         />
         <button type="button" className="primary-button" disabled={busy || !trimmedMessage} onClick={send}>
-          <Send />
-          发送
+          {pending ? <Loader2 className="spin" /> : <Send />}
+          {pending ? "思考中" : "发送"}
         </button>
       </div>
     </div>

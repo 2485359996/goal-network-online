@@ -352,8 +352,19 @@ export function goalscapeNodeColor(goal: GoalNode, fallback: string) {
   return normalizeHexColor(goal.color) || domainBaseColor(goal.domain || goal.title) || fallback;
 }
 
-function resolveGoalPreviewColor(goal: GoalNode, fallback: string, colorOverrides: ColorOverrides) {
-  return normalizeHexColor(colorOverrides[goal.id]) || normalizeHexColor(fallback) || resolveGoalThemeColor(goal, fallback);
+function resolveGoalPreviewColor(
+  goal: GoalNode,
+  fallback: string,
+  colorOverrides: ColorOverrides,
+  options: { preferFallback?: boolean } = {}
+) {
+  const previewColor = normalizeHexColor(colorOverrides[goal.id]);
+  if (previewColor) return previewColor;
+
+  const fallbackColor = normalizeHexColor(fallback);
+  if (options.preferFallback && fallbackColor) return fallbackColor;
+
+  return resolveGoalThemeColor(goal, fallbackColor);
 }
 
 function normalizeLayoutColorArgs(colorOverridesOrTreeRootThemeColor: ColorOverrides | string, treeRootThemeColor: string) {
@@ -441,7 +452,9 @@ export function buildSunburstLayout(
         title: centerGoal.title,
         depth: 1,
         radius: sunburstCenterRadius,
-        color: resolveGoalPreviewColor(centerGoal, forcedTreeRootThemeColor || goalThemeColorForIndex(0), colorOverrides),
+        color: resolveGoalPreviewColor(centerGoal, forcedTreeRootThemeColor || goalThemeColorForIndex(0), colorOverrides, {
+          preferFallback: Boolean(forcedTreeRootThemeColor)
+        }),
         progress: weightedGoalProgress(centerGoal, importanceOverrides, progressOverrides),
         node: centerGoal
       }
@@ -487,7 +500,9 @@ export function buildSunburstLayout(
       const childEndAngle = index === children.length - 1 ? endAngle : cursor + adjustedSpans[index];
       const ring = sunburstRingForDepth(depth, visibleDepth, hasSyntheticRoot);
       const fallbackColor = parentId === "root" ? forcedTreeRootThemeColor || goalThemeColorForIndex(index) : inheritedColor;
-      const color = resolveGoalPreviewColor(child, fallbackColor, colorOverrides);
+      const color = resolveGoalPreviewColor(child, fallbackColor, colorOverrides, {
+        preferFallback: parentId !== "root" || Boolean(forcedTreeRootThemeColor)
+      });
       const segment: SunburstSegmentLayout = {
         id: child.id,
         node: child,
@@ -786,7 +801,7 @@ export function buildGoalscapeLayout(
       const childBaseAngle = goalscapeAngleForPosition(basePosition);
       const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? children.length, depth, visibleDepth);
       const childSize = goalscapeChildNodeSize(parentLayout, childIndex, depth, densityScale, 1);
-      const childColor = resolveGoalPreviewColor(child, parentLayout.color, colorOverrides);
+      const childColor = resolveGoalPreviewColor(child, parentLayout.color, colorOverrides, { preferFallback: true });
       const childLayout: GoalscapeNodeLayout = {
         node: child,
         parentId: parentLayout.node.id,
@@ -828,7 +843,9 @@ export function buildGoalscapeLayout(
     const baseAngle = goalscapeAngleForPosition(basePosition);
     const densityScale = goalscapeRingDensityScale(renderDepthCounts.get(depth) ?? goals.length, depth, visibleDepth);
     const size = goalscapeTopNodeSize(densityScale, 1);
-    const color = resolveGoalPreviewColor(goal, forcedTreeRootThemeColor || goalThemeColorForIndex(index), colorOverrides);
+    const color = resolveGoalPreviewColor(goal, forcedTreeRootThemeColor || goalThemeColorForIndex(index), colorOverrides, {
+      preferFallback: Boolean(forcedTreeRootThemeColor)
+    });
     const importance = topImportance[goal.id] ?? 0;
     const layout: GoalscapeNodeLayout = {
       node: goal,

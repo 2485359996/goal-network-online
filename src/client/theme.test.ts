@@ -229,4 +229,15 @@ describe("floating AI assistant", () => {
     expect(source).toContain("<span>目标星球</span>");
     expect(source).not.toContain("目标圆球");
   });
+
+  it("styles the AI thinking state as quiet motion with reduced-motion support", () => {
+    const styles = clientStyles();
+    const reducedMotionBlock = styles.match(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n}/)?.[0] ?? "";
+
+    expect(styles).toMatch(/\.ai-thinking-message\s*{[\s\S]*border-color:/);
+    expect(styles).toContain("@keyframes ai-thinking-breathe");
+    expect(styles).toContain("@keyframes ai-thinking-scan");
+    expect(reducedMotionBlock).toContain(".ai-thinking-message::after");
+    expect(reducedMotionBlock).toContain(".ai-thinking-orbit");
+  });
 });

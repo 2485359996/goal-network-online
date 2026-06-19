@@ -148,6 +148,12 @@ export function resolveAssistantMessageTarget(
   };
 }
 
+export function shouldUseAgentRouterForRoute(
+  route: AiAssistantMessageRoute
+): route is Exclude<AiAssistantMessageRoute, { kind: "task" }> {
+  return route.kind !== "task";
+}
+
 export function agentClarifyingQuestionFromDecision(
   decision: Extract<AiAgentResponse, { kind: "clarify" }>
 ): AiClarifyingQuestion | null {

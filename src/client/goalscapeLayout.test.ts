@@ -387,6 +387,21 @@ describe("goalscape layout", () => {
     expect(childLayout?.color).toBe(GOAL_THEME_COLORS[0].value);
   });
 
+  it("keeps stored top-level theme colors stable when drilling into a sphere branch", () => {
+    const realRootColor = "#e11d48";
+    const leaf = { ...goal("leaf"), color: "#0284c7" };
+    const focusedChild = { ...goal("focused-child"), color: "#10b981", children: [leaf] };
+    const root = { ...goal("root"), color: realRootColor, children: [focusedChild] };
+
+    const rootLayouts = buildGoalscapeLayout([root], {}, {});
+    const focusedLayouts = buildGoalscapeLayout(root.children, {}, {}, {}, root.id, undefined, {}, realRootColor);
+
+    expect(rootLayouts.find((layout) => layout.node.id === "root")?.color).toBe(realRootColor);
+    expect(rootLayouts.find((layout) => layout.node.id === "focused-child")?.color).toBe(realRootColor);
+    expect(focusedLayouts.find((layout) => layout.node.id === "focused-child")?.color).toBe(realRootColor);
+    expect(focusedLayouts.find((layout) => layout.node.id === "leaf")?.color).toBe(realRootColor);
+  });
+
   it("maps live theme color previews to first-level goals and descendants in the sphere map", () => {
     const previewColor = GOAL_THEME_COLORS[4].value;
     const roots = [
@@ -428,17 +443,8 @@ describe("goalscape layout", () => {
     const realRootColor = "#e11d48";
     const leaf = { ...goal("leaf"), color: "#0284c7" };
     const focusedChild = { ...goal("focused-child"), color: "#10b981", children: [leaf] };
-    const focusedLayoutBuilder = buildGoalscapeLayout as (
-      goals: GoalNode[],
-      importanceOverrides: Record<string, number>,
-      progressOverrides: Record<string, number>,
-      positionOverrides: Record<string, { x: number; y: number }>,
-      mapContextId: string,
-      selectedId: string | undefined,
-      treeRootThemeColor: string
-    ) => ReturnType<typeof buildGoalscapeLayout>;
 
-    const layouts = focusedLayoutBuilder([focusedChild], {}, {}, {}, "focused-parent", undefined, realRootColor);
+    const layouts = buildGoalscapeLayout([focusedChild], {}, {}, {}, "focused-parent", undefined, {}, realRootColor);
 
     expect(layouts.find((layout) => layout.node.id === "focused-child")?.color).toBe(realRootColor);
     expect(layouts.find((layout) => layout.node.id === "leaf")?.color).toBe(realRootColor);

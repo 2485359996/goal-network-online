@@ -1,5 +1,6 @@
 "use client";
 
+import { useGSAP } from "@gsap/react";
 import {
   BookOpen,
   Briefcase,
@@ -37,7 +38,9 @@ import {
   Users,
   X
 } from "lucide-react";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import gsap from "gsap";
+import { ScrollTrigger } from "gsap/ScrollTrigger";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ActionCreateInput,
@@ -53,7 +56,7 @@ import { createBrowserSupabaseClient } from "../lib/supabase/client";
 import { isPrimaryGoalNode, isPrimaryGoalTitle, normalizedGoalTitle } from "../shared/goalRules";
 import { AiAssistantDialog } from "./AiAssistantDialog";
 import { CreateGoalDialog, type CreateGoalDialogContext } from "./CreateGoalDialog";
-import { listItemTransition, useBannerMotion, useDialogMotion, useListItemMotion } from "./motion";
+import { listItemTransition, tween, useBannerMotion, useDialogMotion, useListItemMotion } from "./motion";
 import { useModalDialog } from "./useModalDialog";
 import {
   applyThemePreference,
@@ -140,6 +143,8 @@ import {
   type MapPositionPreviewOverrides,
   type SunburstSegmentLayout
 } from "./goalscapeLayout";
+
+gsap.registerPlugin(useGSAP, ScrollTrigger);
 
 // Re-export the goal-data helpers that the goalscape layout test imports from "./main".
 export {
@@ -349,6 +354,18 @@ function goalscapeCorePulse(progress: number) {
   return Number((1.02 + clamp(progress, 0, 100) * 0.0009).toFixed(3));
 }
 
+function BrandLogoMark() {
+  return (
+    <svg className="brand-logo-mark" viewBox="0 0 32 32" fill="none" focusable="false">
+      <path className="brand-logo-frame" d="M16 4.8L26.4 10.8V21.2L16 27.2L5.6 21.2V10.8L16 4.8Z" />
+      <path className="brand-logo-fold brand-logo-fold-top" d="M9.2 16L15.3 8.6C15.7 8.1 16.3 8.1 16.7 8.6L22.8 16" />
+      <path className="brand-logo-fold brand-logo-fold-bottom" d="M22.8 16L16.7 23.4C16.3 23.9 15.7 23.9 15.3 23.4L9.2 16" />
+      <path className="brand-logo-axis" d="M9.2 16H22.8" />
+      <circle className="brand-logo-core" cx="16" cy="16" r="2.35" />
+    </svg>
+  );
+}
+
 export function GoalApp() {
   const [goals, setGoals] = useState<GoalsResponse>(emptyGoals);
   const [selectedId, setSelectedId] = useState("root");
@@ -383,6 +400,7 @@ export function GoalApp() {
   const [resizingPanelAxis, setResizingPanelAxis] = useState<"width" | "height" | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [systemPrefersDark, setSystemPrefersDark] = useState(false);
+  const appShellRef = useRef<HTMLDivElement | null>(null);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const mapPaneRef = useRef<HTMLElement | null>(null);
   const pendingEditRef = useRef<PendingEdit | null>(null);
@@ -1159,16 +1177,91 @@ export function GoalApp() {
   const nextThemeLabel = themeLabels[nextThemePreference(themePreference)];
   const themeButtonLabel = `主题：${themeLabels[themePreference]}，当前${themeLabels[appliedTheme]}，点击切换为${nextThemeLabel}`;
   const ThemeIcon = themePreference === "system" ? Monitor : themePreference === "light" ? Sun : Moon;
+  const navSubtitle = authRequired
+    ? "登录后继续展开个人目标星图"
+    : loading
+      ? "正在校准你的目标轨道"
+      : activeGoalMap
+        ? `${activeGoalMap.name} · ${visibleFlatGoals.length} 个目标节点`
+        : "选择一张目标地图开始观测";
+
+  useGSAP(
+    () => {
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+      gsap.fromTo(
+        ".app-header",
+        { autoAlpha: 0, y: -18, scale: 0.985 },
+        { autoAlpha: 1, y: 0, scale: 1, duration: 0.72, ease: "power3.out" }
+      );
+      gsap.fromTo(
+        ".map-pane",
+        { autoAlpha: 0, scale: 0.94, filter: "blur(10px)" },
+        { autoAlpha: 1, scale: 1, filter: "blur(0px)", duration: 1.05, ease: "power3.out" }
+      );
+      gsap.fromTo(
+        ".detail-panel",
+        { autoAlpha: 0, y: 24, scale: 0.965 },
+        { autoAlpha: 1, y: 0, scale: 1, duration: 0.88, ease: "power3.out", delay: 0.08 }
+      );
+      gsap.fromTo(
+        ".map-canvas .starfield",
+        { autoAlpha: 0.26, scale: 0.84 },
+        { autoAlpha: 1, scale: 1, duration: 1.35, ease: "power2.out" }
+      );
+
+      const stackTargets = gsap.utils.toArray<HTMLElement>(".scope-map-entry, .presentation-toggle, .map-actions");
+      if (stackTargets.length) {
+        gsap.fromTo(
+          stackTargets,
+          { autoAlpha: 0, y: 18, scale: 0.975 },
+          {
+            autoAlpha: 1,
+            y: 0,
+            scale: 1,
+            duration: 0.72,
+            ease: "power3.out",
+            stagger: 0.035,
+            scrollTrigger: {
+              trigger: ".map-workspace",
+              start: "top 92%",
+              end: "bottom 10%",
+              toggleActions: "play none none reverse"
+            }
+          }
+        );
+      }
+
+      gsap.utils.toArray<HTMLElement>(".map-pane, .detail-panel").forEach((target) => {
+        gsap.fromTo(
+          target,
+          { scale: 0.985 },
+          {
+            scale: 1,
+            ease: "none",
+            scrollTrigger: {
+              trigger: target,
+              start: "top bottom",
+              end: "bottom top",
+              scrub: true
+            }
+          }
+        );
+      });
+    },
+    { scope: appShellRef, dependencies: [activeGoalMap?.id, authRequired, loading, presentationMode] }
+  );
 
   return (
-    <div className="app-shell">
+    <div ref={appShellRef} className="app-shell">
       <header className="app-header">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true">
-            <Network />
+            <BrandLogoMark />
           </span>
-          <div>
+          <div className="brand-copy">
             <h1>目标网络</h1>
+            <p className="brand-subtitle">{navSubtitle}</p>
           </div>
         </div>
         <div className="header-metrics" aria-label="目标网络概览">
@@ -1223,7 +1316,13 @@ export function GoalApp() {
         )}
       </AnimatePresence>
 
-      <main ref={workspaceRef} className={`map-workspace${resizingClass}${authRequired ? " auth-required-workspace" : ""}`} style={workspaceStyle}>
+      <main
+        id="main-content"
+        ref={workspaceRef}
+        className={`map-workspace${resizingClass}${authRequired ? " auth-required-workspace" : ""}`}
+        style={workspaceStyle}
+        tabIndex={-1}
+      >
         <section
           ref={mapPaneRef}
           className={`map-pane ${scopeListCollapsed ? "scope-collapsed" : "scope-open"}${presentationMode === "sunburst" ? " sunburst-active" : ""}`}
@@ -1302,9 +1401,16 @@ export function GoalApp() {
             {authRequired ? (
               <AuthRequiredState />
             ) : loading ? (
-              <div className="loading-state">
-                <Loader2 className="spin" />
-                正在读取 Obsidian 目标
+              <div className="loading-state" role="status" aria-live="polite">
+                <span className="loading-sigil" aria-hidden="true">
+                  <Loader2 className="spin" />
+                </span>
+                <span>正在校准目标星图</span>
+                <span className="loading-skeleton" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                </span>
               </div>
             ) : shouldShowFirstGoalMapCta(goals.goalMaps, loading) ? (
               <div className="first-map-empty" role="status">
@@ -1342,6 +1448,7 @@ export function GoalApp() {
                 importanceOverrides={importancePreview}
                 progressOverrides={progressPreview}
                 colorOverrides={colorPreview}
+                treeRootThemeColor={focusTreeRootThemeColor}
                 visibleDepth={sunburstVisibleDepth}
                 canAscend={Boolean(focusRootId)}
                 emptyLabel={mapEmptyLabel}
@@ -2577,6 +2684,7 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   importanceOverrides,
   progressOverrides,
   colorOverrides,
+  treeRootThemeColor,
   visibleDepth,
   canAscend,
   emptyLabel,
@@ -2592,6 +2700,7 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   importanceOverrides: ImportanceOverrides;
   progressOverrides: ProgressOverrides;
   colorOverrides: ColorOverrides;
+  treeRootThemeColor: string;
   visibleDepth: number;
   canAscend: boolean;
   emptyLabel: string;
@@ -2601,8 +2710,8 @@ const SunburstGoalMap = React.memo(function SunburstGoalMap({
   onVisibleDepthChange: React.Dispatch<React.SetStateAction<number>>;
 }) {
   const layout = useMemo(
-    () => buildSunburstLayout(goals, importanceOverrides, progressOverrides, visibleDepth, colorOverrides),
-    [goals, importanceOverrides, progressOverrides, visibleDepth, colorOverrides]
+    () => buildSunburstLayout(goals, importanceOverrides, progressOverrides, visibleDepth, colorOverrides, treeRootThemeColor),
+    [goals, importanceOverrides, progressOverrides, visibleDepth, colorOverrides, treeRootThemeColor]
   );
   const centerGoal = layout.center.node;
   const centerDisplayTitle = centerGoal?.title || centerTitle;
@@ -2975,6 +3084,19 @@ const GoalMap = React.memo(function GoalMap({
     [centerGoal, centerGoalPreviewColor]
   );
   const centerVisualMode = goalscapeCenterVisualMode(centerNodeId, previewedCenterGoal);
+  const [focusUnfoldId, setFocusUnfoldId] = useState<string | null>(null);
+  useEffect(() => {
+    if (centerVisualMode !== "goal") {
+      setFocusUnfoldId(null);
+      return;
+    }
+
+    setFocusUnfoldId(centerNodeId);
+    const timer = window.setTimeout(() => {
+      setFocusUnfoldId((current) => (current === centerNodeId ? null : current));
+    }, 560);
+    return () => window.clearTimeout(timer);
+  }, [centerNodeId, centerVisualMode]);
   const visibleLayouts = useMemo(
     () => [...layouts].sort((a, b) => a.zIndex - b.zIndex || a.depth - b.depth || a.node.id.localeCompare(b.node.id)),
     [layouts]
@@ -3173,7 +3295,8 @@ const GoalMap = React.memo(function GoalMap({
   return (
     <svg
       ref={svgRef}
-      className={`goal-map goalscape-map${centerVisualMode === "goal" ? " focused" : ""}${layouts.length > 20 ? " dense" : ""}`}
+      className={`goal-map goalscape-map${centerVisualMode === "goal" ? " focused" : ""}${focusUnfoldId === centerNodeId ? " focus-unfold" : ""}${layouts.length > 20 ? " dense" : ""}`}
+      data-focus-context={centerVisualMode === "goal" ? centerNodeId : undefined}
       viewBox="0 0 1200 760"
       role="img"
       aria-labelledby="map-title map-desc"
@@ -3214,16 +3337,16 @@ const GoalMap = React.memo(function GoalMap({
           <feColorMatrix
             in="blur"
             type="matrix"
-            values="0 0 0 0 0.20 0 0 0 0 0.48 0 0 0 0 1 0 0 0 0.72 0"
-            result="blueGlow"
+            values="0 0 0 0 0.10 0 0 0 0 0.58 0 0 0 0 0.50 0 0 0 0.72 0"
+            result="tealGlow"
           />
           <feMerge>
-            <feMergeNode in="blueGlow" />
+            <feMergeNode in="tealGlow" />
             <feMergeNode in="SourceGraphic" />
           </feMerge>
         </filter>
         <filter id="goalscape-node-volume" x="-36%" y="-36%" width="172%" height="172%" colorInterpolationFilters="sRGB">
-          <feDropShadow dx="0" dy="7" stdDeviation="5" floodColor="#0f172a" floodOpacity="0.18" />
+          <feDropShadow dx="0" dy="7" stdDeviation="5" floodColor="#0d1715" floodOpacity="0.18" />
         </filter>
         <linearGradient id="goalscape-liquid-specular" x1="0%" y1="0%" x2="100%" y2="0%">
           <stop offset="0%" stopColor="rgba(255, 255, 255, 0)" />
@@ -3709,6 +3832,18 @@ const GoalMap = React.memo(function GoalMap({
   );
 });
 
+function useDetailPanelSwitchMotion() {
+  const reduced = useReducedMotion();
+  return useMemo(
+    () => ({
+      initial: { opacity: reduced ? 1 : 0, y: reduced ? 0 : 10, scale: reduced ? 1 : 0.992 },
+      animate: { opacity: 1, y: 0, scale: 1, transition: reduced ? { duration: 0 } : tween(0.22) },
+      exit: { opacity: reduced ? 1 : 0, y: reduced ? 0 : -6, scale: 1, transition: reduced ? { duration: 0 } : tween(0.16) }
+    }),
+    [reduced]
+  );
+}
+
 const GoalDetailPanel = React.memo(function GoalDetailPanel({
   selectedGoal,
   activeGoalMap,
@@ -3758,44 +3893,57 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
     ? resolveGoalThemeColor(selectedGoal, themeColorEditable ? goalThemeColorForIndex(selectedTopGoalIndex) : "")
     : "";
   const listItemMotion = useListItemMotion();
+  const detailSwitchMotion = useDetailPanelSwitchMotion();
+  const detailSwitchKey = selectedGoal ? `goal-${selectedGoal.id}` : `map-${activeGoalMap?.id ?? "root"}`;
 
   if (!selectedGoal) {
     return (
       <aside className="detail-panel" aria-live="polite">
-        <div className="detail-head root-head">
-          <div className="goal-heading">
-            <p className="eyebrow">目标地图</p>
-            <h2>{goalMapCenterTitle(activeGoalMap)}</h2>
-          </div>
-          <span className="status-badge active">地图</span>
-        </div>
+        <AnimatePresence initial={false} mode="wait">
+          <motion.div
+            key={detailSwitchKey}
+            className="detail-panel-content root-detail-panel-content"
+            variants={detailSwitchMotion}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+          >
+            <div className="detail-head root-head">
+              <div className="goal-heading">
+                <p className="eyebrow">目标地图</p>
+                <h2>{goalMapCenterTitle(activeGoalMap)}</h2>
+              </div>
+              <span className="status-badge active">地图</span>
+            </div>
 
-        <section className="detail-section">
-          <h3>顶层目标</h3>
-          <div className="child-list">
-            <AnimatePresence initial={false}>
-              {topGoals.map((goal) => (
-                <motion.button
-                  key={goal.id}
-                  layout
-                  type="button"
-                  className="child-pill"
-                  style={{ "--pill-accent": domainAccentToken(goal.domain || goal.title) } as React.CSSProperties}
-                  variants={listItemMotion}
-                  initial="initial"
-                  animate="animate"
-                  exit="exit"
-                  transition={listItemTransition}
-                  onClick={() => onSelect(goal.id)}
-                >
-                  <span>{goal.title}</span>
-                  <small>{rootImportance[goal.id] ?? 0}%</small>
-                </motion.button>
-              ))}
-            </AnimatePresence>
-            {topGoals.length === 0 && <p className="muted-text">还没有顶层目标。</p>}
-          </div>
-        </section>
+            <section className="detail-section">
+              <h3>顶层目标</h3>
+              <div className="child-list">
+                <AnimatePresence initial={false}>
+                  {topGoals.map((goal) => (
+                    <motion.button
+                      key={goal.id}
+                      layout
+                      type="button"
+                      className="child-pill"
+                      style={{ "--pill-accent": domainAccentToken(goal.domain || goal.title) } as React.CSSProperties}
+                      variants={listItemMotion}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      transition={listItemTransition}
+                      onClick={() => onSelect(goal.id)}
+                    >
+                      <span>{goal.title}</span>
+                      <small>{rootImportance[goal.id] ?? 0}%</small>
+                    </motion.button>
+                  ))}
+                </AnimatePresence>
+                {topGoals.length === 0 && <p className="muted-text">还没有顶层目标。</p>}
+              </div>
+            </section>
+          </motion.div>
+        </AnimatePresence>
       </aside>
     );
   }
@@ -3806,74 +3954,85 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
       aria-live="polite"
       style={domainAccent ? ({ "--domain-accent": domainAccent } as React.CSSProperties) : undefined}
     >
-      <div className="detail-head">
-        <div className="goal-heading">
-          <div className="goal-path" aria-label="目标路径">
-            {breadcrumbGoals.map((goal, index) => (
-              <React.Fragment key={goal.id}>
-                {index > 0 && <ChevronRight aria-hidden="true" />}
-                <span>{goal.title}</span>
-              </React.Fragment>
-            ))}
+      <AnimatePresence initial={false} mode="wait">
+        <motion.div
+          key={detailSwitchKey}
+          className="detail-panel-content"
+          variants={detailSwitchMotion}
+          initial="initial"
+          animate="animate"
+          exit="exit"
+        >
+          <div className="detail-head">
+            <div className="goal-heading">
+              <div className="goal-path" aria-label="目标路径">
+                {breadcrumbGoals.map((goal, index) => (
+                  <React.Fragment key={goal.id}>
+                    {index > 0 && <ChevronRight aria-hidden="true" />}
+                    <span>{goal.title}</span>
+                  </React.Fragment>
+                ))}
+              </div>
+              <h2>{selectedGoal.title}</h2>
+            </div>
+            <div className="detail-head-actions">
+              <span className={`status-badge ${selectedGoal.status}`}>{statusLabels[selectedGoal.status]}</span>
+            </div>
           </div>
-          <h2>{selectedGoal.title}</h2>
-        </div>
-        <div className="detail-head-actions">
-          <span className={`status-badge ${selectedGoal.status}`}>{statusLabels[selectedGoal.status]}</span>
-        </div>
-      </div>
 
-      <div className="insight-row" aria-label="目标摘要">
-        <span className="insight-domain">
-          <GitBranch />
-          {formatEmpty(titleFromLink(selectedGoal.domain))}
-        </span>
-        <span>
-          <Gauge />
-          {weightedGoalProgress(selectedGoal, importanceOverrides, progressOverrides)}%
-        </span>
-      </div>
+          <div className="insight-row" aria-label="目标摘要">
+            <span className="insight-domain">
+              <GitBranch />
+              {formatEmpty(titleFromLink(selectedGoal.domain))}
+            </span>
+            <span>
+              <Gauge />
+              {weightedGoalProgress(selectedGoal, importanceOverrides, progressOverrides)}%
+            </span>
+          </div>
 
-      <GoalEditForm
-        goal={selectedGoal}
-        cachedDraft={cachedDraft}
-        importance={selectedSiblingImportance}
-        hasSiblings={hasSiblings}
-        themeColor={selectedThemeColor}
-        themeColorEditable={themeColorEditable}
-        saving={saving}
-        onPreviewImportance={onPreviewImportance}
-        onPreviewProgress={onPreviewProgress}
-        onPreviewThemeColor={onPreviewThemeColor}
-        onDraftChange={onDraftChange}
-      />
+          <GoalEditForm
+            goal={selectedGoal}
+            cachedDraft={cachedDraft}
+            importance={selectedSiblingImportance}
+            hasSiblings={hasSiblings}
+            themeColor={selectedThemeColor}
+            themeColorEditable={themeColorEditable}
+            saving={saving}
+            onPreviewImportance={onPreviewImportance}
+            onPreviewProgress={onPreviewProgress}
+            onPreviewThemeColor={onPreviewThemeColor}
+            onDraftChange={onDraftChange}
+          />
 
-      <section className="detail-section subgoal-section">
-        <h3>子目标</h3>
-        <div className="child-list">
-          <AnimatePresence initial={false}>
-            {selectedGoal.children.map((child) => (
-              <motion.button
-                key={child.id}
-                layout
-                type="button"
-                className="child-pill"
-                style={{ "--pill-accent": domainAccentToken(child.domain || child.title) } as React.CSSProperties}
-                variants={listItemMotion}
-                initial="initial"
-                animate="animate"
-                exit="exit"
-                transition={listItemTransition}
-                onClick={() => onSelect(child.id)}
-              >
-                <span>{child.title}</span>
-                <small>{childImportance[child.id] ?? 0}%</small>
-              </motion.button>
-            ))}
-          </AnimatePresence>
-          {selectedGoal.children.length === 0 && <p className="muted-text">还没有子目标。</p>}
-        </div>
-      </section>
+          <section className="detail-section subgoal-section">
+            <h3>子目标</h3>
+            <div className="child-list">
+              <AnimatePresence initial={false}>
+                {selectedGoal.children.map((child) => (
+                  <motion.button
+                    key={child.id}
+                    layout
+                    type="button"
+                    className="child-pill"
+                    style={{ "--pill-accent": domainAccentToken(child.domain || child.title) } as React.CSSProperties}
+                    variants={listItemMotion}
+                    initial="initial"
+                    animate="animate"
+                    exit="exit"
+                    transition={listItemTransition}
+                    onClick={() => onSelect(child.id)}
+                  >
+                    <span>{child.title}</span>
+                    <small>{childImportance[child.id] ?? 0}%</small>
+                  </motion.button>
+                ))}
+              </AnimatePresence>
+              {selectedGoal.children.length === 0 && <p className="muted-text">还没有子目标。</p>}
+            </div>
+          </section>
+        </motion.div>
+      </AnimatePresence>
     </aside>
   );
 });

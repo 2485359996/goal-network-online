@@ -11,6 +11,7 @@ import {
   inferAssistantTargetFromMessage,
   resolveAssistantMessageRoute,
   resolveAssistantMessageTarget,
+  shouldUseAgentRouterForRoute,
   shouldAllowGoalClarification
 } from "./aiConversation";
 
@@ -177,6 +178,12 @@ describe("AI assistant apply helpers", () => {
       target: "subgoals",
       inferred: true
     });
+  });
+
+  it("sends explicit task messages directly to task endpoints instead of the agent router", () => {
+    expect(shouldUseAgentRouterForRoute(resolveAssistantMessageRoute(null, "帮我拆解成几个子目标"))).toBe(false);
+    expect(shouldUseAgentRouterForRoute(resolveAssistantMessageRoute("weekly", "少一点"))).toBe(false);
+    expect(shouldUseAgentRouterForRoute(resolveAssistantMessageRoute(null, "你好"))).toBe(true);
   });
 
   it("leaves greetings undecided so the agent router can answer them", () => {

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="sky" cx="50%" cy="42%" r="70%">
+      <stop offset="0%" stop-color="#1e4b44"/>
+      <stop offset="54%" stop-color="#102825"/>
+      <stop offset="100%" stop-color="#081513"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="630" fill="url(#sky)"/>
+  <g opacity=".34">
+    <circle cx="204" cy="132" r="2" fill="#f8f3e7"/>
+    <circle cx="348" cy="92" r="1.5" fill="#7dd3c7"/>
+    <circle cx="842" cy="118" r="2" fill="#f0b35c"/>
+    <circle cx="988" cy="196" r="1.6" fill="#f8f3e7"/>
+    <circle cx="186" cy="468" r="1.8" fill="#7dd3c7"/>
+    <circle cx="1030" cy="462" r="2.2" fill="#f8f3e7"/>
+  </g>
+  <ellipse cx="600" cy="338" rx="392" ry="154" fill="none" stroke="#7dd3c7" stroke-width="2" stroke-dasharray="6 18" opacity=".22"/>
+  <ellipse cx="600" cy="338" rx="286" ry="112" fill="none" stroke="#f0b35c" stroke-width="2" stroke-dasharray="4 16" opacity=".18"/>
+  <circle cx="600" cy="318" r="78" fill="#f8f3e7" opacity=".18" filter="url(#soft)"/>
+  <path d="M600 202 736 280v156L600 514 464 436V280L600 202Z" fill="#143732" stroke="#7dd3c7" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M522 358 581 286c11-13 27-13 38 0l59 72" fill="none" stroke="#f0b35c" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M678 358 619 430c-11 13-27 13-38 0l-59-72" fill="none" stroke="#7dd3c7" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" opacity=".86"/>
+  <path d="M522 358h156" stroke="#f8f3e7" stroke-width="8" stroke-linecap="round" opacity=".66"/>
+  <circle cx="600" cy="358" r="21" fill="#f8f3e7"/>
+  <text x="92" y="164" fill="#f8f3e7" font-family="Geist, -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="72" font-weight="800">目标网络</text>
+  <text x="94" y="226" fill="#b9d8d2" font-family="Geist, -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="26" font-weight="500">把目标、行动和复盘整理成可探索的个人星图</text>
+</svg>
