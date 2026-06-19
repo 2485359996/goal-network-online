@@ -65,6 +65,14 @@
   --nebula-cyan: rgba(47, 111, 136, 0.1);
   --nebula-violet: rgba(198, 129, 45, 0.08);
   --nebula-beam: rgba(20, 116, 111, 0.03);
+  --map-pane-atmosphere:
+    radial-gradient(circle at 50% 8%, color-mix(in oklch, var(--accent) 15%, transparent), transparent 28%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 34%);
+  --map-pane-atmosphere-opacity: 0.78;
+  --starfield-opacity: 1;
+  --starfield-beam-opacity: 0.76;
+  --starfield-after-opacity: 0.5;
+  --starfield-vignette: linear-gradient(transparent, transparent);
   --core-bloom: rgba(20, 116, 111, 0.24);
   --core-specular: rgba(255, 255, 255, 0.72);
   --noise-opacity: 0.018;
@@ -76,68 +84,78 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0d1715;
-  --surface: #13231f;
-  --surface-raised: #1a302b;
-  --surface-muted: #254039;
-  --ink: #f8f3e7;
-  --ink-soft: #c8d6d1;
-  --muted: #9fb2ac;
-  --line: #2b4941;
-  --line-strong: #41665c;
-  --accent: #7dd3c7;
-  --accent-strong: #99f6e4;
-  --accent-soft: rgba(125, 211, 199, 0.14);
+  --bg: #090f1c;
+  --surface: #101827;
+  --surface-raised: #172235;
+  --surface-muted: #22304a;
+  --ink: #f4f7fb;
+  --ink-soft: #c7d2de;
+  --muted: #99a8b7;
+  --line: #26344a;
+  --line-strong: #3a4d68;
+  --accent: #6bd3c1;
+  --accent-strong: #9be7dc;
+  --accent-soft: rgba(107, 211, 193, 0.14);
   /* 填充主按钮：深色模式使用浅青绿实底，文字改深墨绿以保证对比。 */
-  --accent-fill: #7dd3c7;
-  --accent-fill-hover: #99f6e4;
-  --accent-ink: #09211e;
+  --accent-fill: #6bd3c1;
+  --accent-fill-hover: #8ce1d4;
+  --accent-ink: #07131d;
   /* 深色天文台里领域色需提亮去饱和，保证暗底上的可读对比 */
-  --growth: #c7b8d9;
-  --life: #86efac;
-  --career: #7dd3fc;
-  --amber: #f0b35c;
+  --growth: #c4b5d8;
+  --life: #8ad8a9;
+  --career: #82cceb;
+  --amber: #e7b567;
   --domain-accent: var(--accent);
-  --other: #94a3b8;
-  --selected: #60a5fa;
-  --danger: #f87171;
-  --danger-soft: rgba(239, 68, 68, 0.14);
+  --other: #9aa8ba;
+  --selected: #82cceb;
+  --danger: #fb7185;
+  --danger-soft: rgba(244, 63, 94, 0.14);
   --shadow-soft: 0 12px 28px -16px rgba(0, 0, 0, 0.72), 0 2px 8px rgba(0, 0, 0, 0.28);
   --shadow-pop: 0 24px 42px -20px rgba(0, 0, 0, 0.8), 0 10px 18px -12px rgba(0, 0, 0, 0.58);
-  --body-background: radial-gradient(circle at 38% 18%, rgba(200, 214, 209, 0.16) 0 2px, transparent 3px), radial-gradient(circle at 70% 12%, rgba(125, 211, 199, 0.18) 0 1px, transparent 2px), linear-gradient(135deg, #0f1f1d 0%, #0d1715 52%, #111b17 100%);
-  --shell-background: linear-gradient(132deg, rgba(13, 23, 21, 0.9), rgba(20, 46, 40, 0.72) 48%, rgba(54, 39, 22, 0.34)), var(--dream-bg);
-  --header-background: rgba(13, 23, 21, 0.78);
-  --header-shadow: 0 1px 0 rgba(148, 163, 184, 0.1);
-  --notes-actions-background: rgba(15, 23, 42, 0.92);
-  --notes-actions-border: rgba(71, 85, 105, 0.86);
-  --notes-actions-shadow: 0 18px 38px -22px rgba(0, 0, 0, 0.82), 0 0 0 1px rgba(148, 163, 184, 0.06);
-  --dream-bg: #0d1715;
-  --dream-ink: #f8f3e7;
-  --dream-panel: rgba(13, 23, 21, 0.78);
-  --dream-panel-strong: rgba(18, 32, 29, 0.9);
-  --dream-line: rgba(65, 102, 92, 0.78);
-  --dream-shadow: 0 22px 44px -22px rgba(0, 0, 0, 0.8), 0 0 1px rgba(148, 163, 184, 0.2);
-  /* 深色天文台：连线层维持原白值，白线压深靛蓝底完美呈现，逐字节还原 */
-  --scape-orbit: rgba(255, 255, 255, 0.42);
-  --scape-deck: rgba(255, 255, 255, 0.62);
-  --scape-cable: rgba(255, 255, 255, 0.24);
-  --scape-laser: rgba(255, 255, 255, 0.82);
-  --scape-point: rgba(255, 255, 255, 0.78);
+  --body-background: radial-gradient(circle at 38% 18%, rgba(244, 247, 251, 0.15) 0 2px, transparent 3px), radial-gradient(circle at 70% 12%, rgba(107, 211, 193, 0.18) 0 1px, transparent 2px), linear-gradient(135deg, #0b1322 0%, #090f1c 54%, #101827 100%);
+  --shell-background: linear-gradient(132deg, rgba(9, 15, 28, 0.92), rgba(16, 24, 39, 0.74) 48%, rgba(42, 34, 25, 0.28)), var(--dream-bg);
+  --header-background: rgba(11, 16, 32, 0.8);
+  --header-shadow: 0 1px 0 rgba(154, 168, 186, 0.12);
+  --notes-actions-background: rgba(11, 16, 32, 0.92);
+  --notes-actions-border: rgba(58, 77, 104, 0.86);
+  --notes-actions-shadow: 0 18px 38px -22px rgba(0, 0, 0, 0.82), 0 0 0 1px rgba(154, 168, 186, 0.07);
+  --dream-bg: #090f1c;
+  --dream-ink: #f4f7fb;
+  --dream-panel: rgba(11, 16, 32, 0.78);
+  --dream-panel-strong: rgba(16, 24, 39, 0.9);
+  --dream-line: rgba(58, 77, 104, 0.78);
+  --dream-shadow: 0 22px 44px -22px rgba(0, 0, 0, 0.82), 0 0 1px rgba(154, 168, 186, 0.22);
+  /* 深夜天文台：连线保持冷白清晰，能量线仅借主强调色轻微发亮 */
+  --scape-orbit: rgba(231, 238, 247, 0.4);
+  --scape-deck: rgba(231, 238, 247, 0.58);
+  --scape-cable: rgba(231, 238, 247, 0.22);
+  --scape-laser: rgba(155, 231, 220, 0.78);
+  --scape-point: rgba(244, 247, 251, 0.78);
   /* 日晷深色：暖白晨光压深靛蓝底，对比更出彩 */
   --sun-sky: rgba(255, 224, 178, 0.18);
   --sun-sky-fade: rgba(255, 224, 178, 0.05);
   --sun-aura: rgba(255, 222, 175, 0.42);
   --sun-core-hi: rgba(255, 248, 236, 0.96);
   --sun-core-mid: rgba(255, 226, 184, 0.44);
-  --starfield-dot: rgba(226, 232, 240, 0.46);
-  --starfield-dot-soft: rgba(125, 211, 252, 0.34);
-  --starfield-haze: rgba(125, 211, 199, 0.14);
-  --nebula-cyan: rgba(125, 211, 252, 0.16);
-  --nebula-violet: rgba(240, 179, 92, 0.13);
-  --nebula-beam: rgba(125, 211, 199, 0.06);
-  --core-bloom: rgba(125, 211, 199, 0.34);
+  --starfield-dot: rgba(244, 247, 251, 0.32);
+  --starfield-dot-soft: rgba(107, 211, 193, 0.2);
+  --starfield-haze: rgba(107, 211, 193, 0.09);
+  --nebula-cyan: rgba(130, 204, 235, 0.1);
+  --nebula-violet: rgba(231, 181, 103, 0.075);
+  --nebula-beam: rgba(107, 211, 193, 0.04);
+  --map-pane-atmosphere:
+    radial-gradient(ellipse at 52% 42%, rgba(107, 211, 193, 0.13), transparent 34%),
+    radial-gradient(circle at 18% 20%, rgba(130, 204, 235, 0.1), transparent 28%),
+    radial-gradient(circle at 84% 78%, rgba(231, 181, 103, 0.06), transparent 34%),
+    linear-gradient(180deg, rgba(244, 247, 251, 0.055), transparent 36%, rgba(3, 7, 18, 0.2));
+  --map-pane-atmosphere-opacity: 0.92;
+  --starfield-opacity: 0.88;
+  --starfield-beam-opacity: 0.42;
+  --starfield-after-opacity: 0.72;
+  --starfield-vignette: radial-gradient(ellipse at 50% 48%, transparent 34%, rgba(9, 15, 28, 0.22) 72%, rgba(3, 7, 18, 0.58) 100%);
+  --core-bloom: rgba(107, 211, 193, 0.32);
   --core-specular: rgba(255, 255, 255, 0.82);
-  --noise-opacity: 0.03;
+  --noise-opacity: 0.022;
 }
 
 * {
@@ -246,6 +264,7 @@ h3 {
 }
 
 .app-shell {
+  --app-inline-padding: clamp(18px, 3vw, 40px);
   height: 100vh;
   height: 100dvh;
   min-height: 0;
@@ -280,7 +299,7 @@ h3 {
 }
 
 .app-header {
-  width: min(1320px, calc(100% - clamp(24px, 4vw, 64px)));
+  width: calc(100% - var(--app-inline-padding) - var(--app-inline-padding));
   min-height: 74px;
   display: grid;
   grid-template-columns: minmax(280px, 1fr) auto auto;
@@ -522,18 +541,18 @@ h3 {
 :root[data-theme="dark"] .banner {
   border-color: color-mix(in oklch, var(--ok) 38%, transparent);
   background: color-mix(in oklch, var(--ok) 16%, transparent);
-  color: #99f6e4;
+  color: var(--accent-strong);
 }
 
 :root[data-theme="dark"] .banner.error {
-  border-color: rgba(239, 68, 68, 0.32);
+  border-color: color-mix(in oklch, var(--danger) 32%, transparent);
   background: var(--danger-soft);
   color: var(--danger);
 }
 
 .map-workspace {
   --workspace-gap: 14px;
-  --workspace-padding: 16px clamp(18px, 3vw, 40px) 28px;
+  --workspace-padding: 16px var(--app-inline-padding) 28px;
   --pane-radius: 24px;
   --pane-border: 1px solid color-mix(in oklch, var(--dream-line) 82%, transparent);
   --pane-background: color-mix(in oklch, var(--dream-panel) 92%, transparent);
@@ -596,6 +615,12 @@ h3 {
   container-type: size;
 }
 
+:root[data-theme="dark"] .map-pane {
+  background: var(--bg);
+  box-shadow: 0 22px 44px -30px rgba(0, 0, 0, 0.72);
+  backdrop-filter: none;
+}
+
 .map-pane::before {
   content: "";
   position: absolute;
@@ -603,10 +628,12 @@ h3 {
   z-index: 0;
   pointer-events: none;
   border-radius: inherit;
-  background:
-    radial-gradient(circle at 50% 8%, color-mix(in oklch, var(--accent) 15%, transparent), transparent 28%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 34%);
-  opacity: 0.78;
+  background: var(--map-pane-atmosphere);
+  opacity: var(--map-pane-atmosphere-opacity);
+}
+
+:root[data-theme="dark"] .map-pane::before {
+  opacity: 0;
 }
 
 .map-pane.sunburst-active {
@@ -720,6 +747,7 @@ h3 {
 
 :root[data-theme="dark"] .map-canvas::after {
   mix-blend-mode: overlay;
+  opacity: 0;
 }
 
 .starfield {
@@ -727,6 +755,7 @@ h3 {
   inset: -18%;
   z-index: 0;
   pointer-events: none;
+  opacity: var(--starfield-opacity);
   background:
     radial-gradient(circle at 18% 24%, var(--starfield-dot) 0 1px, transparent 1.8px),
     radial-gradient(circle at 72% 18%, var(--starfield-dot-soft) 0 1px, transparent 2px),
@@ -747,25 +776,36 @@ h3 {
   transform: translate3d(0, 0, 0);
 }
 
+:root[data-theme="dark"] .starfield {
+  opacity: 0;
+  animation: none;
+}
+
 .starfield::before,
 .starfield::after {
   content: "";
   position: absolute;
   inset: -12%;
   pointer-events: none;
-  opacity: 0.76;
 }
 
 .starfield::before {
   background:
     linear-gradient(108deg, transparent 24%, var(--nebula-beam) 44%, transparent 62%),
     linear-gradient(74deg, transparent 32%, var(--nebula-beam) 52%, transparent 70%);
+  opacity: var(--starfield-beam-opacity);
   animation: starfield-beam-hue 12s cubic-bezier(0.16, 1, 0.3, 1) infinite;
 }
 
+:root[data-theme="dark"] .starfield::before {
+  animation: none;
+}
+
 .starfield::after {
-  background: radial-gradient(ellipse at 50% 0%, var(--nebula-violet), transparent 58%);
-  opacity: 0.5;
+  background:
+    radial-gradient(ellipse at 50% 0%, var(--nebula-violet), transparent 58%),
+    var(--starfield-vignette);
+  opacity: var(--starfield-after-opacity);
 }
 
 :root[data-theme="light"] .starfield::before {
@@ -2204,18 +2244,18 @@ h3 {
 }
 
 :root[data-theme="dark"] .status-badge {
-  background: rgba(148, 163, 184, 0.16);
+  background: color-mix(in oklch, var(--other) 16%, transparent);
   color: var(--ink-soft);
 }
 
 :root[data-theme="dark"] .status-badge.active {
   background: color-mix(in oklch, var(--ok) 18%, transparent);
-  color: #99f6e4;
+  color: var(--accent-strong);
 }
 
 :root[data-theme="dark"] .status-badge.paused {
   background: color-mix(in oklch, var(--amber) 18%, transparent);
-  color: #f0b35c;
+  color: var(--amber);
 }
 
 :root[data-theme="dark"] .status-badge.done {
@@ -2224,7 +2264,7 @@ h3 {
 }
 
 :root[data-theme="dark"] .status-badge.archived {
-  background: rgba(148, 163, 184, 0.14);
+  background: color-mix(in oklch, var(--other) 14%, transparent);
   color: var(--muted);
 }
 
@@ -2637,8 +2677,8 @@ textarea::placeholder {
 /* 深色下面板与遮罩同为深靛蓝，0.3 不足以分层，加深一档 */
 :root[data-theme="dark"] .dialog-backdrop {
   background:
-    linear-gradient(135deg, rgba(2, 6, 23, 0.72), rgba(15, 23, 42, 0.5)),
-    repeating-linear-gradient(90deg, rgba(148, 163, 184, 0.06) 0 1px, transparent 1px 84px);
+    linear-gradient(135deg, rgba(3, 7, 18, 0.74), rgba(11, 16, 32, 0.58)),
+    repeating-linear-gradient(90deg, rgba(154, 168, 186, 0.06) 0 1px, transparent 1px 84px);
 }
 
 .confirm-dialog {
@@ -2813,12 +2853,12 @@ textarea::placeholder {
 }
 
 :root[data-theme="dark"] .ai-dialog {
-  --ai-panel: rgba(15, 23, 42, 0.94);
-  --ai-panel-strong: rgba(17, 24, 39, 0.96);
-  --ai-panel-tint: rgba(30, 41, 59, 0.82);
-  --ai-line: rgba(125, 211, 252, 0.2);
+  --ai-panel: rgba(11, 16, 32, 0.94);
+  --ai-panel-strong: rgba(16, 24, 39, 0.96);
+  --ai-panel-tint: rgba(34, 48, 74, 0.82);
+  --ai-line: color-mix(in oklch, var(--career) 20%, var(--line));
   background:
-    linear-gradient(180deg, rgba(17, 24, 39, 0.96), rgba(15, 23, 42, 0.94)),
+    linear-gradient(180deg, rgba(16, 24, 39, 0.96), rgba(11, 16, 32, 0.94)),
     var(--surface);
   box-shadow:
     0 32px 82px -32px rgba(0, 0, 0, 0.78),
@@ -2828,9 +2868,9 @@ textarea::placeholder {
 
 :root[data-theme="dark"] .ai-dialog::before {
   background:
-    linear-gradient(90deg, rgba(56, 189, 248, 0.1), transparent 36%, rgba(52, 211, 153, 0.08)),
-    repeating-linear-gradient(0deg, transparent 0 31px, rgba(226, 232, 240, 0.04) 31px 32px),
-    repeating-linear-gradient(90deg, transparent 0 31px, rgba(226, 232, 240, 0.03) 31px 32px);
+    linear-gradient(90deg, color-mix(in oklch, var(--accent) 10%, transparent), transparent 36%, color-mix(in oklch, var(--amber) 6%, transparent)),
+    repeating-linear-gradient(0deg, transparent 0 31px, rgba(244, 247, 251, 0.04) 31px 32px),
+    repeating-linear-gradient(90deg, transparent 0 31px, rgba(244, 247, 251, 0.03) 31px 32px);
   opacity: 0.58;
 }
 
@@ -2868,7 +2908,7 @@ textarea::placeholder {
 }
 
 :root[data-theme="dark"] .ai-dialog .icon-button.compact {
-  background: rgba(15, 23, 42, 0.72);
+  background: rgba(11, 16, 32, 0.72);
 }
 
 .ai-tabs {
@@ -3366,8 +3406,8 @@ textarea::placeholder {
 
 :root[data-theme="dark"] .ai-context {
   background:
-    linear-gradient(135deg, color-mix(in oklch, var(--career) 12%, transparent), color-mix(in oklch, var(--life) 8%, transparent)),
-    rgba(13, 23, 21, 0.72);
+    linear-gradient(135deg, color-mix(in oklch, var(--accent) 10%, transparent), color-mix(in oklch, var(--amber) 6%, transparent)),
+    rgba(11, 16, 32, 0.72);
 }
 
 :root[data-theme="dark"] .ai-suggestion-item,
@@ -3382,22 +3422,22 @@ textarea::placeholder {
 }
 
 :root[data-theme="dark"] .ai-message strong {
-  border-color: rgba(125, 211, 252, 0.2);
-  background: color-mix(in oklch, var(--career) 12%, transparent);
-  color: #bae6fd;
+  border-color: color-mix(in oklch, var(--accent) 24%, transparent);
+  background: color-mix(in oklch, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
 }
 
 :root[data-theme="dark"] .ai-thinking-message {
-  border-color: color-mix(in oklch, var(--career) 34%, var(--ai-line));
+  border-color: color-mix(in oklch, var(--accent) 34%, var(--ai-line));
   background:
-    linear-gradient(135deg, color-mix(in oklch, var(--career) 12%, transparent), color-mix(in oklch, var(--life) 8%, transparent)),
-    rgba(13, 23, 21, 0.78);
+    linear-gradient(135deg, color-mix(in oklch, var(--accent) 12%, transparent), color-mix(in oklch, var(--amber) 7%, transparent)),
+    rgba(11, 16, 32, 0.78);
 }
 
 :root[data-theme="dark"] .ai-draft-input,
 :root[data-theme="dark"] .ai-draft-textarea,
 :root[data-theme="dark"] .ai-input-row input {
-  background: rgba(15, 23, 42, 0.72);
+  background: rgba(11, 16, 32, 0.72);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset;
 }
 
@@ -3758,6 +3798,7 @@ textarea::placeholder {
 
 @media (max-width: 1120px) {
   .app-shell {
+    --app-inline-padding: clamp(16px, 4vw, 28px);
     height: auto;
     min-height: 100vh;
     min-height: 100dvh;
@@ -3766,7 +3807,7 @@ textarea::placeholder {
   }
 
   .app-header {
-    width: min(980px, calc(100% - 24px));
+    width: calc(100% - var(--app-inline-padding) - var(--app-inline-padding));
     grid-template-columns: minmax(220px, 1fr) auto;
     margin-top: 12px;
     border-radius: 28px;
@@ -3780,7 +3821,7 @@ textarea::placeholder {
 
   .map-workspace {
     --workspace-gap: 12px;
-    --workspace-padding: 18px clamp(16px, 4vw, 28px) 28px;
+    --workspace-padding: 18px var(--app-inline-padding) 28px;
     --map-pane-padding: 16px;
     --detail-panel-padding: 24px;
     --detail-panel-gap: 20px;
@@ -3879,6 +3920,10 @@ textarea::placeholder {
 }
 
 @media (max-width: 680px) {
+  .app-shell {
+    --app-inline-padding: 12px;
+  }
+
   h1 {
     font-size: 24px;
   }
@@ -3888,7 +3933,7 @@ textarea::placeholder {
   }
 
   .app-header {
-    width: calc(100% - 20px);
+    width: calc(100% - var(--app-inline-padding) - var(--app-inline-padding));
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 10px;
     padding: 12px;
@@ -3926,7 +3971,7 @@ textarea::placeholder {
 
   .map-workspace {
     --workspace-gap: 10px;
-    --workspace-padding: 12px;
+    --workspace-padding: var(--app-inline-padding);
     --pane-radius: 22px;
     --map-pane-padding: 10px;
     --detail-panel-padding: 16px;
@@ -4694,6 +4739,11 @@ textarea::placeholder {
   opacity: 0.7;
 }
 
+:root[data-theme="dark"] .sunburst-sky-wash,
+:root[data-theme="dark"] .sunburst-background-ring {
+  opacity: 0;
+}
+
 .sunburst-center,
 .sunburst-segment,
 .sunburst-depth-button {
@@ -4939,9 +4989,9 @@ textarea::placeholder {
 }
 
 :root[data-theme="dark"] .sunburst-tooltip-card {
-  border-color: color-mix(in oklch, var(--tooltip-color, var(--accent)) 42%, rgba(148, 163, 184, 0.3));
+  border-color: color-mix(in oklch, var(--tooltip-color, var(--accent)) 42%, rgba(154, 168, 186, 0.3));
   background:
-    linear-gradient(135deg, rgba(15, 23, 42, 0.94), color-mix(in oklch, var(--tooltip-color, var(--accent)) 14%, rgba(15, 23, 42, 0.9)));
+    linear-gradient(135deg, rgba(11, 16, 32, 0.94), color-mix(in oklch, var(--tooltip-color, var(--accent)) 14%, rgba(11, 16, 32, 0.9)));
   box-shadow:
     0 18px 34px -20px rgba(0, 0, 0, 0.82),
     0 0 0 1px rgba(255, 255, 255, 0.08) inset;
@@ -5022,8 +5072,12 @@ textarea::placeholder {
 }
 
 @media (min-width: 1121px) {
+  .app-shell {
+    --app-inline-padding: 40px;
+  }
+
   .app-header {
-    width: min(1320px, calc(100% - 64px));
+    width: calc(100% - var(--app-inline-padding) - var(--app-inline-padding));
     min-height: 74px;
     grid-template-columns: minmax(260px, 1fr) auto auto;
     margin-top: 16px;
@@ -5117,7 +5171,7 @@ textarea::placeholder {
 
   .map-workspace {
     --workspace-gap: 14px;
-    --workspace-padding: 16px 40px 32px;
+    --workspace-padding: 16px var(--app-inline-padding) 32px;
     --map-pane-padding: 14px;
     --detail-panel-padding: 24px;
     --detail-panel-gap: 20px;
