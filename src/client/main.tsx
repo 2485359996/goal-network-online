@@ -313,6 +313,103 @@ type PendingEdit = {
 };
 type DraftCache = Record<string, EditDraft>;
 
+export type GoalMapBranchOverview = {
+  id: string;
+  title: string;
+  status: GoalStatus;
+  accent: string;
+  goalCount: number;
+  progress: number;
+  importance: number;
+  openActionCount: number;
+};
+
+export type GoalMapDepthOverview = {
+  depth: number;
+  count: number;
+};
+
+export type GoalMapOverview = {
+  totalGoals: number;
+  activeCount: number;
+  pausedCount: number;
+  doneCount: number;
+  archivedCount: number;
+  openActionCount: number;
+  leafGoalCount: number;
+  maxDepth: number;
+  progressAverage: number;
+  depthCounts: GoalMapDepthOverview[];
+  branchSummaries: GoalMapBranchOverview[];
+};
+
+function countOpenActionCandidates(goal: GoalNode) {
+  return (goal.sections?.actionCandidates ?? []).filter((action) => !action.done && action.text.trim().length > 0).length;
+}
+
+function collectDepthCounts(goals: GoalNode[], depth = 1, counts = new Map<number, number>()) {
+  for (const goal of goals) {
+    counts.set(depth, (counts.get(depth) ?? 0) + 1);
+    collectDepthCounts(goal.children || [], depth + 1, counts);
+  }
+  return counts;
+}
+
+export function buildGoalMapOverview(
+  topGoals: GoalNode[],
+  importanceOverrides: ImportanceOverrides = {},
+  progressOverrides: ProgressOverrides = {}
+): GoalMapOverview {
+  const flatGoals = flattenGoals(topGoals);
+  const rootImportance = normalizedImportance(topGoals, importanceOverrides);
+  const statusCounts: Record<GoalStatus, number> = {
+    active: 0,
+    paused: 0,
+    done: 0,
+    archived: 0
+  };
+  let openActionCount = 0;
+  let leafGoalCount = 0;
+
+  for (const goal of flatGoals) {
+    statusCounts[goal.status] += 1;
+    openActionCount += countOpenActionCandidates(goal);
+    if ((goal.children || []).length === 0) leafGoalCount += 1;
+  }
+
+  const depthCounts = Array.from(collectDepthCounts(topGoals), ([depth, count]) => ({ depth, count })).sort(
+    (first, second) => first.depth - second.depth
+  );
+
+  const branchSummaries = topGoals.map((goal) => {
+    const branchGoals = flattenGoals([goal]);
+    return {
+      id: goal.id,
+      title: goal.title,
+      status: goal.status,
+      accent: domainAccentToken(goal.domain || goal.title),
+      goalCount: branchGoals.length,
+      progress: weightedGoalProgress(goal, importanceOverrides, progressOverrides),
+      importance: rootImportance[goal.id] ?? 0,
+      openActionCount: branchGoals.reduce((sum, item) => sum + countOpenActionCandidates(item), 0)
+    };
+  });
+
+  return {
+    totalGoals: flatGoals.length,
+    activeCount: statusCounts.active,
+    pausedCount: statusCounts.paused,
+    doneCount: statusCounts.done,
+    archivedCount: statusCounts.archived,
+    openActionCount,
+    leafGoalCount,
+    maxDepth: depthCounts.at(-1)?.depth ?? 0,
+    progressAverage: averageProgress(flatGoals, importanceOverrides, progressOverrides),
+    depthCounts,
+    branchSummaries
+  };
+}
+
 export class ApiClientError extends Error {
   constructor(
     message: string,
@@ -1522,6 +1619,7 @@ export function GoalApp() {
               activeGoalMap={activeGoalMap}
               cachedDraft={selectedGoal ? draftCacheRef.current[selectedGoal.id] : undefined}
               topGoals={visibleTree}
+              presentationMode={presentationMode}
               saving={saving}
               importanceOverrides={importancePreview}
               progressOverrides={progressPreview}
@@ -3857,6 +3955,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   activeGoalMap,
   cachedDraft,
   topGoals,
+  presentationMode,
   saving,
   importanceOverrides,
   progressOverrides,
@@ -3870,6 +3969,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   activeGoalMap?: GoalMap;
   cachedDraft?: EditDraft;
   topGoals: GoalNode[];
+  presentationMode: GoalPresentationMode;
   saving: boolean;
   importanceOverrides: ImportanceOverrides;
   progressOverrides: ProgressOverrides;
@@ -3903,14 +4003,60 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
   const listItemMotion = useListItemMotion();
   const detailSwitchMotion = useDetailPanelSwitchMotion();
   const detailSwitchKey = selectedGoal ? `goal-${selectedGoal.id}` : `map-${activeGoalMap?.id ?? "root"}`;
+  const mapOverview = useMemo(
+    () => buildGoalMapOverview(topGoals, importanceOverrides, progressOverrides),
+    [importanceOverrides, progressOverrides, topGoals]
+  );
+  const isSunburstMode = presentationMode === "sunburst";
+  const RootModeIcon = isSunburstMode ? ChartPie : Star;
+  const quickSectionTitle = isSunburstMode ? "中心分区" : "顶层轨道";
+  const rootHeadingLabel = isSunburstMode ? "层级总览" : "星系总览";
+  const rootIntroTitle = isSunburstMode ? "从中心向外读层级" : "先看整张星系的脉络";
+  const rootIntroCopy = isSunburstMode
+    ? "日晷把目标压成层层扇区，角度代表同级重要性，外圈承接更具体的行动。"
+    : "星球视角保留空间位置和轨道关系，适合观察顶层目标之间的距离、重量和推进状态。";
+  const guideItems = isSunburstMode
+    ? [
+        { icon: <ChartPie />, title: "点选扇区", copy: "查看对应目标的详情和下一级结构。" },
+        { icon: <GitBranch />, title: "连续点选", copy: "进入同一目标分支，沿层级向外展开。" },
+        { icon: <ListPlus />, title: "调节层级", copy: "用右上层级按钮控制可见深度。" },
+        { icon: <ChevronLeft />, title: "回到中心", copy: "点击中心回到上一层或当前地图。" }
+      ]
+    : [
+        { icon: <Star />, title: "点选星体", copy: "查看目标详情、摘要和子目标。" },
+        { icon: <GitBranch />, title: "连续点选", copy: "进入同一目标分支，聚焦观察它的子系统。" },
+        { icon: <GripHorizontal />, title: "拖动星体", copy: "调整节点在轨道上的位置，保存你的空间记忆。" },
+        { icon: <Network />, title: "点击中心", copy: "从聚焦分支返回整张目标地图。" }
+      ];
+  const overviewStats = isSunburstMode
+    ? [
+        { label: "最大层级", value: mapOverview.maxDepth ? `${mapOverview.maxDepth}` : "0" },
+        { label: "叶子目标", value: `${mapOverview.leafGoalCount}` },
+        { label: "推进中", value: `${mapOverview.activeCount}` },
+        { label: "待行动", value: `${mapOverview.openActionCount}` }
+      ]
+    : [
+        { label: "目标总数", value: `${mapOverview.totalGoals}` },
+        { label: "整体进展", value: `${mapOverview.progressAverage}%` },
+        { label: "已完成", value: `${mapOverview.doneCount}` },
+        { label: "待行动", value: `${mapOverview.openActionCount}` }
+      ];
 
   if (!selectedGoal) {
     return (
-      <aside className="detail-panel" aria-live="polite">
+      <aside
+        className="detail-panel"
+        aria-live="polite"
+        style={
+          {
+            "--domain-accent": isSunburstMode ? "var(--amber)" : "var(--accent)"
+          } as React.CSSProperties & { "--domain-accent": string }
+        }
+      >
         <AnimatePresence initial={false} mode="wait">
           <motion.div
             key={detailSwitchKey}
-            className="detail-panel-content root-detail-panel-content"
+            className={`detail-panel-content root-detail-panel-content ${isSunburstMode ? "sunburst-root" : "sphere-root"}`}
             variants={detailSwitchMotion}
             initial="initial"
             animate="animate"
@@ -3918,14 +4064,84 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
           >
             <div className="detail-head root-head">
               <div className="goal-heading">
-                <p className="eyebrow">目标地图</p>
+                <p className="eyebrow">{rootHeadingLabel}</p>
                 <h2>{goalMapCenterTitle(activeGoalMap)}</h2>
               </div>
-              <span className="status-badge active">地图</span>
+              <span className="status-badge active">{isSunburstMode ? "日晷" : "星球"}</span>
             </div>
 
+            <section className="root-intro">
+              <span className="root-intro-mark" aria-hidden="true">
+                <RootModeIcon />
+              </span>
+              <div>
+                <h3>{rootIntroTitle}</h3>
+                <p>{rootIntroCopy}</p>
+              </div>
+            </section>
+
+            <section className="detail-section map-guide-section" aria-labelledby={`map-guide-title-${presentationMode}`}>
+              <h3 id={`map-guide-title-${presentationMode}`}>{isSunburstMode ? "读日晷" : "读星球"}</h3>
+              <div className="map-guide-list">
+                {guideItems.map((item) => (
+                  <article key={item.title} className="map-guide-item">
+                    <span aria-hidden="true">{item.icon}</span>
+                    <strong>{item.title}</strong>
+                    <p>{item.copy}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <section className="detail-section map-overview-section" aria-labelledby={`map-overview-title-${presentationMode}`}>
+              <h3 id={`map-overview-title-${presentationMode}`}>{isSunburstMode ? "层级刻度" : "轨道态势"}</h3>
+              <div className="map-overview-grid" aria-label="当前地图全局状态">
+                {overviewStats.map((stat) => (
+                  <span key={stat.label} className="map-overview-stat">
+                    <strong>{stat.value}</strong>
+                    <small>{stat.label}</small>
+                  </span>
+                ))}
+              </div>
+              <div className="map-status-strip" aria-label="目标推进状态">
+                <span className="status-badge active">推进中 {mapOverview.activeCount}</span>
+                <span className="status-badge paused">暂停 {mapOverview.pausedCount}</span>
+                <span className="status-badge done">完成 {mapOverview.doneCount}</span>
+              </div>
+              {isSunburstMode ? (
+                <div className="depth-ruler" aria-label="目标层级分布">
+                  {mapOverview.depthCounts.map((item) => (
+                    <span key={item.depth} className="depth-ruler-tick">
+                      <strong>第 {item.depth} 层</strong>
+                      <small>{item.count} 个目标</small>
+                    </span>
+                  ))}
+                  {mapOverview.depthCounts.length === 0 && <p className="muted-text">还没有层级可以观测。</p>}
+                </div>
+              ) : (
+                <div className="branch-orbit-list" aria-label="顶层目标轨道线索">
+                  {mapOverview.branchSummaries.map((branch) => (
+                    <div
+                      key={branch.id}
+                      className="branch-orbit-row"
+                      style={{ "--branch-accent": branch.accent } as React.CSSProperties & { "--branch-accent": string }}
+                    >
+                      <span className="branch-orbit-core" aria-hidden="true" />
+                      <div>
+                        <strong>{branch.title}</strong>
+                        <small>
+                          {branch.goalCount} 个节点 / {branch.progress}% / 待行动 {branch.openActionCount}
+                        </small>
+                      </div>
+                    </div>
+                  ))}
+                  {mapOverview.branchSummaries.length === 0 && <p className="muted-text">还没有轨道可以观测。</p>}
+                </div>
+              )}
+            </section>
+
             <section className="detail-section">
-              <h3>顶层目标</h3>
+              <h3>{quickSectionTitle}</h3>
               <div className="child-list">
                 <AnimatePresence initial={false}>
                   {topGoals.map((goal) => (
