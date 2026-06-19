@@ -105,6 +105,28 @@ describe("presentation labels", () => {
   });
 });
 
+describe("pane resizer", () => {
+  it("keeps the touch hit area large enough for mobile dragging", () => {
+    const styles = clientStyles();
+
+    expect(styles).toMatch(/\.pane-resizer\s*{[\s\S]*touch-action:\s*none;/);
+    expect(styles).toMatch(/@media \(pointer: coarse\)\s*{[\s\S]*?\.pane-resizer\.vertical\s*{[\s\S]*?width:\s*44px;[\s\S]*?min-width:\s*44px;/);
+    expect(styles).toMatch(/@media \(pointer: coarse\)\s*{[\s\S]*?\.pane-resizer\.horizontal\s*{[\s\S]*?height:\s*44px;[\s\S]*?min-height:\s*44px;/);
+    expect(styles).toMatch(/@media \(max-width: 1120px\) and \(pointer: coarse\)\s*{[\s\S]*?\.pane-resizer\.vertical,\s*\n\s*\.pane-resizer\.horizontal\s*{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*44px;[\s\S]*?min-height:\s*44px;[\s\S]*?cursor:\s*row-resize;/);
+  });
+
+  it("captures and filters the active pointer while resizing panels", () => {
+    const source = clientMainSource();
+
+    expect(source).toContain("const pointerId = event.pointerId;");
+    expect(source).toContain("resizer.setPointerCapture(pointerId);");
+    expect(source).toContain("moveEvent.pointerId !== pointerId");
+    expect(source).toContain("upEvent.pointerId !== pointerId");
+    expect(source).toContain("resizer.hasPointerCapture(pointerId)");
+    expect(source).toContain("resizer.releasePointerCapture(pointerId)");
+  });
+});
+
 describe("visual motion contracts", () => {
   it("keeps motion easing centralized and free of disallowed easing words", () => {
     const motionSource = clientMotionSource();

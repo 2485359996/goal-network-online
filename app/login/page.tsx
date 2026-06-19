@@ -1,5 +1,3 @@
-import { login, requestPasswordReset, signup } from "./actions";
-
 const ERROR_MESSAGES: Record<string, string> = {
   auth_failed: "登录请求失败，请稍后重试。",
   config_missing: "本地登录服务配置缺失。",
@@ -38,7 +36,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
         <h1>登录后进入你的目标地图</h1>
         <p>查看目标树、编辑目标和行动候选，并同步保存你的最新改动。</p>
       </section>
-      <form className="login-panel">
+      <form className="login-panel" action="/auth/session" method="post">
         <div className="login-panel-head">
           <p className="eyebrow">邮箱账户</p>
           <h2>登录或注册</h2>
@@ -55,15 +53,15 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
           <input name="password" type="password" autoComplete="current-password" required />
         </label>
         <div className="login-actions">
-          <button formAction={login} type="submit" className="primary-button" disabled={!supabaseConfigured}>
+          <button name="intent" value="login" type="submit" className="primary-button" disabled={!supabaseConfigured}>
             登录
           </button>
-          <button formAction={signup} type="submit" className="secondary-button" disabled={!supabaseConfigured}>
+          <button name="intent" value="signup" type="submit" className="secondary-button" disabled={!supabaseConfigured}>
             注册
           </button>
         </div>
         <div className="login-help-row">
-          <button formAction={requestPasswordReset} formNoValidate type="submit" className="login-link-button" disabled={!supabaseConfigured}>
+          <button name="intent" value="reset" formNoValidate type="submit" className="login-link-button" disabled={!supabaseConfigured}>
             忘记密码？发送重置邮件
           </button>
         </div>
