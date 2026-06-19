@@ -87,9 +87,48 @@ describe("theme styles", () => {
   it("uses theme tokens for the notes and actions drawer colors", () => {
     const styles = clientStyles();
 
-    expect(styles).toMatch(/:root\[data-theme="dark"\]\s*{[\s\S]*--notes-actions-background:\s*rgba\(15,\s*23,\s*42,\s*0\.92\);/);
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s*{[\s\S]*--notes-actions-background:\s*rgba\(11,\s*16,\s*32,\s*0\.92\);/);
     expect(styles).toMatch(/\.notes-actions-drawer\s*{[\s\S]*background:\s*var\(--notes-actions-background\);/);
     expect(styles).not.toMatch(/\.detail-panel:has\(\.notes-actions-drawer\)\s+\.notes-actions-drawer\s*{[\s\S]*background:\s*rgba\(255,\s*255,\s*255,\s*0\.96\);/);
+  });
+
+  it("anchors the dark theme to the midnight observatory palette", () => {
+    const styles = clientStyles();
+    const darkRoot = styles.match(/:root\[data-theme="dark"\]\s*{([\s\S]*?)\n}/)?.[1] ?? "";
+
+    expect(darkRoot).toContain("--bg: #090f1c;");
+    expect(darkRoot).toContain("--surface: #101827;");
+    expect(darkRoot).toContain("--surface-raised: #172235;");
+    expect(darkRoot).toContain("--ink: #f4f7fb;");
+    expect(darkRoot).toContain("--accent: #6bd3c1;");
+    expect(darkRoot).toContain("--accent-strong: #9be7dc;");
+    expect(darkRoot).toContain("--accent-soft: rgba(107, 211, 193, 0.14);");
+    expect(darkRoot).toContain("--dream-bg: #090f1c;");
+    expect(darkRoot).toContain("--core-bloom: rgba(107, 211, 193, 0.32);");
+  });
+
+  it("turns off decorative goal map background layers in dark mode", () => {
+    const styles = clientStyles();
+
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.map-pane\s*{[\s\S]*background:\s*var\(--bg\);[\s\S]*box-shadow:\s*0 22px 44px -30px rgba\(0,\s*0,\s*0,\s*0\.72\);[\s\S]*backdrop-filter:\s*none;/);
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.map-pane::before\s*{\s*opacity:\s*0;\s*}/);
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.map-canvas::after\s*{[\s\S]*opacity:\s*0;/);
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.starfield\s*{\s*opacity:\s*0;\s*animation:\s*none;\s*}/);
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.starfield::before\s*{\s*animation:\s*none;\s*}/);
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.sunburst-sky-wash,\s*\n:root\[data-theme="dark"\]\s+\.sunburst-background-ring\s*{\s*opacity:\s*0;\s*}/);
+  });
+
+  it("aligns the app header with the workspace edges across breakpoints", () => {
+    const styles = clientStyles();
+    const sharedHeaderWidth = "width: calc(100% - var(--app-inline-padding) - var(--app-inline-padding));";
+
+    expect(styles).toMatch(/\.app-shell\s*{[\s\S]*--app-inline-padding:\s*clamp\(18px,\s*3vw,\s*40px\);/);
+    expect(styles).toMatch(/\.app-header\s*{[\s\S]*width:\s*calc\(100% - var\(--app-inline-padding\) - var\(--app-inline-padding\)\);/);
+    expect(styles).toMatch(/\.map-workspace\s*{[\s\S]*--workspace-padding:\s*16px var\(--app-inline-padding\) 28px;/);
+    expect(styles).toMatch(/@media \(max-width: 1120px\)\s*{[\s\S]*?\.app-shell\s*{[\s\S]*?--app-inline-padding:\s*clamp\(16px,\s*4vw,\s*28px\);[\s\S]*?\.map-workspace\s*{[\s\S]*?--workspace-padding:\s*18px var\(--app-inline-padding\) 28px;/);
+    expect(styles).toMatch(/@media \(max-width: 680px\)\s*{[\s\S]*?\.app-shell\s*{[\s\S]*?--app-inline-padding:\s*12px;[\s\S]*?\.map-workspace\s*{[\s\S]*?--workspace-padding:\s*var\(--app-inline-padding\);/);
+    expect(styles).toMatch(/@media \(min-width: 1121px\)\s*{[\s\S]*?\.app-shell\s*{[\s\S]*?--app-inline-padding:\s*40px;[\s\S]*?\.map-workspace\s*{[\s\S]*?--workspace-padding:\s*16px var\(--app-inline-padding\) 32px;/);
+    expect(styles.match(new RegExp(sharedHeaderWidth.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"))).toHaveLength(4);
   });
 });
 
@@ -149,10 +188,9 @@ describe("visual motion contracts", () => {
     expect(motionSource).toContain('exit: { opacity: 0, x: "-50%"');
   });
 
-  it("defines new atmosphere and core tokens in both themes", () => {
+  it("keeps light theme atmosphere tokens available", () => {
     const styles = clientStyles();
     const lightRoot = styles.match(/:root\s*{([\s\S]*?)\n}/)?.[1] ?? "";
-    const darkRoot = styles.match(/:root\[data-theme="dark"\]\s*{([\s\S]*?)\n}/)?.[1] ?? "";
     const tokens = [
       "--starfield-dot",
       "--starfield-dot-soft",
@@ -160,15 +198,27 @@ describe("visual motion contracts", () => {
       "--nebula-cyan",
       "--nebula-violet",
       "--nebula-beam",
-      "--core-bloom",
-      "--core-specular",
+      "--map-pane-atmosphere",
+      "--map-pane-atmosphere-opacity",
+      "--starfield-opacity",
+      "--starfield-beam-opacity",
+      "--starfield-after-opacity",
+      "--starfield-vignette",
       "--noise-opacity"
     ];
 
     for (const token of tokens) {
       expect(lightRoot).toContain(token);
-      expect(darkRoot).toContain(token);
     }
+  });
+
+  it("uses tokenized layers for the goal map atmosphere", () => {
+    const styles = clientStyles();
+
+    expect(styles).toMatch(/\.map-pane::before\s*{[\s\S]*background:\s*var\(--map-pane-atmosphere\);[\s\S]*opacity:\s*var\(--map-pane-atmosphere-opacity\);/);
+    expect(styles).toMatch(/\.starfield\s*{[\s\S]*opacity:\s*var\(--starfield-opacity\);/);
+    expect(styles).toMatch(/\.starfield::before\s*{[\s\S]*opacity:\s*var\(--starfield-beam-opacity\);/);
+    expect(styles).toMatch(/\.starfield::after\s*{[\s\S]*var\(--starfield-vignette\);[\s\S]*opacity:\s*var\(--starfield-after-opacity\);/);
   });
 
   it("keeps new ambient animation periods slow and reduced-motion aware", () => {

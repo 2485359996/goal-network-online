@@ -4080,8 +4080,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
               </div>
             </section>
 
-            <section className="detail-section map-guide-section" aria-labelledby={`map-guide-title-${presentationMode}`}>
-              <h3 id={`map-guide-title-${presentationMode}`}>{isSunburstMode ? "读日晷" : "读星球"}</h3>
+            <section className="detail-section map-guide-section" aria-label={isSunburstMode ? "日晷交互方式" : "星球交互方式"}>
               <div className="map-guide-list">
                 {guideItems.map((item) => (
                   <article key={item.title} className="map-guide-item">

@@ -8,7 +8,6 @@ Package manager is **pnpm** (`pnpm@10.33.0`); the project is ESM (`"type": "modu
 - `pnpm build` — **`tsc --noEmit` then `next build`**; type errors fail the build (strict TS)
 - `pnpm start` — production server
 - `pnpm test` — run the full Vitest suite once
-- `pnpm import:vault` — one-time historical data migration helper (`tsx scripts/import-vault.ts`)
 
 Run a single test file or filter by name:
 ```
@@ -17,7 +16,7 @@ pnpm exec vitest run -t "weighted progress"
 ```
 There is no `vitest.config.*`; Vitest runs on defaults. Tests are co-located `*.test.ts` next to the code.
 
-Required env (see `.env.example`): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `AI_PROVIDER_URL/KEY/MODEL`, `GITHUB_APP_*`. The optional historical migration helper also needs `GOAL_NETWORK_VAULT`, `IMPORT_OWNER_USER_ID`.
+Required env (see `.env.example`): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `AI_PROVIDER_URL/KEY/MODEL`, `GITHUB_APP_*`.
 
 ## Architecture
 

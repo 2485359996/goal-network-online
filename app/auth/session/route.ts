@@ -45,6 +45,23 @@ function normalizeOrigin(value: string | undefined) {
   }
 }
 
+function originFromHeader(value: string | null) {
+  return normalizeOrigin(value ?? undefined);
+}
+
+function isSafeAuthRequest(request: NextRequest) {
+  const currentOrigin = request.nextUrl.origin;
+
+  const requestOrigin = originFromHeader(request.headers.get("origin"));
+  if (requestOrigin && requestOrigin === currentOrigin) return true;
+
+  const secFetchSite = (request.headers.get("sec-fetch-site") || "").toLowerCase();
+  if (secFetchSite && ["same-origin", "same-site", "none"].includes(secFetchSite)) return true;
+
+  const refererOrigin = originFromHeader(request.headers.get("referer"));
+  return refererOrigin === currentOrigin;
+}
+
 function forwardedOrigin(headerStore: Headers) {
   const host = firstHeaderValue(headerStore.get("x-forwarded-host")) || firstHeaderValue(headerStore.get("host"));
   if (!host) return "";
@@ -93,6 +110,10 @@ function createAuthClient(request: NextRequest, response: NextResponse) {
 }
 
 export async function POST(request: NextRequest) {
+  if (!isSafeAuthRequest(request)) {
+    return loginRedirect(request, { error: "forbidden" });
+  }
+
   const formData = await request.formData();
   const email = normalizeEmail(formData);
   const intent = normalizeIntent(formData);

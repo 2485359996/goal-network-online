@@ -1,6 +1,7 @@
 const ERROR_MESSAGES: Record<string, string> = {
   auth_failed: "登录请求失败，请稍后重试。",
   config_missing: "本地登录服务配置缺失。",
+  forbidden: "登录请求来源异常，请重试。",
   email_already_registered: "这个邮箱已经注册，请直接登录，或使用下方的重置密码。",
   email_not_confirmed: "这个邮箱还没有完成确认，请先查看邮箱中的确认邮件。",
   email_required: "请先填写邮箱，再发送重置密码邮件。",
