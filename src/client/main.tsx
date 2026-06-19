@@ -683,6 +683,9 @@ export function GoalApp() {
     const resizingHeight = window.matchMedia(STACKED_LAYOUT_QUERY).matches;
     const mapPaneRect = mapPaneRef.current?.getBoundingClientRect();
     if (resizingHeight && !mapPaneRect) return;
+    const resizer = event.currentTarget;
+    const pointerId = event.pointerId;
+    resizer.setPointerCapture(pointerId);
 
     setResizingPanelAxis(resizingHeight ? "height" : "width");
     // 布局只在按下时读取一次；移动帧不再触发强制同步布局，setState 经 rAF 合帧
@@ -702,15 +705,20 @@ export function GoalApp() {
     };
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      moveEvent.preventDefault();
       pointerX = moveEvent.clientX;
       pointerY = moveEvent.clientY;
       if (frame === 0) frame = window.requestAnimationFrame(applyPointer);
     };
-    const handlePointerUp = () => {
+    const handlePointerUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
+      upEvent.preventDefault();
       if (frame !== 0) {
         window.cancelAnimationFrame(frame);
         applyPointer();
       }
+      if (resizer.hasPointerCapture(pointerId)) resizer.releasePointerCapture(pointerId);
       setResizingPanelAxis(null);
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
