@@ -118,10 +118,7 @@ describe("AI assistant apply helpers", () => {
       lastTarget: "weekly",
       activeTarget: "weekly",
       currentResponse: { weeklyActions: [{ description: "Draft checklist" }] },
-      branchGoals: expect.arrayContaining([
-        expect.objectContaining({ title: "Delivery" }),
-        expect.objectContaining({ title: "Release checklist" })
-      ])
+      children: [expect.objectContaining({ title: "Release checklist" })]
     });
   });
 

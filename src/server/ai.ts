@@ -180,6 +180,8 @@ export function systemPromptFor(endpoint: AiEndpoint, request: unknown) {
     `Allowed top-level fields: ${allowedFields.join(", ")}.`,
     ...clarificationRules,
     "For turn.intent message, quick-adjust, or clarification-answer, revise turn.currentResponse when present and preserve unaffected fields.",
+    "When request.branchSummary is present, treat it as the authoritative compact branch context; do not require branchGoals.",
+    "For diagnose-branch, findings must be an array of objects with severity, title, detail, and optional recommendation. Severity must be info, warning, or critical; map high/severe to critical and medium/risk to warning.",
     "Quick adjustment meanings:",
     "- too-hard: reduce difficulty, scope, prerequisites, or action intensity.",
     "- not-enough-time: shrink the current cycle scope and prefer the next smallest useful step.",
@@ -209,8 +211,7 @@ function agentSystemPromptFor(request: unknown) {
     "Use tool when the user asks for a concrete goal operation, or when their follow-up should continue lastTarget/activeTarget.",
     "If lastTarget or activeTarget exists and the user gives a short follow-up such as 'less', 'more concrete', or 'reduce scope', keep that target unless the user explicitly switches.",
     "The final write still requires user confirmation outside this router.",
-    "Request JSON follows for context; use it only to route safely.",
-    JSON.stringify(request, null, 2)
+    "Request JSON is supplied in the user message; use it only to route safely."
   ].join("\n");
 }
 

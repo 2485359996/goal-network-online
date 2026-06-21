@@ -421,6 +421,40 @@ describe("SupabaseGoalStore goal creation", () => {
       })
     );
   });
+
+  it("creates multiple child goals in one batch with one audit and sync job", async () => {
+    const client = new FakeSupabaseClient({
+      goal_maps: [goalMapRow({ id: "map-1", name: "目标网络" })],
+      goals: [goalRow({ id: "db-parent", legacy_id: "goal-parent", title: "Parent", goal_map_id: "map-1" })]
+    });
+    const store = new SupabaseGoalStore(client as any, "workspace-1", "user-1");
+
+    const next = await store.createGoals({
+      goals: [
+        { title: "Child A", goalMapId: "map-1", parent: "Parent", domain: "Career", summary: "A" },
+        { title: "Child B", goalMapId: "map-1", parent: "Parent", domain: "Career", summary: "B" }
+      ]
+    });
+
+    expect(client.tables.goals.map((row) => row.title).sort()).toEqual(["Child A", "Child B", "Parent"]);
+    expect(client.tables.goal_relations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source_goal_id: "goals-2", target_goal_id: "db-parent", relation_type: "parent" }),
+        expect.objectContaining({ source_goal_id: "goals-3", target_goal_id: "db-parent", relation_type: "parent" })
+      ])
+    );
+    expect(client.tables.audit_events).toHaveLength(1);
+    expect(client.tables.audit_events[0]).toMatchObject({
+      action: "goal.batch_create",
+      payload: {
+        count: 2,
+        ids: ["goal-Parent-Child-A", "goal-Parent-Child-B"],
+        titles: ["Child A", "Child B"]
+      }
+    });
+    expect(client.tables.sync_jobs).toHaveLength(1);
+    expect(next.flatGoals.map((goal) => goal.title).sort()).toEqual(["Child A", "Child B", "Parent"]);
+  });
 });
 
 describe("SupabaseGoalStore map positions", () => {

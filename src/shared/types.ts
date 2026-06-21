@@ -121,6 +121,10 @@ export interface GoalCreateInput {
   reviewQuestions?: string[];
 }
 
+export interface GoalsBatchCreateInput {
+  goals: GoalCreateInput[];
+}
+
 export interface GoalMapCreateInput {
   name: string;
 }

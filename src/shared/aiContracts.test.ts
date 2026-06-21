@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   aiAgentRequestSchema,
+  aiBranchContextSummarySchema,
   aiAgentResponseSchema,
   aiFindingSchema,
   aiWeeklyActionSchema,
+  diagnoseBranchRequestSchema,
   draftGoalRequestSchema,
   draftGoalResponseSchema,
   improveGoalRequestSchema,
   improveGoalResponseSchema,
   normalizeAiActionCandidates,
   suggestSubgoalsResponseSchema,
+  suggestWeeklyActionsRequestSchema,
   suggestWeeklyActionsResponseSchema
 } from "./aiContracts";
 
@@ -108,6 +111,58 @@ describe("AI contracts", () => {
       options: ["优化目标", "拆解子目标"]
     });
     expect(aiAgentResponseSchema.safeParse({ kind: "tool", target: "delete-goal" }).success).toBe(false);
+  });
+
+  it("accepts compact branch summaries on branch-heavy requests", () => {
+    const branchSummary = aiBranchContextSummarySchema.parse({
+      summaryVersion: 1,
+      sourceHash: "hash-1",
+      scope: "branch",
+      rootGoalId: "goal-delivery",
+      rootGoalTitle: "Delivery",
+      goalCount: 3,
+      omittedGoalCount: 0,
+      statusCounts: { active: 2, paused: 0, done: 1, archived: 0 },
+      horizonCounts: { medium: 3 },
+      averageClarity: 3.5,
+      averageProgress: 25,
+      openActionCount: 2,
+      completedActionCount: 1,
+      relationCounts: { supports: 0, depends_on: 0, conflicts_with: 0 },
+      riskSignals: [],
+      recentSignals: [],
+      goals: []
+    });
+
+    expect(
+      aiAgentRequestSchema.safeParse({
+        goalId: "goal-delivery",
+        goal: validGoalContext,
+        parentChain: [],
+        children: [],
+        siblings: [],
+        branchSummary,
+        message: "帮我诊断这个分支"
+      }).success
+    ).toBe(true);
+    expect(
+      diagnoseBranchRequestSchema.safeParse({
+        goalId: "goal-delivery",
+        goal: validGoalContext,
+        parentChain: [],
+        children: [],
+        siblings: []
+      }).success
+    ).toBe(true);
+    expect(
+      suggestWeeklyActionsRequestSchema.safeParse({
+        goalId: "goal-delivery",
+        goal: validGoalContext,
+        parentChain: [],
+        children: [],
+        siblings: []
+      }).success
+    ).toBe(true);
   });
 
   it("accepts clarification-only responses and rejects mixed result responses", () => {
@@ -222,6 +277,20 @@ describe("AI contracts", () => {
     });
     expect(result.success).toBe(true);
     if (result.success) expect(result.data.severity).toBe("info");
+  });
+
+  it("normalizes common diagnose finding aliases", () => {
+    expect(aiFindingSchema.parse({
+      level: "high",
+      issue: "Progress is blocked",
+      description: "No recent progress on a high-priority goal.",
+      recommendations: ["Reduce scope", "Add one next action"]
+    })).toEqual({
+      severity: "critical",
+      title: "Progress is blocked",
+      detail: "No recent progress on a high-priority goal.",
+      recommendation: "Reduce scope\nAdd one next action"
+    });
   });
 
   it("weekly action schema requires description and accepts optional fields", () => {

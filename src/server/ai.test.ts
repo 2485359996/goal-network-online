@@ -369,6 +369,60 @@ describe("AI routes", () => {
     });
   });
 
+  it("sends compact branch summaries to the provider without full branchGoals", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const request = {
+      goalId: "goal-delivery",
+      goal: validGoalContext,
+      parentChain: [],
+      children: [],
+      siblings: [],
+      branchSummary: {
+        summaryVersion: 1,
+        sourceHash: "hash-1",
+        scope: "branch",
+        rootGoalId: "goal-delivery",
+        rootGoalTitle: "Delivery",
+        goalCount: 40,
+        omittedGoalCount: 20,
+        statusCounts: { active: 30, paused: 5, done: 5, archived: 0 },
+        horizonCounts: { medium: 40 },
+        averageClarity: 2.8,
+        averageProgress: 35,
+        openActionCount: 12,
+        completedActionCount: 4,
+        relationCounts: { supports: 1, depends_on: 2, conflicts_with: 0 },
+        riskSignals: ["10 个活跃目标清晰度偏低"],
+        recentSignals: [],
+        goals: []
+      }
+    };
+
+    await runAiProvider("diagnose-branch", request, {
+      env: {
+        AI_PROVIDER_URL: "https://provider.example/v1",
+        AI_PROVIDER_KEY: "test-key",
+        AI_PROVIDER_MODEL: "test-model"
+      },
+      readLocalEnv: () => ({}),
+      fetch: async (url, init) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: JSON.stringify({ findings: [] }) } }]
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+    });
+
+    const body = JSON.parse(String(calls[0].init.body)) as { messages: Array<{ role: string; content: string }> };
+    const userPayload = JSON.parse(body.messages.find((message) => message.role === "user")?.content ?? "{}");
+    expect(userPayload.request.branchSummary).toMatchObject({ sourceHash: "hash-1", goalCount: 40 });
+    expect(userPayload.request).not.toHaveProperty("branchGoals");
+    expect(body.messages.find((message) => message.role === "system")?.content).toContain("request.branchSummary");
+  });
+
   it("only allows clarifyingQuestion in the system prompt when turn explicitly allows it", () => {
     const request = {
       goalId: "goal-delivery",

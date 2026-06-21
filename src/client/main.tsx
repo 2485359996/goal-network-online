@@ -312,6 +312,7 @@ type PendingEdit = {
   draft: EditDraft;
 };
 type DraftCache = Record<string, EditDraft>;
+type LocalGoalPatch = { id: string; patch: GoalPatchInput };
 
 export type GoalMapBranchOverview = {
   id: string;
@@ -441,6 +442,194 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function goalReference(title: string | undefined) {
+  const next = normalizedGoalTitle(title);
+  return next ? `[[${next}]]` : "";
+}
+
+function goalReferenceKey(value: string | undefined) {
+  return normalizedGoalTitle(value).replace(/\s+/g, "").toLocaleLowerCase();
+}
+
+function cleanLocalLines(items: string[] | undefined) {
+  return (items ?? []).map((item) => item.trim()).filter(Boolean);
+}
+
+function cleanLocalActionCandidates(items: GoalPatchInput["actionCandidates"]) {
+  return (items ?? [])
+    .map((item) => (typeof item === "string" ? { text: item.trim(), done: false } : { text: item.text.trim(), done: Boolean(item.done) }))
+    .filter((item) => item.text);
+}
+
+function mergeLocalMapPositions(
+  current: GoalNode["map_positions"],
+  patch: NonNullable<GoalPatchInput["map_positions"]>
+): GoalNode["map_positions"] {
+  const next = { ...(current ?? {}) };
+  for (const [contextId, position] of Object.entries(patch)) {
+    if (position === null) delete next[contextId];
+    else next[contextId] = { x: Number(position.x), y: Number(position.y) };
+  }
+  return Object.keys(next).length ? next : undefined;
+}
+
+function replaceGoalReference(value: string, oldTitle: string, nextTitle: string) {
+  return goalReferenceKey(value) === goalReferenceKey(oldTitle) ? goalReference(nextTitle) : value;
+}
+
+function applyGoalRenameReferences(goal: GoalNode, oldTitle: string, nextTitle: string) {
+  if (!oldTitle || oldTitle === nextTitle) return goal;
+
+  const parent = replaceGoalReference(goal.parent, oldTitle, nextTitle);
+  const supports = goal.supports.map((item) => replaceGoalReference(item, oldTitle, nextTitle));
+  const depends_on = goal.depends_on.map((item) => replaceGoalReference(item, oldTitle, nextTitle));
+  const conflicts_with = goal.conflicts_with.map((item) => replaceGoalReference(item, oldTitle, nextTitle));
+  if (
+    parent === goal.parent &&
+    supports.every((item, index) => item === goal.supports[index]) &&
+    depends_on.every((item, index) => item === goal.depends_on[index]) &&
+    conflicts_with.every((item, index) => item === goal.conflicts_with[index])
+  ) {
+    return goal;
+  }
+
+  return {
+    ...goal,
+    parent,
+    supports,
+    depends_on,
+    conflicts_with
+  };
+}
+
+function applyGoalPatchToNode(goal: GoalNode, goalId: string, patch: GoalPatchInput, rename?: { oldTitle: string; nextTitle: string }): GoalNode {
+  let next = goal;
+  if (goal.id === goalId) {
+    const title = patch.title !== undefined ? patch.title.trim() : goal.title;
+    const parent = patch.parent !== undefined ? goalReference(patch.parent) : goal.parent;
+    const primaryGoal = isPrimaryGoalTitle(title) && !normalizedGoalTitle(parent);
+    const sections = {
+      ...goal.sections,
+      ...(patch.summary !== undefined ? { summary: patch.summary } : {}),
+      ...(patch.directions !== undefined ? { directions: cleanLocalLines(patch.directions) } : {}),
+      ...(patch.successSignals !== undefined ? { successSignals: cleanLocalLines(patch.successSignals) } : {}),
+      ...(patch.actionCandidates !== undefined ? { actionCandidates: cleanLocalActionCandidates(patch.actionCandidates) } : {}),
+      ...(patch.reviewQuestions !== undefined ? { reviewQuestions: cleanLocalLines(patch.reviewQuestions) } : {})
+    };
+    if (primaryGoal) sections.actionCandidates = [];
+
+    next = {
+      ...goal,
+      title,
+      parent,
+      status: patch.status ?? goal.status,
+      horizon: patch.horizon ?? goal.horizon,
+      domain: patch.domain !== undefined ? goalReference(patch.domain) : goalReferenceKey(goal.domain) === goalReferenceKey(goal.title) && patch.title !== undefined ? goalReference(title) : goal.domain,
+      priority: patch.priority ?? goal.priority,
+      clarity: patch.clarity ?? goal.clarity,
+      progress: primaryGoal ? undefined : patch.progress ?? goal.progress,
+      color: patch.color ?? goal.color,
+      map_x: patch.map_x !== undefined ? patch.map_x ?? undefined : goal.map_x,
+      map_y: patch.map_y !== undefined ? patch.map_y ?? undefined : goal.map_y,
+      map_positions: patch.map_positions !== undefined ? mergeLocalMapPositions(goal.map_positions, patch.map_positions) : goal.map_positions,
+      last_reviewed: patch.last_reviewed ?? goal.last_reviewed,
+      last_progress: patch.last_progress ?? goal.last_progress,
+      sections
+    };
+  }
+
+  const children = next.children.map((child) => applyGoalPatchToNode(child, goalId, patch, rename));
+  if (children.some((child, index) => child !== next.children[index])) next = { ...next, children };
+  return rename ? applyGoalRenameReferences(next, rename.oldTitle, rename.nextTitle) : next;
+}
+
+function rollupLocalProgress(goal: GoalNode): GoalNode {
+  const children = goal.children.map(rollupLocalProgress);
+  if (children.length === 0) return children === goal.children ? goal : { ...goal, children };
+  const next = { ...goal, children };
+  return { ...next, progress: weightedGoalProgress(next) };
+}
+
+function sortLocalGoalTree(goals: GoalNode[]): GoalNode[] {
+  return [...goals]
+    .sort((a, b) => b.priority - a.priority || a.title.localeCompare(b.title, "zh-CN"))
+    .map((goal) => ({ ...goal, children: sortLocalGoalTree(goal.children) }));
+}
+
+function normalizeLocalGoalsResponse(response: GoalsResponse, goals: GoalNode[], edges = response.graph.edges): GoalsResponse {
+  const nextGoals = sortLocalGoalTree(goals.map(rollupLocalProgress));
+  const flatGoals = flattenGoals(nextGoals);
+  const ids = new Set(flatGoals.map((goal) => goal.id));
+  return {
+    ...response,
+    goals: nextGoals,
+    flatGoals,
+    graph: {
+      nodes: flatGoals.map((goal) => ({
+        id: goal.id,
+        title: goal.title,
+        domain: goal.domain,
+        status: goal.status,
+        priority: goal.priority,
+        clarity: goal.clarity
+      })),
+      edges: edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target))
+    }
+  };
+}
+
+export function applyGoalPatchLocally(response: GoalsResponse, goalId: string, patch: GoalPatchInput): GoalsResponse {
+  const currentGoal = response.flatGoals.find((goal) => goal.id === goalId);
+  if (!currentGoal) return response;
+  const nextTitle = patch.title?.trim();
+  const rename = nextTitle && nextTitle !== currentGoal.title ? { oldTitle: currentGoal.title, nextTitle } : undefined;
+  return normalizeLocalGoalsResponse(
+    response,
+    response.goals.map((goal) => applyGoalPatchToNode(goal, goalId, patch, rename))
+  );
+}
+
+export function applyGoalPatchesLocally(response: GoalsResponse, patches: LocalGoalPatch[]): GoalsResponse {
+  return patches.reduce((current, item) => applyGoalPatchLocally(current, item.id, item.patch), response);
+}
+
+export function deleteGoalLocally(response: GoalsResponse, goalId: string): GoalsResponse {
+  const target = response.flatGoals.find((goal) => goal.id === goalId);
+  if (!target) return response;
+  const removedIds = new Set([goalId, ...collectDescendants(target)]);
+  const prune = (goals: GoalNode[]): GoalNode[] =>
+    goals
+      .filter((goal) => !removedIds.has(goal.id))
+      .map((goal) => ({ ...goal, children: prune(goal.children) }));
+  return normalizeLocalGoalsResponse(response, prune(response.goals));
+}
+
+export function patchGoalMapLocally(response: GoalsResponse, goalMapId: string, patch: { name?: string }): GoalsResponse {
+  if (patch.name === undefined) return response;
+  const name = patch.name.trim();
+  if (!name) return response;
+  return {
+    ...response,
+    goalMaps: response.goalMaps.map((goalMap) => (goalMap.id === goalMapId ? { ...goalMap, name } : goalMap))
+  };
+}
+
+export function deleteGoalMapLocally(response: GoalsResponse, goalMapId: string): GoalsResponse {
+  const removedIds = new Set(response.flatGoals.filter((goal) => goal.goalMapId === goalMapId).map((goal) => goal.id));
+  const prune = (goals: GoalNode[]): GoalNode[] =>
+    goals
+      .filter((goal) => goal.goalMapId !== goalMapId)
+      .map((goal) => ({ ...goal, children: prune(goal.children) }));
+  return normalizeLocalGoalsResponse(
+    {
+      ...response,
+      goalMaps: response.goalMaps.filter((goalMap) => goalMap.id !== goalMapId)
+    },
+    prune(response.goals),
+    response.graph.edges.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target))
+  );
+}
+
 function nextGoalsRequestId(ref: React.MutableRefObject<number>) {
   const requestId = ref.current + 1;
   ref.current = requestId;
@@ -500,6 +689,7 @@ export function GoalApp() {
   const appShellRef = useRef<HTMLDivElement | null>(null);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const mapPaneRef = useRef<HTMLElement | null>(null);
+  const goalsRef = useRef<GoalsResponse>(emptyGoals);
   const pendingEditRef = useRef<PendingEdit | null>(null);
   const pendingSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -507,6 +697,28 @@ export function GoalApp() {
   const goalsRequestIdRef = useRef(0);
   const noticeTimeoutRef = useRef<number | null>(null);
   const bannerMotion = useBannerMotion();
+
+  useEffect(() => {
+    goalsRef.current = goals;
+  }, [goals]);
+
+  const commitGoals = useCallback((next: GoalsResponse) => {
+    goalsRef.current = next;
+    setGoals(next);
+  }, []);
+
+  const applyOptimisticGoals = useCallback((mutate: (current: GoalsResponse) => GoalsResponse) => {
+    const previous = goalsRef.current;
+    const next = mutate(previous);
+    if (next === previous) return () => undefined;
+    nextGoalsRequestId(goalsRequestIdRef);
+    goalsRef.current = next;
+    setGoals(next);
+    return () => {
+      goalsRef.current = previous;
+      setGoals(previous);
+    };
+  }, []);
 
   const clearNoticeTimer = useCallback(() => {
     if (noticeTimeoutRef.current !== null) {
@@ -547,7 +759,7 @@ export function GoalApp() {
 
   const enterAuthRequiredState = useCallback(() => {
     clearNoticeTimer();
-    setGoals(emptyGoals);
+    commitGoals(emptyGoals);
     setSelectedId("root");
     setActiveGoalMapId("");
     setFocusRootId(null);
@@ -562,14 +774,14 @@ export function GoalApp() {
     setRenameOpen(false);
     setAiOpen(false);
     setAiGoal(null);
-  }, [clearNoticeTimer]);
+  }, [clearNoticeTimer, commitGoals]);
 
   const loadGoals = useCallback(async () => {
     const requestId = nextGoalsRequestId(goalsRequestIdRef);
     try {
       const next = await api<GoalsResponse>("/api/goals");
       if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
-        setGoals(next);
+        commitGoals(next);
         setAuthRequired(false);
       }
       return next;
@@ -579,14 +791,14 @@ export function GoalApp() {
       }
       throw nextError;
     }
-  }, [enterAuthRequiredState]);
+  }, [commitGoals, enterAuthRequiredState]);
 
   const reload = useCallback(async () => {
     const requestId = nextGoalsRequestId(goalsRequestIdRef);
     try {
       const next = await api<GoalsResponse>("/api/goals");
       if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) {
-        setGoals(next);
+        commitGoals(next);
         setAuthRequired(false);
         setError("");
       }
@@ -603,7 +815,7 @@ export function GoalApp() {
     } finally {
       if (shouldApplyGoalsResponse(requestId, goalsRequestIdRef.current)) setLoading(false);
     }
-  }, [enterAuthRequiredState]);
+  }, [commitGoals, enterAuthRequiredState]);
 
   useEffect(() => {
     void reload().catch(() => undefined);
@@ -859,6 +1071,43 @@ export function GoalApp() {
     }
   }, [clearNoticeTimer, enterAuthRequiredState, showNotice]);
 
+  const refreshGoalsInBackground = useCallback(() => {
+    void loadGoals().catch((nextError) => {
+      if (isUnauthorizedApiError(nextError)) return;
+      setError(nextError instanceof Error ? nextError.message : "刷新失败");
+    });
+  }, [loadGoals]);
+
+  const runOptimisticWrite = useCallback(async (
+    optimisticUpdate: (current: GoalsResponse) => GoalsResponse,
+    work: () => Promise<void>,
+    message: string,
+    options: { silent?: boolean } = {}
+  ) => {
+    const rollback = applyOptimisticGoals(optimisticUpdate);
+    setSaving(true);
+    setError("");
+    try {
+      await work();
+      refreshGoalsInBackground();
+      if (!options.silent) showNotice(message);
+      return true;
+    } catch (nextError) {
+      clearNoticeTimer();
+      setNotice("");
+      if (isUnauthorizedApiError(nextError)) {
+        enterAuthRequiredState();
+      } else {
+        rollback();
+        refreshGoalsInBackground();
+        setError(nextError instanceof Error ? nextError.message : "保存失败");
+      }
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [applyOptimisticGoals, clearNoticeTimer, enterAuthRequiredState, refreshGoalsInBackground, showNotice]);
+
   const clearCachedDraft = useCallback((goalId: string, savedDraft?: EditDraft) => {
     const cachedDraft = draftCacheRef.current[goalId];
     if (!cachedDraft || !savedDraft || draftsEqual(cachedDraft, savedDraft)) {
@@ -871,64 +1120,76 @@ export function GoalApp() {
   }, []);
 
   const saveGoal = useCallback(async (goal: GoalNode, draft: EditDraft, options: { selectAfterSave?: string | false; silent?: boolean } = {}) => {
-    return runWrite(async () => {
-      const nextImportance = rebalanceImportance(visibleTree, goal.id, draft.importance);
-      const primaryGoal = isPrimaryGoalNode(goal);
-      const topLevelIndex = visibleTree.findIndex((topGoal) => topGoal.id === goal.id);
-      const themeColorEditable = topLevelIndex >= 0;
-      const currentThemeColor = themeColorEditable ? resolveGoalThemeColor(goal, goalThemeColorForIndex(topLevelIndex)) : "";
-      const nextThemeColor = themeColorEditable ? normalizeHexColor(draft.color) : "";
-      const themeColorChanged = Boolean(nextThemeColor && nextThemeColor !== currentThemeColor);
-      const patch: GoalPatchInput = {
-        priority: Number(nextImportance[goal.id] ?? draft.importance),
-        summary: draft.notes
-      };
-      if (themeColorChanged) {
-        patch.color = nextThemeColor;
-      }
-      if (!primaryGoal && goal.children.length === 0) {
-        patch.clarity = Math.max(1, Math.ceil(Number(draft.progress) / 20));
-        patch.progress = Number(draft.progress);
-      }
-      if (!primaryGoal) {
-        patch.actionCandidates = draft.actions;
-      }
-      await api(`/api/goals/${encodeURIComponent(goal.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify(patch)
-      });
-      await Promise.all(
-        Object.entries(nextImportance)
-          .filter(([id]) => id !== goal.id)
-          .map(([id, priority]) =>
-            api(`/api/goals/${encodeURIComponent(id)}`, {
-              method: "PATCH",
-              body: JSON.stringify({ priority })
-            })
-          )
-          .concat(
-            themeColorChanged
-              ? Array.from(collectDescendants(goal)).map((id) =>
-                  api(`/api/goals/${encodeURIComponent(id)}`, {
-                    method: "PATCH",
-                    body: JSON.stringify({ color: nextThemeColor })
-                  })
-                )
-              : []
-          )
-      );
-      const next = await loadGoals();
+    const nextImportance = rebalanceImportance(visibleTree, goal.id, draft.importance);
+    const primaryGoal = isPrimaryGoalNode(goal);
+    const topLevelIndex = visibleTree.findIndex((topGoal) => topGoal.id === goal.id);
+    const themeColorEditable = topLevelIndex >= 0;
+    const currentThemeColor = themeColorEditable ? resolveGoalThemeColor(goal, goalThemeColorForIndex(topLevelIndex)) : "";
+    const nextThemeColor = themeColorEditable ? normalizeHexColor(draft.color) : "";
+    const themeColorChanged = Boolean(nextThemeColor && nextThemeColor !== currentThemeColor);
+    const patch: GoalPatchInput = {
+      priority: Number(nextImportance[goal.id] ?? draft.importance),
+      summary: draft.notes
+    };
+    if (themeColorChanged) {
+      patch.color = nextThemeColor;
+    }
+    if (!primaryGoal && goal.children.length === 0) {
+      patch.clarity = Math.max(1, Math.ceil(Number(draft.progress) / 20));
+      patch.progress = Number(draft.progress);
+    }
+    if (!primaryGoal) {
+      patch.actionCandidates = draft.actions;
+    }
+    const siblingPatches: LocalGoalPatch[] = Object.entries(nextImportance)
+      .filter(([id]) => id !== goal.id)
+      .map(([id, priority]) => ({ id, patch: { priority } }));
+    const colorPatches: LocalGoalPatch[] = themeColorChanged
+      ? Array.from(collectDescendants(goal)).map((id) => ({ id, patch: { color: nextThemeColor } }))
+      : [];
+    const goalPatches: LocalGoalPatch[] = [{ id: goal.id, patch }, ...siblingPatches, ...colorPatches];
+
+    const saved = await runOptimisticWrite(
+      (current) => applyGoalPatchesLocally(current, goalPatches),
+      async () => {
+        await api(`/api/goals/${encodeURIComponent(goal.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify(patch)
+        });
+        await Promise.all(
+          siblingPatches
+            .map(({ id, patch: siblingPatch }) =>
+              api(`/api/goals/${encodeURIComponent(id)}`, {
+                method: "PATCH",
+                body: JSON.stringify(siblingPatch)
+              })
+            )
+            .concat(
+              themeColorChanged
+                ? colorPatches.map(({ id, patch: colorPatch }) =>
+                    api(`/api/goals/${encodeURIComponent(id)}`, {
+                      method: "PATCH",
+                      body: JSON.stringify(colorPatch)
+                    })
+                  )
+                : []
+            )
+        );
+      },
+      "目标已保存",
+      { silent: options.silent }
+    );
+    if (saved) {
       setImportancePreview({});
       setProgressPreview({});
       setColorPreview({});
       clearCachedDraft(goal.id, draft);
       if (options.selectAfterSave !== false) {
-        const nextSelectedId = options.selectAfterSave ?? (next.flatGoals.some((item) => item.id === goal.id) ? goal.id : "root");
-        setSelectedId(nextSelectedId);
+        setSelectedId(options.selectAfterSave ?? goal.id);
       }
-      return next;
-    }, "目标已保存", { silent: options.silent });
-  }, [clearCachedDraft, loadGoals, runWrite, visibleTree]);
+    }
+    return saved;
+  }, [clearCachedDraft, runOptimisticWrite, visibleTree]);
 
   const clearGoalEditAutosaveTimer = useCallback(() => {
     if (autoSaveTimerRef.current !== null) clearTimeout(autoSaveTimerRef.current);
@@ -1032,6 +1293,20 @@ export function GoalApp() {
     }, "目标已创建");
   };
 
+  const createGoals = useCallback(async (inputs: GoalCreateInput[]): Promise<boolean> => {
+    return runWrite(async () => {
+      const next = await api<GoalsResponse>("/api/goals/batch", {
+        method: "POST",
+        body: JSON.stringify({ goals: inputs })
+      });
+      nextGoalsRequestId(goalsRequestIdRef);
+      commitGoals(next);
+      setImportancePreview({});
+      setProgressPreview({});
+      setColorPreview({});
+    }, "子目标已创建");
+  }, [commitGoals, runWrite]);
+
   const selectGoalMap = useCallback((goalMapId: string) => {
     queuePendingEditSave();
     setActiveGoalMapId(goalMapId);
@@ -1060,52 +1335,74 @@ export function GoalApp() {
   }, [loadGoals, runWrite]);
 
   const patchGoalMap = useCallback(async (goalMap: GoalMap, name: string): Promise<boolean> => {
-    return runWrite(async () => {
-      const updated = await api<GoalMap>(`/api/goal-maps/${encodeURIComponent(goalMap.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ name })
-      });
-      const next = await loadGoals();
-      setActiveGoalMapId(updated.id);
-      setSelectedId(updated.id);
-      if (typeof window !== "undefined") window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, updated.id);
-      return next;
-    }, "目标地图已重命名");
-  }, [loadGoals, runWrite]);
+    const updated = await runOptimisticWrite(
+      (current) => patchGoalMapLocally(current, goalMap.id, { name }),
+      async () => {
+        const updated = await api<GoalMap>(`/api/goal-maps/${encodeURIComponent(goalMap.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name })
+        });
+        setActiveGoalMapId(updated.id);
+        setSelectedId(updated.id);
+        if (typeof window !== "undefined") window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, updated.id);
+      },
+      "目标地图已重命名"
+    );
+    return updated;
+  }, [runOptimisticWrite]);
 
   const deleteGoalMap = useCallback(async (goalMap: GoalMap): Promise<boolean> => {
-    return runWrite(async () => {
-      pendingEditRef.current = null;
-      await api(`/api/goal-maps/${encodeURIComponent(goalMap.id)}`, {
-        method: "DELETE"
-      });
-      const next = await loadGoals();
-      const keptActiveMap = next.goalMaps.find((item) => item.id === activeGoalMapId && item.id !== goalMap.id);
-      const nextActiveMap = keptActiveMap ?? next.goalMaps[0];
-      const nextActiveId = nextActiveMap?.id ?? "";
-      setActiveGoalMapId(nextActiveId);
-      setSelectedId(nextActiveId || "root");
-      setImportancePreview({});
-      setProgressPreview({});
-      setColorPreview({});
-      setMapPositionPreview({});
+    const previousActiveGoalMapId = activeGoalMapId;
+    const previousSelectedId = selectedId;
+    const currentGoals = goalsRef.current;
+    const nextActiveMap =
+      currentGoals.goalMaps.find((item) => item.id === activeGoalMapId && item.id !== goalMap.id) ??
+      currentGoals.goalMaps.find((item) => item.id !== goalMap.id);
+    const nextActiveId = nextActiveMap?.id ?? "";
+    setActiveGoalMapId(nextActiveId);
+    setSelectedId(nextActiveId || "root");
+    setImportancePreview({});
+    setProgressPreview({});
+    setColorPreview({});
+    setMapPositionPreview({});
+    if (typeof window !== "undefined") {
+      if (nextActiveId) window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, nextActiveId);
+      else window.localStorage.removeItem(ACTIVE_GOAL_MAP_STORAGE_KEY);
+    }
+
+    const deleted = await runOptimisticWrite(
+      (current) => deleteGoalMapLocally(current, goalMap.id),
+      async () => {
+        pendingEditRef.current = null;
+        await api(`/api/goal-maps/${encodeURIComponent(goalMap.id)}`, {
+          method: "DELETE"
+        });
+      },
+      "目标地图已删除"
+    );
+    if (!deleted) {
+      setActiveGoalMapId(previousActiveGoalMapId);
+      setSelectedId(previousSelectedId);
       if (typeof window !== "undefined") {
-        if (nextActiveId) window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, nextActiveId);
+        if (previousActiveGoalMapId) window.localStorage.setItem(ACTIVE_GOAL_MAP_STORAGE_KEY, previousActiveGoalMapId);
         else window.localStorage.removeItem(ACTIVE_GOAL_MAP_STORAGE_KEY);
       }
-      return next;
-    }, "目标地图已删除");
-  }, [activeGoalMapId, loadGoals, runWrite]);
+    }
+    return deleted;
+  }, [activeGoalMapId, runOptimisticWrite, selectedId]);
 
   const patchGoalFromAi = useCallback(async (goalId: string, patch: GoalPatchInput): Promise<boolean> => {
-    return runWrite(async () => {
-      await api(`/api/goals/${encodeURIComponent(goalId)}`, {
-        method: "PATCH",
-        body: JSON.stringify(patch)
-      });
-      await loadGoals();
-    }, "AI 建议已应用");
-  }, [loadGoals, runWrite]);
+    return runOptimisticWrite(
+      (current) => applyGoalPatchLocally(current, goalId, patch),
+      async () => {
+        await api(`/api/goals/${encodeURIComponent(goalId)}`, {
+          method: "PATCH",
+          body: JSON.stringify(patch)
+        });
+      },
+      "AI 建议已应用"
+    );
+  }, [runOptimisticWrite]);
 
   const createWeeklyActionFromAi = useCallback(async (input: ActionCreateInput): Promise<boolean> => {
     return runWrite(async () => {
@@ -1113,9 +1410,8 @@ export function GoalApp() {
         method: "POST",
         body: JSON.stringify(input)
       });
-      await loadGoals();
     }, "本周行动已创建");
-  }, [loadGoals, runWrite]);
+  }, [runWrite]);
 
   const openAiAssistant = useCallback((goal: GoalNode) => {
     setAiGoal(goal);
@@ -1123,15 +1419,20 @@ export function GoalApp() {
   }, []);
 
   const deleteGoal = async (goal: GoalNode) => {
-    const deleted = await runWrite(async () => {
-      pendingEditRef.current = null;
-      await api(`/api/goals/${encodeURIComponent(goal.id)}`, {
-        method: "DELETE"
-      });
-      await loadGoals();
-      setSelectedId(activeGoalMap?.id || "root");
-    }, "目标已删除");
-    if (deleted) setDeleteCandidate(null);
+    const previousSelectedId = selectedId;
+    setDeleteCandidate(null);
+    setSelectedId(activeGoalMap?.id || "root");
+    const deleted = await runOptimisticWrite(
+      (current) => deleteGoalLocally(current, goal.id),
+      async () => {
+        pendingEditRef.current = null;
+        await api(`/api/goals/${encodeURIComponent(goal.id)}`, {
+          method: "DELETE"
+        });
+      },
+      "目标已删除"
+    );
+    if (!deleted) setSelectedId(previousSelectedId);
   };
 
   const previewImportance = useCallback((goalId: string, value: number) => {
@@ -1167,43 +1468,56 @@ export function GoalApp() {
     if (!positionPatches.some((patch) => patch.id === goalId)) {
       positionPatches.push({ id: goalId, position: nextPosition });
     }
-    void runWrite(async () => {
-      await api("/api/goals/map-positions", {
-        method: "PATCH",
-        body: JSON.stringify({ positions: positionPatches, mapContextId })
-      });
-      await loadGoals();
-      setMapPositionPreview((current) => {
-        let next = current;
-        for (const patch of positionPatches) next = withoutMapPositionPreview(next, mapContextId, patch.id);
-        return next;
-      });
-    }, "目标位置已保存");
+    const positionGoalPatches: LocalGoalPatch[] = positionPatches.map((patch) => ({
+      id: patch.id,
+      patch: { map_positions: { [mapContextId]: patch.position } }
+    }));
+    setMapPositionPreview((current) => {
+      let next = current;
+      for (const patch of positionPatches) next = withoutMapPositionPreview(next, mapContextId, patch.id);
+      return next;
+    });
+    void runOptimisticWrite(
+      (current) => applyGoalPatchesLocally(current, positionGoalPatches),
+      async () => {
+        await api("/api/goals/map-positions", {
+          method: "PATCH",
+          body: JSON.stringify({ positions: positionPatches, mapContextId })
+        });
+      },
+      "目标位置已保存"
+    );
   }, [
     activeMapPositionPreview,
-    loadGoals,
     mapContextId,
     mapGoals,
-    runWrite
+    runOptimisticWrite
   ]);
 
   const resetSelectedMapPosition = useCallback(() => {
     if (!selectedGoalFull) return;
     const goalId = selectedGoalFull.id;
     const resetIds = [goalId, ...Array.from(collectDescendants(selectedGoalFull))];
-    void runWrite(async () => {
-      await api("/api/goals/map-positions", {
-        method: "PATCH",
-        body: JSON.stringify({ ids: resetIds, mapContextId })
-      });
-      await loadGoals();
-      setMapPositionPreview((current) => {
-        let next = current;
-        for (const id of resetIds) next = withoutMapPositionPreview(next, mapContextId, id);
-        return next;
-      });
-    }, "目标位置已重置");
-  }, [loadGoals, mapContextId, runWrite, selectedGoalFull]);
+    const resetGoalPatches: LocalGoalPatch[] = resetIds.map((id) => ({
+      id,
+      patch: { map_positions: { [mapContextId]: null } }
+    }));
+    setMapPositionPreview((current) => {
+      let next = current;
+      for (const id of resetIds) next = withoutMapPositionPreview(next, mapContextId, id);
+      return next;
+    });
+    void runOptimisticWrite(
+      (current) => applyGoalPatchesLocally(current, resetGoalPatches),
+      async () => {
+        await api("/api/goals/map-positions", {
+          method: "PATCH",
+          body: JSON.stringify({ ids: resetIds, mapContextId })
+        });
+      },
+      "目标位置已重置"
+    );
+  }, [mapContextId, runOptimisticWrite, selectedGoalFull]);
 
   const openCreateQuickGoalDialog = useCallback((mode: "subgoal" | "sibling") => {
     if (!activeGoalMap || !selectedGoalFull) return;
@@ -1247,20 +1561,20 @@ export function GoalApp() {
       setRenameOpen(false);
       return;
     }
-    await runWrite(async () => {
-      await api(`/api/goals/${encodeURIComponent(selectedGoalFull.id)}`, {
-        method: "PATCH",
-        body: JSON.stringify({ title: trimmed })
-      });
-      const next = await loadGoals();
-      // Renaming never changes the goal id, so keep the current selection by id.
-      // (A title lookup could resolve to a different goal that shares the new title.)
-      const nextId = next.flatGoals.some((item) => item.id === selectedGoalFull.id)
-        ? selectedGoalFull.id
-        : activeGoalMap?.id || "root";
-      setSelectedId(nextId);
-    }, "目标已重命名");
     setRenameOpen(false);
+    const previousSelectedId = selectedId;
+    const renamed = await runOptimisticWrite(
+      (current) => applyGoalPatchLocally(current, selectedGoalFull.id, { title: trimmed }),
+      async () => {
+        await api(`/api/goals/${encodeURIComponent(selectedGoalFull.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ title: trimmed })
+        });
+      },
+      "目标已重命名"
+    );
+    if (renamed) setSelectedId(selectedGoalFull.id);
+    else setSelectedId(previousSelectedId);
   };
 
   const activeCount = useMemo(() => visibleFlatGoals.filter((goal) => goal.status === "active").length, [visibleFlatGoals]);
@@ -1644,6 +1958,7 @@ export function GoalApp() {
             onBeforeGenerate={queuePendingEditSave}
             onPatchGoal={patchGoalFromAi}
             onCreateGoal={createGoal}
+            onCreateGoals={createGoals}
             onCreateWeeklyAction={createWeeklyActionFromAi}
           />
         )}
@@ -1701,9 +2016,9 @@ export function GoalApp() {
             submitLabel="重命名"
             onCancel={() => setRenameGoalMapCandidate(null)}
             onConfirm={(name) => {
-              void patchGoalMap(renameGoalMapCandidate, name).then((renamed) => {
-                if (renamed) setRenameGoalMapCandidate(null);
-              });
+              const goalMap = renameGoalMapCandidate;
+              setRenameGoalMapCandidate(null);
+              void patchGoalMap(goalMap, name);
             }}
           />
         )}
@@ -1717,9 +2032,9 @@ export function GoalApp() {
             saving={saving}
             onCancel={() => setDeleteGoalMapCandidate(null)}
             onConfirm={() => {
-              void deleteGoalMap(deleteGoalMapCandidate).then((deleted) => {
-                if (deleted) setDeleteGoalMapCandidate(null);
-              });
+              const goalMap = deleteGoalMapCandidate;
+              setDeleteGoalMapCandidate(null);
+              void deleteGoalMap(goalMap);
             }}
           />
         )}

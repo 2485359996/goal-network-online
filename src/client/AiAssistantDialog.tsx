@@ -244,6 +244,7 @@ export function AiAssistantDialog({
   onBeforeGenerate,
   onPatchGoal,
   onCreateGoal,
+  onCreateGoals,
   onCreateWeeklyAction
 }: {
   goal: GoalNode;
@@ -253,6 +254,7 @@ export function AiAssistantDialog({
   onBeforeGenerate?: () => Promise<void>;
   onPatchGoal: (goalId: string, patch: GoalPatchInput) => Promise<boolean>;
   onCreateGoal: (input: GoalCreateInput) => Promise<boolean>;
+  onCreateGoals?: (inputs: GoalCreateInput[]) => Promise<boolean>;
   onCreateWeeklyAction: (input: ActionCreateInput) => Promise<boolean>;
 }) {
   const [lastTarget, setLastTarget] = useState<AiTab | null>(null);
@@ -451,9 +453,15 @@ export function AiAssistantDialog({
       if (responseTarget === "subgoals") {
         const subgoals = selectedSubgoalSuggestionsForCreate(response as AiSuggestSubgoalsResponse, selected, subgoalDrafts);
         if (subgoals.length === 0) throw new Error("请先勾选要创建的子目标");
-        for (const subgoal of subgoals) {
-          const ok = await onCreateGoal(createSubgoalInput(goal, subgoal));
-          if (!ok) throw new Error(`子目标创建失败：${subgoal.title}`);
+        const inputs = subgoals.map((subgoal) => createSubgoalInput(goal, subgoal));
+        if (onCreateGoals) {
+          const ok = await onCreateGoals(inputs);
+          if (!ok) throw new Error("子目标创建失败");
+        } else {
+          for (const input of inputs) {
+            const ok = await onCreateGoal(input);
+            if (!ok) throw new Error(`子目标创建失败：${input.title}`);
+          }
         }
       }
 
@@ -1014,13 +1022,6 @@ export function buildAiRequest(tab: AiTab, goal: GoalNode, flatGoals: GoalNode[]
     ...(turn ? { turn } : {})
   };
 
-  if (tab === "diagnose" || tab === "weekly") {
-    return {
-      ...base,
-      branchGoals: flattenBranch(goal).map(goalContextFromNode)
-    };
-  }
-
   return base;
 }
 
@@ -1041,7 +1042,6 @@ export function buildAgentRequest(
     parentChain: parentChain(goal, flatGoals).map(goalContextFromNode),
     children: goal.children.map(goalContextFromNode),
     siblings: siblingGoals(goal, flatGoals).map(goalContextFromNode),
-    branchGoals: flattenBranch(goal).map(goalContextFromNode),
     message,
     conversation: options.conversation,
     lastTarget: options.lastTarget ?? null,
@@ -1163,16 +1163,6 @@ function siblingGoals(goal: GoalNode, flatGoals: GoalNode[]) {
     if (candidate.id === goal.id) return false;
     return titleFromWikilink(candidate.parent) === parentTitle && titleFromWikilink(candidate.domain) === domainTitle;
   });
-}
-
-function flattenBranch(goal: GoalNode) {
-  const result: GoalNode[] = [];
-  const visit = (node: GoalNode) => {
-    result.push(node);
-    node.children.forEach(visit);
-  };
-  visit(goal);
-  return result;
 }
 
 function titleFromWikilink(value: string | undefined) {

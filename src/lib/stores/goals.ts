@@ -3,6 +3,7 @@ import type {
   GoalCreateInput,
   GoalGraphEdge,
   GoalMap,
+  GoalsBatchCreateInput,
   GoalMapCreateInput,
   GoalMapPatchInput,
   GoalNode,
@@ -250,15 +251,20 @@ function slugPart(value: string) {
   return value.trim().replace(/\s+/g, "-");
 }
 
-async function uniqueLegacyId(client: SupabaseAdminClient, workspaceId: string, parentTitle: string, title: string, exceptId?: string) {
+function uniqueLegacyIdFromSet(existing: Set<string>, parentTitle: string, title: string, exceptId?: string) {
   const base = `goal-${parentTitle ? `${slugPart(parentTitle)}-` : ""}${slugPart(title)}`;
+  const taken = new Set(Array.from(existing).filter((id) => id !== exceptId));
+  if (!taken.has(base)) return base;
+  let index = 2;
+  while (taken.has(`${base}-${index}`)) index += 1;
+  return `${base}-${index}`;
+}
+
+async function uniqueLegacyId(client: SupabaseAdminClient, workspaceId: string, parentTitle: string, title: string, exceptId?: string) {
   const { data, error } = await client.from("goals").select("legacy_id").eq("workspace_id", workspaceId);
   if (error) throw error;
-  const existing = new Set((data ?? []).map((row: { legacy_id: string }) => row.legacy_id).filter((id) => id !== exceptId));
-  if (!existing.has(base)) return base;
-  let index = 2;
-  while (existing.has(`${base}-${index}`)) index += 1;
-  return `${base}-${index}`;
+  const existing = new Set((data ?? []).map((row: { legacy_id: string }) => row.legacy_id));
+  return uniqueLegacyIdFromSet(existing, parentTitle, title, exceptId);
 }
 
 async function goalByLegacyId(client: SupabaseAdminClient, workspaceId: string, legacyId: string) {
@@ -488,6 +494,108 @@ export class SupabaseGoalStore {
     }
     await enqueueAuditAndSync(this.client, this.workspaceId, this.actorUserId, "goal.create", data.id, { title });
     return { ok: true, filePath: row.file_path, message: "Goal created" };
+  }
+
+  async createGoals(input: GoalsBatchCreateInput): Promise<GoalsResponse> {
+    const inputs = input.goals;
+    if (!inputs.length) throw new Error("Goals are required");
+
+    const [goalMapsResult, goalsResult] = await Promise.all([
+      this.client.from("goal_maps").select("*").eq("workspace_id", this.workspaceId),
+      this.client.from("goals").select("*").eq("workspace_id", this.workspaceId)
+    ]);
+    if (goalMapsResult.error) throw goalMapsResult.error;
+    if (goalsResult.error) throw goalsResult.error;
+
+    const goalMapsById = new Map(((goalMapsResult.data ?? []) as GoalMapDbRow[]).map((goalMap) => [goalMap.id, goalMap]));
+    const existingGoals = (goalsResult.data ?? []) as GoalDbRow[];
+    const existingTitleKeys = new Set(existingGoals.map((row) => referenceKey(row.title)));
+    const existingLegacyIds = new Set(existingGoals.map((row) => row.legacy_id));
+    const batchTitleKeys = new Set<string>();
+    const existingGoalByMapAndTitle = (goalMapId: string, title: string) => {
+      const key = referenceKey(title);
+      return existingGoals.find((row) => row.goal_map_id === goalMapId && referenceKey(row.title) === key) ?? null;
+    };
+
+    const prepared = inputs.map((item) => {
+      const title = item.title.trim();
+      if (!title) throw new Error("Goal title cannot be empty");
+      const titleKey = referenceKey(title);
+      if (existingTitleKeys.has(titleKey) || batchTitleKeys.has(titleKey)) throw new Error(`Goal already exists: ${title}`);
+      batchTitleKeys.add(titleKey);
+
+      const goalMapId = item.goalMapId.trim();
+      if (!goalMapId) throw new Error("Goal map is required");
+      const goalMap = goalMapsById.get(goalMapId);
+      if (!goalMap) throw new Error(`Goal map not found: ${goalMapId}`);
+
+      const parentTitle = titleFromWikilink(item.parent);
+      const parent = parentTitle ? existingGoalByMapAndTitle(goalMapId, parentTitle) : null;
+      if (parentTitle && !parent) throw new Error(`Parent goal not found in current goal map: ${parentTitle}`);
+
+      const domainTitle = titleFromWikilink(item.domain || parent?.domain_title || title);
+      const primaryRoot = isPrimaryGoalTitle(title) && !parentTitle;
+      const legacyId = uniqueLegacyIdFromSet(existingLegacyIds, parentTitle, title);
+      existingLegacyIds.add(legacyId);
+      return {
+        parent,
+        legacyId,
+        row: {
+          workspace_id: this.workspaceId,
+          goal_map_id: goalMapId,
+          legacy_id: legacyId,
+          title,
+          file_path: markdownPath(title, domainTitle, parentTitle),
+          status: "active",
+          horizon: item.horizon || "medium",
+          domain_title: domainTitle,
+          priority: item.priority ?? 50,
+          clarity: item.clarity ?? 1,
+          progress: primaryRoot ? null : item.progress ?? 0,
+          color: item.color ?? "",
+          sections: {
+            summary: item.summary?.trim() ?? "",
+            directions: cleanLines(item.directions),
+            directionHeading: primaryRoot ? "中期目标" : "子方向",
+            successSignals: cleanLines(item.successSignals),
+            actionCandidates: primaryRoot ? [] : actionCandidates(item.actionCandidates),
+            reviewQuestions: cleanLines(item.reviewQuestions)
+          },
+          tags: primaryRoot ? ["goal-network", "goal-domain"] : ["goal-network"],
+          last_reviewed: "",
+          last_progress: ""
+        }
+      };
+    });
+
+    const insertGoals = await this.client.from("goals").insert(prepared.map((item) => item.row)).select("*");
+    if (insertGoals.error) throw insertGoals.error;
+    const insertedRows = (insertGoals.data ?? []) as GoalDbRow[];
+    const insertedByLegacyId = new Map(insertedRows.map((row) => [row.legacy_id, row]));
+    const parentRelations = prepared.flatMap((item) => {
+      const inserted = insertedByLegacyId.get(item.legacyId);
+      if (!inserted || !item.parent) return [];
+      return [{
+        workspace_id: this.workspaceId,
+        source_goal_id: inserted.id,
+        target_goal_id: item.parent.id,
+        relation_type: "parent" as const
+      }];
+    });
+    if (parentRelations.length) {
+      const insertRelations = await this.client.from("goal_relations").insert(parentRelations);
+      if (insertRelations.error) throw insertRelations.error;
+    }
+
+    const firstInserted = insertedRows[0];
+    if (firstInserted) {
+      await enqueueAuditAndSync(this.client, this.workspaceId, this.actorUserId, "goal.batch_create", firstInserted.id, {
+        count: insertedRows.length,
+        ids: insertedRows.map((row) => row.legacy_id),
+        titles: insertedRows.map((row) => row.title)
+      });
+    }
+    return this.readGoals();
   }
 
   async patchGoal(id: string, input: GoalPatchInput): Promise<MarkdownWriteResult> {

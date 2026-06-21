@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { GoalNode, GoalStatus } from "../shared/types";
-import { buildGoalMapOverview, deleteGoalWarningText } from "./main";
+import type { GoalNode, GoalStatus, GoalsResponse } from "../shared/types";
+import { applyGoalPatchLocally, buildGoalMapOverview, deleteGoalLocally, deleteGoalWarningText } from "./main";
 
 function clientMainSource() {
   return readFileSync(new URL("./main.tsx", import.meta.url), "utf8");
@@ -116,6 +116,59 @@ describe("buildGoalMapOverview", () => {
     expect(alpha?.importance).toBe(75);
     expect(beta?.importance).toBe(25);
     expect(alpha?.progress).toBe(90);
+  });
+});
+
+describe("optimistic goal updates", () => {
+  function goalsResponse(goals: GoalNode[]): GoalsResponse {
+    const flatGoals = goals.flatMap((topGoal) => [topGoal, ...topGoal.children]);
+    return {
+      workspaceId: "workspace-1",
+      goalMaps: [{ id: "map-1", name: "目标网络", sortOrder: 0 }],
+      goals,
+      flatGoals,
+      graph: {
+        nodes: flatGoals.map((item) => ({
+          id: item.id,
+          title: item.title,
+          domain: item.domain,
+          status: item.status,
+          priority: item.priority,
+          clarity: item.clarity
+        })),
+        edges: [{ id: "child->parent:parent", source: "child", target: "parent", type: "parent" }]
+      }
+    };
+  }
+
+  it("renames a goal locally and updates references that point to it", () => {
+    const parent = goal({
+      id: "parent",
+      title: "旧目标",
+      children: [goal({ id: "child", title: "子目标" })]
+    });
+    parent.children[0].parent = "[[旧目标]]";
+    const sibling = goal({ id: "sibling", title: "旁支" });
+    sibling.supports = ["[[旧目标]]"];
+
+    const next = applyGoalPatchLocally(goalsResponse([parent, sibling]), "parent", { title: "新目标" });
+
+    expect(next.flatGoals.find((item) => item.id === "parent")?.title).toBe("新目标");
+    expect(next.flatGoals.find((item) => item.id === "child")?.parent).toBe("[[新目标]]");
+    expect(next.flatGoals.find((item) => item.id === "sibling")?.supports).toEqual(["[[新目标]]"]);
+    expect(next.graph.nodes.find((item) => item.id === "parent")?.title).toBe("新目标");
+  });
+
+  it("deletes a goal subtree locally and prunes graph edges", () => {
+    const parent = goal({
+      id: "parent",
+      children: [goal({ id: "child" })]
+    });
+    const next = deleteGoalLocally(goalsResponse([parent]), "parent");
+
+    expect(next.goals).toEqual([]);
+    expect(next.flatGoals).toEqual([]);
+    expect(next.graph.edges).toEqual([]);
   });
 });
 

@@ -436,7 +436,9 @@ describe("goalscape layout", () => {
 
     expect(source).toContain("collectDescendants(goal)");
     expect(source).toContain("themeColorChanged");
-    expect(source).toContain("body: JSON.stringify({ color: nextThemeColor })");
+    expect(source).toContain("colorPatches");
+    expect(source).toContain("patch: { color: nextThemeColor }");
+    expect(source).toContain("body: JSON.stringify(colorPatch)");
   });
 
   it("uses the real root theme color for a focused sphere branch", () => {

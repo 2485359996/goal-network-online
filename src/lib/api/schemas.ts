@@ -65,6 +65,10 @@ export const goalCreateSchema = z.object({
   reviewQuestions: z.array(z.string()).optional()
 });
 
+export const goalsBatchCreateSchema = z.object({
+  goals: z.array(goalCreateSchema).min(1).max(25)
+});
+
 export const goalMapCreateSchema = z.object({
   name: z.string().min(1)
 });

@@ -73,6 +73,45 @@ export const aiGoalContextSchema = z.object({
   reviewQuestions: z.array(z.string())
 }).strict();
 
+export const aiBranchContextSummarySchema = z.object({
+  summaryVersion: z.number().int().positive(),
+  sourceHash: z.string().min(1),
+  scope: z.literal("branch"),
+  rootGoalId: z.string().min(1),
+  rootGoalTitle: z.string().min(1),
+  goalCount: z.number().int().nonnegative(),
+  omittedGoalCount: z.number().int().nonnegative(),
+  statusCounts: z.record(goalStatusSchema, z.number().int().nonnegative()),
+  horizonCounts: z.record(z.string(), z.number().int().nonnegative()),
+  averageClarity: z.number().nullable(),
+  averageProgress: z.number().nullable(),
+  openActionCount: z.number().int().nonnegative(),
+  completedActionCount: z.number().int().nonnegative(),
+  relationCounts: z.object({
+    supports: z.number().int().nonnegative(),
+    depends_on: z.number().int().nonnegative(),
+    conflicts_with: z.number().int().nonnegative()
+  }).strict(),
+  riskSignals: z.array(z.string()),
+  recentSignals: z.array(z.string()),
+  goals: z.array(z.object({
+    id: z.string().min(1),
+    title: z.string().min(1),
+    status: goalStatusSchema,
+    horizon: z.string(),
+    priority: z.number().min(0).max(100),
+    clarity: z.number().min(1).max(5),
+    progress: z.number().min(0).max(100).optional(),
+    summary: z.string(),
+    successSignals: z.array(z.string()),
+    openActionCount: z.number().int().nonnegative(),
+    completedActionCount: z.number().int().nonnegative(),
+    childrenCount: z.number().int().nonnegative(),
+    lastReviewed: z.string(),
+    lastProgress: z.string()
+  }).strict())
+}).strict();
+
 const baseGoalRequestSchema = z.object({
   goalId: z.string().min(1),
   goal: aiGoalContextSchema,
@@ -102,10 +141,12 @@ const aiGoalDraftSchema = z.object({
 export const improveGoalRequestSchema = baseGoalRequestSchema;
 export const suggestSubgoalsRequestSchema = baseGoalRequestSchema;
 export const diagnoseBranchRequestSchema = baseGoalRequestSchema.extend({
-  branchGoals: z.array(aiGoalContextSchema)
+  branchGoals: z.array(aiGoalContextSchema).optional(),
+  branchSummary: aiBranchContextSummarySchema.optional()
 }).strict();
 export const suggestWeeklyActionsRequestSchema = baseGoalRequestSchema.extend({
-  branchGoals: z.array(aiGoalContextSchema)
+  branchGoals: z.array(aiGoalContextSchema).optional(),
+  branchSummary: aiBranchContextSummarySchema.optional()
 }).strict();
 export const draftGoalRequestSchema = z.object({
   mode: z.enum(["top", "subgoal", "sibling"]),
@@ -121,6 +162,7 @@ export const draftGoalRequestSchema = z.object({
 
 export const aiAgentRequestSchema = baseGoalRequestSchema.extend({
   branchGoals: z.array(aiGoalContextSchema).optional(),
+  branchSummary: aiBranchContextSummarySchema.optional(),
   message: z.string().trim().min(1),
   conversation: z.array(aiConversationMessageSchema).optional(),
   lastTarget: aiAssistantTargetSchema.nullable().optional(),
@@ -139,12 +181,68 @@ export const aiSubgoalSuggestionSchema = z.object({
   reviewQuestions: z.array(z.string()).optional()
 }).strip();
 
-export const aiFindingSchema = z.object({
-  severity: z.enum(["info", "warning", "critical"]).default("info"),
+const aiFindingSeveritySchema = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const normalized = value.trim().toLowerCase();
+  if (["critical", "severe", "high", "blocker", "error", "danger"].includes(normalized) || /严重|高|关键/.test(normalized)) {
+    return "critical";
+  }
+  if (["warning", "warn", "medium", "moderate", "risk"].includes(normalized) || /警告|中|风险/.test(normalized)) {
+    return "warning";
+  }
+  if (["info", "low", "note", "observation"].includes(normalized) || /信息|低|提示/.test(normalized)) {
+    return "info";
+  }
+  return value;
+}, z.enum(["info", "warning", "critical"]).default("info"));
+
+function textFromUnknown(value: unknown): string {
+  if (Array.isArray(value)) return value.map(textFromUnknown).filter(Boolean).join("\n");
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+export const aiFindingSchema = z.preprocess((value) => {
+  if (typeof value === "string") {
+    return { title: "分支体检发现", detail: value };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+
+  const record = value as Record<string, unknown>;
+  const title =
+    textFromUnknown(record.title) ||
+    textFromUnknown(record.issue) ||
+    textFromUnknown(record.risk) ||
+    textFromUnknown(record.summary) ||
+    "分支体检发现";
+  const detail =
+    textFromUnknown(record.detail) ||
+    textFromUnknown(record.description) ||
+    textFromUnknown(record.reason) ||
+    textFromUnknown(record.analysis) ||
+    textFromUnknown(record.issue) ||
+    title;
+  const recommendation =
+    textFromUnknown(record.recommendation) ||
+    textFromUnknown(record.recommendations) ||
+    textFromUnknown(record.suggestion) ||
+    textFromUnknown(record.suggestions) ||
+    textFromUnknown(record.action) ||
+    textFromUnknown(record.nextStep);
+
+  return {
+    severity: record.severity ?? record.level ?? record.riskLevel ?? record.priority,
+    title,
+    detail,
+    ...(recommendation ? { recommendation } : {})
+  };
+}, z.object({
+  severity: aiFindingSeveritySchema,
   title: z.string().min(1),
   detail: z.string().min(1),
   recommendation: z.string().optional()
-}).strict();
+}).strip());
 
 export const aiWeeklyActionSchema = z.preprocess((value) => {
   if (typeof value === "string") return { description: value.trim() };
@@ -208,9 +306,19 @@ export const suggestSubgoalsResponseSchema = withClarification({
   subgoals: z.array(aiSubgoalSuggestionSchema).optional()
 }, ["subgoals"]);
 
-export const diagnoseBranchResponseSchema = withClarification({
+export const diagnoseBranchResponseSchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  const findings = record.findings ?? record.issues ?? record.risks ?? record.diagnosis ?? record.finding;
+  if (findings === undefined) return value;
+  return {
+    findings: Array.isArray(findings) ? findings : [findings],
+    ...(record.clarifyingQuestion !== undefined ? { clarifyingQuestion: record.clarifyingQuestion } : {}),
+    ...(record.warnings !== undefined ? { warnings: record.warnings } : {})
+  };
+}, withClarification({
   findings: z.array(aiFindingSchema).optional()
-}, ["findings"]);
+}, ["findings"]));
 
 export const suggestWeeklyActionsResponseSchema = withClarification({
   weeklyActions: z.array(aiWeeklyActionSchema).optional()
@@ -270,6 +378,7 @@ export type AiConversationMessage = z.infer<typeof aiConversationMessageSchema>;
 export type AiClarifyingQuestion = z.infer<typeof aiClarifyingQuestionSchema>;
 export type AiClarificationAnswer = z.infer<typeof aiClarificationAnswerSchema>;
 export type AiGoalContext = z.infer<typeof aiGoalContextSchema>;
+export type AiBranchContextSummary = z.infer<typeof aiBranchContextSummarySchema>;
 export type AiActionCandidateInput = z.infer<typeof aiActionCandidateInputSchema>;
 export type AiActionCandidate = z.infer<typeof aiActionCandidateSchema>;
 export type AiImproveGoalRequest = z.infer<typeof improveGoalRequestSchema>;
