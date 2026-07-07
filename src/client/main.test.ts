@@ -29,9 +29,6 @@ function goal(input: {
     clarity: 0,
     progress: input.progress ?? 0,
     color: "",
-    supports: [],
-    depends_on: [],
-    conflicts_with: [],
     last_reviewed: "",
     last_progress: "",
     tags: [],
@@ -141,21 +138,18 @@ describe("optimistic goal updates", () => {
     };
   }
 
-  it("renames a goal locally and updates references that point to it", () => {
+  it("renames a goal locally and updates child parent references", () => {
     const parent = goal({
       id: "parent",
       title: "旧目标",
       children: [goal({ id: "child", title: "子目标" })]
     });
     parent.children[0].parent = "[[旧目标]]";
-    const sibling = goal({ id: "sibling", title: "旁支" });
-    sibling.supports = ["[[旧目标]]"];
 
-    const next = applyGoalPatchLocally(goalsResponse([parent, sibling]), "parent", { title: "新目标" });
+    const next = applyGoalPatchLocally(goalsResponse([parent]), "parent", { title: "新目标" });
 
     expect(next.flatGoals.find((item) => item.id === "parent")?.title).toBe("新目标");
     expect(next.flatGoals.find((item) => item.id === "child")?.parent).toBe("[[新目标]]");
-    expect(next.flatGoals.find((item) => item.id === "sibling")?.supports).toEqual(["[[新目标]]"]);
     expect(next.graph.nodes.find((item) => item.id === "parent")?.title).toBe("新目标");
   });
 
@@ -182,7 +176,12 @@ describe("root detail panel overview", () => {
     expect(goalDetailPanelSource).toContain("层级刻度");
     expect(goalDetailPanelSource).toContain("星系总览");
     expect(goalDetailPanelSource).toContain("层级总览");
+    expect(goalDetailPanelSource).toContain("层级网图");
+    expect(goalDetailPanelSource).toContain("连接态势");
+    expect(goalDetailPanelSource).toContain("网络节点");
+    expect(goalDetailPanelSource).toContain("把目标连成 3D 网");
     expect(goalDetailPanelSource).not.toContain("<GoalMap");
     expect(goalDetailPanelSource).not.toContain("<SunburstGoalMap");
+    expect(goalDetailPanelSource).not.toContain("<GoalMeshMap");
   });
 });

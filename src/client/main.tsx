@@ -56,6 +56,7 @@ import { createBrowserSupabaseClient } from "../lib/supabase/client";
 import { isPrimaryGoalNode, isPrimaryGoalTitle, normalizedGoalTitle } from "../shared/goalRules";
 import { AiAssistantDialog } from "./AiAssistantDialog";
 import { CreateGoalDialog, type CreateGoalDialogContext } from "./CreateGoalDialog";
+import { GoalMeshMap } from "./GoalMeshMap";
 import { listItemTransition, tween, useBannerMotion, useDialogMotion, useListItemMotion } from "./motion";
 import { useModalDialog } from "./useModalDialog";
 import {
@@ -229,7 +230,7 @@ const DETAIL_PANEL_MAX_WIDTH = 560;
 const MAP_PANE_MIN_HEIGHT = 320;
 const MAP_PANE_MAX_HEIGHT = 720;
 
-export type GoalPresentationMode = "sphere" | "sunburst";
+export type GoalPresentationMode = "sphere" | "sunburst" | "mesh";
 
 function parseGoalPresentationMap(value: string | null): Record<string, GoalPresentationMode> {
   if (!value) return {};
@@ -239,7 +240,7 @@ function parseGoalPresentationMap(value: string | null): Record<string, GoalPres
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const result: Record<string, GoalPresentationMode> = {};
     for (const [goalMapId, mode] of Object.entries(parsed)) {
-      if (mode === "sphere" || mode === "sunburst") result[goalMapId] = mode;
+      if (mode === "sphere" || mode === "sunburst" || mode === "mesh") result[goalMapId] = mode;
     }
     return result;
   } catch {
@@ -481,24 +482,11 @@ function applyGoalRenameReferences(goal: GoalNode, oldTitle: string, nextTitle: 
   if (!oldTitle || oldTitle === nextTitle) return goal;
 
   const parent = replaceGoalReference(goal.parent, oldTitle, nextTitle);
-  const supports = goal.supports.map((item) => replaceGoalReference(item, oldTitle, nextTitle));
-  const depends_on = goal.depends_on.map((item) => replaceGoalReference(item, oldTitle, nextTitle));
-  const conflicts_with = goal.conflicts_with.map((item) => replaceGoalReference(item, oldTitle, nextTitle));
-  if (
-    parent === goal.parent &&
-    supports.every((item, index) => item === goal.supports[index]) &&
-    depends_on.every((item, index) => item === goal.depends_on[index]) &&
-    conflicts_with.every((item, index) => item === goal.conflicts_with[index])
-  ) {
-    return goal;
-  }
+  if (parent === goal.parent) return goal;
 
   return {
     ...goal,
-    parent,
-    supports,
-    depends_on,
-    conflicts_with
+    parent
   };
 }
 
@@ -1236,8 +1224,14 @@ export function GoalApp() {
     queuePendingEditSave();
     setPresentationMode(mode);
     if (activeGoalMapId) writeGoalPresentationMode(activeGoalMapId, mode);
-    if (mode === "sunburst") {
+    if (mode !== "sphere") {
       setMapPositionPreview({});
+    }
+    if (mode === "mesh") {
+      setFocusRootId(null);
+    }
+    if (mode === "sunburst") {
+      setSunburstVisibleDepth(DEFAULT_SUNBURST_VISIBLE_DEPTH);
     }
   }, [activeGoalMapId, presentationMode, queuePendingEditSave]);
 
@@ -1744,7 +1738,7 @@ export function GoalApp() {
       >
         <section
           ref={mapPaneRef}
-          className={`map-pane ${scopeListCollapsed ? "scope-collapsed" : "scope-open"}${presentationMode === "sunburst" ? " sunburst-active" : ""}`}
+          className={`map-pane ${scopeListCollapsed ? "scope-collapsed" : "scope-open"}${presentationMode === "sunburst" ? " sunburst-active" : ""}${presentationMode === "mesh" ? " mesh-active" : ""}`}
           aria-label="Goalscape 风格目标地图"
         >
           {!shouldShowFirstGoalMapCta(goals.goalMaps, loading) && activeGoalMap && (
@@ -1875,6 +1869,17 @@ export function GoalApp() {
                 onDrill={drillGoal}
                 onAscend={ascendGoal}
                 onVisibleDepthChange={setSunburstVisibleDepth}
+              />
+            ) : activeGoalMap && presentationMode === "mesh" ? (
+              <GoalMeshMap
+                goals={visibleTree}
+                selectedId={selectedId}
+                centerId={activeGoalMap.id}
+                centerTitle={goalMapCenterTitle(activeGoalMap)}
+                importanceOverrides={importancePreview}
+                progressOverrides={progressPreview}
+                colorOverrides={colorPreview}
+                onSelect={selectGoal}
               />
             ) : null}
             {!authRequired && !loading && activeGoalMap && visibleTree.length === 0 && (
@@ -2357,6 +2362,15 @@ function PresentationModeToggle({
       >
         <ChartPie aria-hidden="true" />
         <span>目标日晷</span>
+      </button>
+      <button
+        type="button"
+        className={mode === "mesh" ? "presentation-option active" : "presentation-option"}
+        aria-pressed={mode === "mesh"}
+        onClick={() => onChange("mesh")}
+      >
+        <GitBranch aria-hidden="true" />
+        <span>目标网图</span>
       </button>
     </div>
   );
@@ -4323,13 +4337,21 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
     [importanceOverrides, progressOverrides, topGoals]
   );
   const isSunburstMode = presentationMode === "sunburst";
-  const RootModeIcon = isSunburstMode ? ChartPie : Star;
-  const quickSectionTitle = isSunburstMode ? "中心分区" : "顶层轨道";
-  const rootHeadingLabel = isSunburstMode ? "层级总览" : "星系总览";
-  const rootIntroTitle = isSunburstMode ? "从中心向外读层级" : "先看整张星系的脉络";
+  const isMeshMode = presentationMode === "mesh";
+  const RootModeIcon = isSunburstMode ? ChartPie : isMeshMode ? GitBranch : Star;
+  const quickSectionTitle = isSunburstMode ? "中心分区" : isMeshMode ? "网络节点" : "顶层轨道";
+  const rootHeadingLabel = isSunburstMode ? "层级总览" : isMeshMode ? "层级网图" : "星系总览";
+  const rootIntroTitle = isSunburstMode ? "从中心向外读层级" : isMeshMode ? "把目标连成 3D 网" : "先看整张星系的脉络";
   const rootIntroCopy = isSunburstMode
     ? "日晷把目标压成层层扇区，角度代表同级重要性，外圈承接更具体的行动。"
-    : "星球视角保留空间位置和轨道关系，适合观察顶层目标之间的距离、重量和推进状态。";
+    : isMeshMode
+      ? "网图把父子层级和同级线索放进同一个三维结构，适合发现连接密集或孤立的目标。"
+      : "星球视角保留空间位置和轨道关系，适合观察顶层目标之间的距离、重量和推进状态。";
+  const rootStatusLabel = isSunburstMode ? "日晷" : isMeshMode ? "网图" : "星球";
+  const guideLabel = isSunburstMode ? "日晷交互方式" : isMeshMode ? "网图交互方式" : "星球交互方式";
+  const overviewTitle = isSunburstMode ? "层级刻度" : isMeshMode ? "连接态势" : "轨道态势";
+  const rootClass = isSunburstMode ? "sunburst-root" : isMeshMode ? "mesh-root" : "sphere-root";
+  const rootAccent = isSunburstMode ? "var(--amber)" : isMeshMode ? "var(--career)" : "var(--accent)";
   const guideItems = isSunburstMode
     ? [
         { icon: <ChartPie />, title: "点选扇区", copy: "查看对应目标的详情和下一级结构。" },
@@ -4337,6 +4359,13 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         { icon: <ListPlus />, title: "调节层级", copy: "用右上层级按钮控制可见深度。" },
         { icon: <ChevronLeft />, title: "回到中心", copy: "点击中心回到上一层或当前地图。" }
       ]
+    : isMeshMode
+      ? [
+          { icon: <GitBranch />, title: "点选节点", copy: "查看目标详情，镜头会推进到该节点。" },
+          { icon: <Network />, title: "拖拽旋转", copy: "从不同角度观察目标之间的连接。" },
+          { icon: <Sparkles />, title: "流动层级", copy: "发光粒子标记当前聚焦节点的连接。" },
+          { icon: <Star />, title: "回到总览", copy: "点击空白区域或右下角总览按钮回到全图。" }
+        ]
     : [
         { icon: <Star />, title: "点选星体", copy: "查看目标详情、摘要和子目标。" },
         { icon: <GitBranch />, title: "连续点选", copy: "进入同一目标分支，聚焦观察它的子系统。" },
@@ -4350,6 +4379,13 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         { label: "推进中", value: `${mapOverview.activeCount}` },
         { label: "待行动", value: `${mapOverview.openActionCount}` }
       ]
+    : isMeshMode
+      ? [
+          { label: "目标节点", value: `${mapOverview.totalGoals}` },
+          { label: "最大层级", value: mapOverview.maxDepth ? `${mapOverview.maxDepth}` : "0" },
+          { label: "叶子目标", value: `${mapOverview.leafGoalCount}` },
+          { label: "待行动", value: `${mapOverview.openActionCount}` }
+        ]
     : [
         { label: "目标总数", value: `${mapOverview.totalGoals}` },
         { label: "整体进展", value: `${mapOverview.progressAverage}%` },
@@ -4364,14 +4400,14 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
         aria-live="polite"
         style={
           {
-            "--domain-accent": isSunburstMode ? "var(--amber)" : "var(--accent)"
+            "--domain-accent": rootAccent
           } as React.CSSProperties & { "--domain-accent": string }
         }
       >
         <AnimatePresence initial={false} mode="wait">
           <motion.div
             key={detailSwitchKey}
-            className={`detail-panel-content root-detail-panel-content ${isSunburstMode ? "sunburst-root" : "sphere-root"}`}
+            className={`detail-panel-content root-detail-panel-content ${rootClass}`}
             variants={detailSwitchMotion}
             initial="initial"
             animate="animate"
@@ -4382,7 +4418,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
                 <p className="eyebrow">{rootHeadingLabel}</p>
                 <h2>{goalMapCenterTitle(activeGoalMap)}</h2>
               </div>
-              <span className="status-badge active">{isSunburstMode ? "日晷" : "星球"}</span>
+              <span className="status-badge active">{rootStatusLabel}</span>
             </div>
 
             <section className="root-intro">
@@ -4395,7 +4431,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
               </div>
             </section>
 
-            <section className="detail-section map-guide-section" aria-label={isSunburstMode ? "日晷交互方式" : "星球交互方式"}>
+            <section className="detail-section map-guide-section" aria-label={guideLabel}>
               <div className="map-guide-list">
                 {guideItems.map((item) => (
                   <article key={item.title} className="map-guide-item">
@@ -4408,7 +4444,7 @@ const GoalDetailPanel = React.memo(function GoalDetailPanel({
             </section>
 
             <section className="detail-section map-overview-section" aria-labelledby={`map-overview-title-${presentationMode}`}>
-              <h3 id={`map-overview-title-${presentationMode}`}>{isSunburstMode ? "层级刻度" : "轨道态势"}</h3>
+              <h3 id={`map-overview-title-${presentationMode}`}>{overviewTitle}</h3>
               <div className="map-overview-grid" aria-label="当前地图全局状态">
                 {overviewStats.map((stat) => (
                   <span key={stat.label} className="map-overview-stat">

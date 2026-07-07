@@ -28,6 +28,34 @@ export function jsonError(error: unknown) {
   return NextResponse.json({ error: apiErrorMessage(error) }, { status });
 }
 
+type ApiMembership = {
+  workspace_id: string;
+  role: string;
+  created_at?: string | null;
+};
+
+const ROLE_PRIORITY = new Map([
+  ["owner", 4],
+  ["admin", 3],
+  ["member", 2],
+  ["viewer", 1]
+]);
+
+function createdAtMillis(value: string | null | undefined) {
+  const timestamp = Date.parse(String(value ?? ""));
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+export function selectApiMembership(memberships: ApiMembership[], ownedWorkspaceIds: Set<string>) {
+  return [...memberships].sort((a, b) => {
+    const ownedPriority = Number(ownedWorkspaceIds.has(b.workspace_id)) - Number(ownedWorkspaceIds.has(a.workspace_id));
+    if (ownedPriority !== 0) return ownedPriority;
+    const rolePriority = (ROLE_PRIORITY.get(b.role) ?? 0) - (ROLE_PRIORITY.get(a.role) ?? 0);
+    if (rolePriority !== 0) return rolePriority;
+    return createdAtMillis(b.created_at) - createdAtMillis(a.created_at);
+  })[0] ?? null;
+}
+
 export async function getApiContext() {
   const authClient = await createServerSupabaseClient();
   const { data, error } = await authClient.auth.getUser();
@@ -36,19 +64,26 @@ export async function getApiContext() {
   const admin = getSupabaseAdmin();
   const existing = await admin
     .from("memberships")
-    .select("workspace_id, role")
+    .select("workspace_id, role, created_at")
     .eq("user_id", data.user.id)
-    .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+    .order("created_at", { ascending: false });
   if (existing.error) throw existing.error;
 
-  if (existing.data) {
+  const memberships = (existing.data ?? []) as ApiMembership[];
+  if (memberships.length) {
+    const workspaceIds = Array.from(new Set(memberships.map((membership) => membership.workspace_id)));
+    const owned = await admin.from("workspaces").select("id").eq("owner_user_id", data.user.id).in("id", workspaceIds);
+    if (owned.error) throw owned.error;
+    const selected = selectApiMembership(
+      memberships,
+      new Set(((owned.data ?? []) as Array<{ id: string }>).map((workspace) => workspace.id))
+    );
+    if (!selected) throw new ApiError("Workspace not found", 404);
     return {
       admin,
       user: data.user,
-      workspaceId: existing.data.workspace_id as string,
-      role: existing.data.role as string
+      workspaceId: selected.workspace_id,
+      role: selected.role
     };
   }
 

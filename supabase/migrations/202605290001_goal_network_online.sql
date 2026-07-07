@@ -51,7 +51,7 @@ create table if not exists public.goal_relations (
   workspace_id uuid not null references public.workspaces(id) on delete cascade,
   source_goal_id uuid not null references public.goals(id) on delete cascade,
   target_goal_id uuid not null references public.goals(id) on delete cascade,
-  relation_type text not null check (relation_type in ('parent', 'supports', 'depends_on', 'conflicts_with')),
+  relation_type text not null check (relation_type = 'parent'),
   created_at timestamptz not null default now(),
   unique (source_goal_id, target_goal_id, relation_type)
 );
@@ -140,7 +140,8 @@ alter table public.audit_events enable row level security;
 
 grant usage on schema public to authenticated;
 grant select, insert, update, delete on public.workspaces to authenticated;
-grant select, insert, update, delete on public.memberships to authenticated;
+grant select on public.memberships to authenticated;
+grant select, insert, update, delete on public.memberships to service_role;
 grant select, insert, update, delete on public.goals to authenticated;
 grant select, insert, update, delete on public.goal_relations to authenticated;
 grant select, insert, update, delete on public.weekly_actions to authenticated;
@@ -200,19 +201,6 @@ create policy "admins can update workspaces" on public.workspaces
 create policy "members can read memberships" on public.memberships
   for select to authenticated
   using (app_private.current_user_workspace_role(workspace_id) is not null);
-
-create policy "owners can insert memberships" on public.memberships
-  for insert to authenticated
-  with check (app_private.current_user_workspace_role(workspace_id) = 'owner');
-
-create policy "owners can update memberships" on public.memberships
-  for update to authenticated
-  using (app_private.current_user_workspace_role(workspace_id) = 'owner')
-  with check (app_private.current_user_workspace_role(workspace_id) = 'owner');
-
-create policy "owners can delete memberships" on public.memberships
-  for delete to authenticated
-  using (app_private.current_user_workspace_role(workspace_id) = 'owner');
 
 create policy "members can read goals" on public.goals
   for select to authenticated

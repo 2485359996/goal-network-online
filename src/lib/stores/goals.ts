@@ -8,7 +8,6 @@ import type {
   GoalMapPatchInput,
   GoalNode,
   GoalPatchInput,
-  GoalRelationsInput,
   GoalsResponse,
   MarkdownWriteResult
 } from "../../shared/types";
@@ -50,7 +49,7 @@ export type GoalRelationDbRow = {
   workspace_id: string;
   source_goal_id: string;
   target_goal_id: string;
-  relation_type: "parent" | "supports" | "depends_on" | "conflicts_with";
+  relation_type: string;
 };
 
 const VALID_STATUSES = new Set(["active", "paused", "done", "archived"]);
@@ -136,6 +135,40 @@ function goalMapFromRow(row: GoalMapDbRow): GoalMap {
   };
 }
 
+function validParentRelations(goalRows: GoalDbRow[], relationRows: GoalRelationDbRow[]) {
+  const byDbId = new Map(goalRows.map((row) => [row.id, row]));
+  const childrenByParent = new Map<string, Set<string>>();
+  const accepted: GoalRelationDbRow[] = [];
+
+  const reaches = (fromId: string, targetId: string) => {
+    const seen = new Set<string>();
+    const visit = (id: string): boolean => {
+      if (id === targetId) return true;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      for (const childId of childrenByParent.get(id) ?? []) {
+        if (visit(childId)) return true;
+      }
+      return false;
+    };
+    return visit(fromId);
+  };
+
+  for (const relation of relationRows) {
+    if (relation.relation_type !== "parent") continue;
+    if (relation.source_goal_id === relation.target_goal_id) continue;
+    if (!byDbId.has(relation.source_goal_id) || !byDbId.has(relation.target_goal_id)) continue;
+    if (reaches(relation.source_goal_id, relation.target_goal_id)) continue;
+
+    const children = childrenByParent.get(relation.target_goal_id) ?? new Set<string>();
+    children.add(relation.source_goal_id);
+    childrenByParent.set(relation.target_goal_id, children);
+    accepted.push(relation);
+  }
+
+  return accepted;
+}
+
 export function buildGoalsResponse(
   goalRows: GoalDbRow[],
   relationRows: GoalRelationDbRow[],
@@ -143,10 +176,10 @@ export function buildGoalsResponse(
   goalMapRows: GoalMapDbRow[] = []
 ): GoalsResponse {
   const byDbId = new Map(goalRows.map((row) => [row.id, row]));
+  const parentRelations = validParentRelations(goalRows, relationRows);
   const parentTitleBySource = new Map<string, string>();
 
-  for (const relation of relationRows) {
-    if (relation.relation_type !== "parent") continue;
+  for (const relation of parentRelations) {
     const parent = byDbId.get(relation.target_goal_id);
     if (parent) parentTitleBySource.set(relation.source_goal_id, parent.title);
   }
@@ -171,9 +204,6 @@ export function buildGoalsResponse(
       map_x: row.map_x ?? undefined,
       map_y: row.map_y ?? undefined,
       map_positions: row.map_positions ?? undefined,
-      supports: [],
-      depends_on: [],
-      conflicts_with: [],
       last_reviewed: row.last_reviewed ?? "",
       last_progress: row.last_progress ?? "",
       tags: row.tags ?? [],
@@ -189,7 +219,8 @@ export function buildGoalsResponse(
   const legacyByDbId = new Map(goalRows.map((row) => [row.id, row.legacy_id]));
 
   const graphEdges: GoalGraphEdge[] = [];
-  for (const relation of relationRows) {
+  const childIds = new Set<string>();
+  for (const relation of parentRelations) {
     const sourceId = legacyByDbId.get(relation.source_goal_id);
     const targetId = legacyByDbId.get(relation.target_goal_id);
     if (!sourceId || !targetId) continue;
@@ -197,21 +228,17 @@ export function buildGoalsResponse(
     const target = byLegacyId.get(targetId);
     if (!source || !target) continue;
 
-    if (relation.relation_type === "parent") {
-      source.parent = asWikilink(target.title);
-      target.children.push(source);
-    } else {
-      source[relation.relation_type].push(asWikilink(target.title));
-    }
+    source.parent = asWikilink(target.title);
+    target.children.push(source);
+    childIds.add(source.id);
     graphEdges.push({
-      id: `${sourceId}->${targetId}:${relation.relation_type}`,
+      id: `${sourceId}->${targetId}:parent`,
       source: sourceId,
       target: targetId,
-      type: relation.relation_type
+      type: "parent"
     });
   }
 
-  const childIds = new Set(relationRows.filter((item) => item.relation_type === "parent").map((item) => legacyByDbId.get(item.source_goal_id)));
   const topLevel = nodes.filter((node) => !childIds.has(node.id));
   sortGoals(topLevel);
   applyWeightedProgress(topLevel);
@@ -312,6 +339,39 @@ async function parentTitleForGoal(client: SupabaseAdminClient, workspaceId: stri
     .maybeSingle();
   if (parent.error) throw parent.error;
   return String(parent.data?.title ?? "");
+}
+
+async function assertAcyclicParent(
+  client: SupabaseAdminClient,
+  workspaceId: string,
+  current: GoalDbRow,
+  parent: GoalDbRow
+) {
+  if (parent.id === current.id) throw new Error("Goal cannot be its own parent");
+
+  const { data, error } = await client
+    .from("goal_relations")
+    .select("source_goal_id, target_goal_id")
+    .eq("workspace_id", workspaceId)
+    .eq("relation_type", "parent");
+  if (error) throw error;
+
+  const childrenByParent = new Map<string, string[]>();
+  for (const relation of (data ?? []) as Pick<GoalRelationDbRow, "source_goal_id" | "target_goal_id">[]) {
+    if (relation.source_goal_id === current.id) continue;
+    const children = childrenByParent.get(relation.target_goal_id) ?? [];
+    children.push(relation.source_goal_id);
+    childrenByParent.set(relation.target_goal_id, children);
+  }
+
+  const descendants = new Set<string>();
+  const collect = (dbId: string) => {
+    if (descendants.has(dbId)) return;
+    descendants.add(dbId);
+    for (const childId of childrenByParent.get(dbId) ?? []) collect(childId);
+  };
+  collect(current.id);
+  if (descendants.has(parent.id)) throw new Error("Goal parent cannot be a descendant of the goal");
 }
 
 async function enqueueAuditAndSync(
@@ -610,10 +670,16 @@ export class SupabaseGoalStore {
     let resolvedParentTitle = await parentTitleForGoal(this.client, this.workspaceId, current.id);
     if (input.parent !== undefined) {
       resolvedParentTitle = titleFromWikilink(input.parent);
-      await this.client.from("goal_relations").delete().eq("workspace_id", this.workspaceId).eq("source_goal_id", current.id).eq("relation_type", "parent");
+      let parent: GoalDbRow | null = null;
       if (resolvedParentTitle) {
-        const parent = await goalByTitle(this.client, this.workspaceId, resolvedParentTitle, current.goal_map_id);
+        parent = await goalByTitle(this.client, this.workspaceId, resolvedParentTitle, current.goal_map_id);
         if (!parent) throw new Error(`Parent goal not found in current goal map: ${resolvedParentTitle}`);
+        await assertAcyclicParent(this.client, this.workspaceId, current, parent);
+      }
+
+      const deleteParent = await this.client.from("goal_relations").delete().eq("workspace_id", this.workspaceId).eq("source_goal_id", current.id).eq("relation_type", "parent");
+      if (deleteParent.error) throw deleteParent.error;
+      if (parent) {
         const insertParent = await this.client.from("goal_relations").insert({
           workspace_id: this.workspaceId,
           source_goal_id: current.id,
@@ -722,6 +788,7 @@ export class SupabaseGoalStore {
     }
     const ids = new Set<string>();
     const collect = (dbId: string) => {
+      if (ids.has(dbId)) return;
       ids.add(dbId);
       for (const child of childrenByParent.get(dbId) ?? []) collect(child);
     };
@@ -732,37 +799,6 @@ export class SupabaseGoalStore {
     return { ok: true, filePath: current.file_path, message: "Goal deleted" };
   }
 
-  async patchGoalRelations(id: string, input: GoalRelationsInput): Promise<MarkdownWriteResult> {
-    const current = await goalByLegacyId(this.client, this.workspaceId, id);
-    if (!current) throw new Error(`Goal not found: ${id}`);
-    const deleteResult = await this.client
-      .from("goal_relations")
-      .delete()
-      .eq("workspace_id", this.workspaceId)
-      .eq("source_goal_id", current.id)
-      .in("relation_type", ["supports", "depends_on", "conflicts_with"]);
-    if (deleteResult.error) throw deleteResult.error;
-
-    const rows: Array<Omit<GoalRelationDbRow, "id">> = [];
-    for (const relationType of ["supports", "depends_on", "conflicts_with"] as const) {
-      for (const title of input[relationType]) {
-        const target = await goalByTitle(this.client, this.workspaceId, title);
-        if (!target) continue;
-        rows.push({
-          workspace_id: this.workspaceId,
-          source_goal_id: current.id,
-          target_goal_id: target.id,
-          relation_type: relationType
-        });
-      }
-    }
-    if (rows.length) {
-      const insert = await this.client.from("goal_relations").insert(rows);
-      if (insert.error) throw insert.error;
-    }
-    await enqueueAuditAndSync(this.client, this.workspaceId, this.actorUserId, "goal.relations.update", current.id, input);
-    return { ok: true, filePath: current.file_path, message: "Goal relations updated" };
-  }
 }
 
 function mergeMapPositions(

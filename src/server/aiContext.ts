@@ -125,14 +125,6 @@ export function buildBranchContextSummary(goal: GoalNode, sourceHash = branchSou
   const progressValues = branchGoals.flatMap((item) => (typeof item.progress === "number" ? [item.progress] : []));
   const clarityValues = branchGoals.map((item) => item.clarity).filter((value) => Number.isFinite(value));
   const statusCounts = countByStatus(branchGoals);
-  const relationCounts = branchGoals.reduce(
-    (acc, item) => ({
-      supports: acc.supports + item.supports.length,
-      depends_on: acc.depends_on + item.depends_on.length,
-      conflicts_with: acc.conflicts_with + item.conflicts_with.length
-    }),
-    { supports: 0, depends_on: 0, conflicts_with: 0 }
-  );
   const actionCounts = branchGoals.reduce(
     (acc, item) => {
       const counts = actionCountsForGoal(item);
@@ -157,8 +149,7 @@ export function buildBranchContextSummary(goal: GoalNode, sourceHash = branchSou
     averageProgress: roundedAverage(progressValues),
     openActionCount: actionCounts.open,
     completedActionCount: actionCounts.completed,
-    relationCounts,
-    riskSignals: riskSignalsForBranch(branchGoals, relationCounts, actionCounts.open),
+    riskSignals: riskSignalsForBranch(branchGoals, actionCounts.open),
     recentSignals: recentSignalsForBranch(branchGoals),
     goals: selectedGoals.map(summaryGoalFromNode)
   });
@@ -203,7 +194,10 @@ function siblingGoals(goal: GoalNode, flatGoals: GoalNode[]) {
 
 function flattenBranch(goal: GoalNode) {
   const result: GoalNode[] = [];
+  const seen = new Set<string>();
   const visit = (node: GoalNode) => {
+    if (seen.has(node.id)) return;
+    seen.add(node.id);
     result.push(node);
     node.children.forEach(visit);
   };
@@ -223,9 +217,6 @@ function goalSourceSnapshot(goal: GoalNode) {
     clarity: goal.clarity,
     progress: goal.progress,
     color: goal.color,
-    supports: goal.supports,
-    depends_on: goal.depends_on,
-    conflicts_with: goal.conflicts_with,
     last_reviewed: goal.last_reviewed,
     last_progress: goal.last_progress,
     sections: {
@@ -296,11 +287,7 @@ function roundedAverage(values: number[]) {
   return Math.round(average * 10) / 10;
 }
 
-function riskSignalsForBranch(
-  branchGoals: GoalNode[],
-  relationCounts: { supports: number; depends_on: number; conflicts_with: number },
-  openActionCount: number
-) {
+function riskSignalsForBranch(branchGoals: GoalNode[], openActionCount: number) {
   const signals: string[] = [];
   const lowClarityCount = branchGoals.filter((goal) => goal.clarity <= 2 && goal.status === "active").length;
   const pausedCount = branchGoals.filter((goal) => goal.status === "paused").length;
@@ -310,7 +297,6 @@ function riskSignalsForBranch(
   ).length;
   const neverReviewedCount = branchGoals.filter((goal) => goal.status === "active" && !goal.last_reviewed.trim()).length;
 
-  if (relationCounts.conflicts_with > 0) signals.push(`${relationCounts.conflicts_with} 个冲突关系需要处理`);
   if (lowClarityCount > 0) signals.push(`${lowClarityCount} 个活跃目标清晰度偏低`);
   if (pausedCount > 0) signals.push(`${pausedCount} 个目标处于暂停状态`);
   if (highPriorityLowProgressCount > 0) signals.push(`${highPriorityLowProgressCount} 个高优先级目标进展偏低`);

@@ -87,11 +87,6 @@ export const aiBranchContextSummarySchema = z.object({
   averageProgress: z.number().nullable(),
   openActionCount: z.number().int().nonnegative(),
   completedActionCount: z.number().int().nonnegative(),
-  relationCounts: z.object({
-    supports: z.number().int().nonnegative(),
-    depends_on: z.number().int().nonnegative(),
-    conflicts_with: z.number().int().nonnegative()
-  }).strict(),
   riskSignals: z.array(z.string()),
   recentSignals: z.array(z.string()),
   goals: z.array(z.object({
