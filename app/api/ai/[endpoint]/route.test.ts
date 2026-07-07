@@ -135,7 +135,6 @@ describe("AI route", () => {
         averageProgress: 20,
         openActionCount: 3,
         completedActionCount: 1,
-        relationCounts: { supports: 0, depends_on: 0, conflicts_with: 0 },
         riskSignals: [],
         recentSignals: [],
         goals: []

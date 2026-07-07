@@ -1,7 +1,5 @@
 export type GoalStatus = "active" | "paused" | "done" | "archived";
 
-export type GoalRelationType = "supports" | "depends_on" | "conflicts_with";
-
 export interface GoalActionCandidate {
   text: string;
   done: boolean;
@@ -45,9 +43,6 @@ export interface GoalNode {
   map_x?: number;
   map_y?: number;
   map_positions?: Record<string, GoalMapPosition>;
-  supports: string[];
-  depends_on: string[];
-  conflicts_with: string[];
   last_reviewed: string;
   last_progress: string;
   tags: string[];
@@ -68,7 +63,7 @@ export interface GoalGraphEdge {
   id: string;
   source: string;
   target: string;
-  type: "parent" | GoalRelationType;
+  type: "parent";
 }
 
 export interface GoalsResponse {
@@ -131,12 +126,6 @@ export interface GoalMapCreateInput {
 
 export interface GoalMapPatchInput {
   name?: string;
-}
-
-export interface GoalRelationsInput {
-  supports: string[];
-  depends_on: string[];
-  conflicts_with: string[];
 }
 
 export interface WeeklyAction {

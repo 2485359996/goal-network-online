@@ -391,7 +391,6 @@ describe("AI routes", () => {
         averageProgress: 35,
         openActionCount: 12,
         completedActionCount: 4,
-        relationCounts: { supports: 1, depends_on: 2, conflicts_with: 0 },
         riskSignals: ["10 个活跃目标清晰度偏低"],
         recentSignals: [],
         goals: []

@@ -21,17 +21,13 @@ create policy "users can create owned workspaces" on public.workspaces
   for insert to authenticated
   with check (owner_user_id = (select auth.uid()));
 
+revoke insert, update, delete on public.memberships from authenticated;
+grant select on public.memberships to authenticated;
+grant select, insert, update, delete on public.memberships to service_role;
 drop policy if exists "owners can manage memberships" on public.memberships;
-create policy "owners can insert memberships" on public.memberships
-  for insert to authenticated
-  with check (app_private.current_user_workspace_role(workspace_id) = 'owner');
-create policy "owners can update memberships" on public.memberships
-  for update to authenticated
-  using (app_private.current_user_workspace_role(workspace_id) = 'owner')
-  with check (app_private.current_user_workspace_role(workspace_id) = 'owner');
-create policy "owners can delete memberships" on public.memberships
-  for delete to authenticated
-  using (app_private.current_user_workspace_role(workspace_id) = 'owner');
+drop policy if exists "owners can insert memberships" on public.memberships;
+drop policy if exists "owners can update memberships" on public.memberships;
+drop policy if exists "owners can delete memberships" on public.memberships;
 
 drop policy if exists "writers can mutate goals" on public.goals;
 create policy "writers can insert goals" on public.goals

@@ -68,6 +68,9 @@
   --map-pane-atmosphere:
     radial-gradient(circle at 50% 8%, color-mix(in oklch, var(--accent) 15%, transparent), transparent 28%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 34%);
+  --map-pane-background:
+    linear-gradient(145deg, color-mix(in oklch, var(--surface) 38%, transparent), transparent 42%),
+    var(--pane-background);
   --map-pane-atmosphere-opacity: 0.78;
   --starfield-opacity: 1;
   --starfield-beam-opacity: 0.76;
@@ -148,6 +151,11 @@
     radial-gradient(circle at 18% 20%, rgba(130, 204, 235, 0.1), transparent 28%),
     radial-gradient(circle at 84% 78%, rgba(231, 181, 103, 0.06), transparent 34%),
     linear-gradient(180deg, rgba(244, 247, 251, 0.055), transparent 36%, rgba(3, 7, 18, 0.2));
+  --map-pane-background:
+    radial-gradient(ellipse at 50% 46%, rgba(107, 211, 193, 0.055), transparent 42%),
+    radial-gradient(circle at 18% 20%, rgba(130, 204, 235, 0.045), transparent 30%),
+    radial-gradient(circle at 86% 82%, rgba(231, 181, 103, 0.035), transparent 35%),
+    linear-gradient(180deg, #0d1727 0%, #09111f 58%, #070d18 100%);
   --map-pane-atmosphere-opacity: 0.92;
   --starfield-opacity: 0.88;
   --starfield-beam-opacity: 0.42;
@@ -613,11 +621,16 @@ h3 {
   overflow: hidden;
   padding: var(--map-pane-padding);
   container-type: size;
+  background: var(--map-pane-background);
 }
 
 :root[data-theme="dark"] .map-pane {
-  background: var(--bg);
-  box-shadow: 0 22px 44px -30px rgba(0, 0, 0, 0.72);
+  border-color: rgba(58, 77, 104, 0.58);
+  background: var(--map-pane-background);
+  box-shadow:
+    0 24px 52px -34px rgba(0, 0, 0, 0.84),
+    inset 0 1px 0 rgba(244, 247, 251, 0.07),
+    inset 0 -1px 0 rgba(3, 7, 18, 0.62);
   backdrop-filter: none;
 }
 
@@ -633,10 +646,15 @@ h3 {
 }
 
 :root[data-theme="dark"] .map-pane::before {
-  opacity: 0;
+  opacity: 0.34;
 }
 
 .map-pane.sunburst-active {
+  --map-pane-padding: 8px;
+  gap: 6px;
+}
+
+.map-pane.mesh-active {
   --map-pane-padding: 8px;
   gap: 6px;
 }
@@ -746,8 +764,8 @@ h3 {
 }
 
 :root[data-theme="dark"] .map-canvas::after {
-  mix-blend-mode: overlay;
-  opacity: 0;
+  mix-blend-mode: soft-light;
+  opacity: 0.012;
 }
 
 .starfield {
@@ -1639,6 +1657,226 @@ h3 {
     width: min(100cqw, 100cqh, 900px);
     max-width: 100%;
   }
+}
+
+.goal-mesh-map {
+  --mesh-bg: #edf5f0;
+  --mesh-halo-primary: rgba(20, 116, 111, 0.16);
+  --mesh-halo-secondary: rgba(47, 111, 136, 0.12);
+  --mesh-halo-warm: rgba(198, 129, 45, 0.08);
+  --mesh-grid-strong: rgba(62, 81, 75, 0.13);
+  --mesh-grid-soft: rgba(62, 81, 75, 0.055);
+  --mesh-scanline: rgba(20, 116, 111, 0.028);
+  --mesh-vignette: rgba(16, 33, 31, 0.1);
+  --mesh-control-bg: rgba(255, 253, 248, 0.72);
+  --mesh-control-color: #16423d;
+  --mesh-control-hover-bg: rgba(20, 116, 111, 0.12);
+  --mesh-label-bg: rgba(248, 252, 248, 0.88);
+  --mesh-label-ink: #10211f;
+  --mesh-label-muted: rgba(50, 74, 70, 0.76);
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: calc(var(--pane-radius) - 12px);
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 50% 45%, var(--mesh-halo-primary), transparent 28%),
+    radial-gradient(circle at 19% 22%, var(--mesh-halo-secondary), transparent 30%),
+    radial-gradient(circle at 82% 76%, var(--mesh-halo-warm), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), transparent 19%, var(--mesh-vignette) 100%),
+    var(--mesh-bg);
+}
+
+:root[data-theme="dark"] .goal-mesh-map {
+  --mesh-bg: #071018;
+  --mesh-halo-primary: rgba(94, 234, 212, 0.12);
+  --mesh-halo-secondary: rgba(130, 204, 235, 0.11);
+  --mesh-halo-warm: rgba(231, 181, 103, 0.075);
+  --mesh-grid-strong: rgba(159, 184, 179, 0.08);
+  --mesh-grid-soft: rgba(159, 184, 179, 0.035);
+  --mesh-scanline: rgba(94, 234, 212, 0.028);
+  --mesh-vignette: rgba(0, 0, 0, 0.2);
+  --mesh-control-bg: rgba(7, 16, 24, 0.68);
+  --mesh-control-color: rgba(231, 255, 250, 0.86);
+  --mesh-control-hover-bg: rgba(94, 234, 212, 0.14);
+  --mesh-label-bg: rgba(8, 17, 22, 0.84);
+  --mesh-label-ink: #f7fffd;
+  --mesh-label-muted: rgba(206, 223, 220, 0.72);
+}
+
+.goal-mesh-map::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--mesh-grid-strong) 1px, transparent 1px),
+    linear-gradient(90deg, var(--mesh-grid-strong) 1px, transparent 1px),
+    linear-gradient(var(--mesh-grid-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--mesh-grid-soft) 1px, transparent 1px);
+  background-size:
+    72px 72px,
+    72px 72px,
+    18px 18px,
+    18px 18px;
+  opacity: 0.66;
+  mask-image: radial-gradient(circle at 50% 48%, #000 0%, rgba(0, 0, 0, 0.82) 46%, transparent 100%);
+}
+
+.goal-mesh-map::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 16%, transparent 82%, var(--mesh-vignette)),
+    repeating-linear-gradient(180deg, transparent 0 13px, var(--mesh-scanline) 14px, transparent 15px);
+  opacity: 0.72;
+}
+
+.goal-mesh-viewport {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  cursor: grab;
+}
+
+.goal-mesh-viewport:active {
+  cursor: grabbing;
+}
+
+.goal-mesh-viewport canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.goal-mesh-controls {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 5;
+  display: inline-flex;
+  gap: 6px;
+  border: 1px solid rgba(199, 226, 220, 0.22);
+  border-radius: 14px;
+  background: var(--mesh-control-bg);
+  box-shadow:
+    0 18px 38px -24px rgba(0, 0, 0, 0.78),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  padding: 5px;
+  backdrop-filter: blur(16px) saturate(1.18);
+}
+
+.goal-mesh-control {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: rgba(231, 238, 247, 0.06);
+  color: var(--mesh-control-color);
+  padding: 0;
+  transition:
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    background 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.goal-mesh-control svg {
+  width: 17px;
+  height: 17px;
+  stroke-width: 2.35;
+}
+
+.goal-mesh-control:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(167, 243, 208, 0.42);
+  background: var(--mesh-control-hover-bg);
+  color: var(--mesh-label-ink);
+}
+
+.goal-mesh-control:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+}
+
+.goal-mesh-control:focus-visible {
+  outline: 2px solid rgba(167, 243, 208, 0.82);
+  outline-offset: 2px;
+}
+
+.goal-mesh-control:disabled {
+  color: rgba(148, 163, 184, 0.48);
+  background: rgba(148, 163, 184, 0.045);
+}
+
+.mesh-node-label {
+  min-width: 132px;
+  max-width: 220px;
+  display: grid;
+  gap: 5px;
+  border: 1px solid rgba(159, 184, 179, 0.38);
+  border-left-color: rgba(94, 234, 212, 0.76);
+  border-radius: 7px;
+  background: var(--mesh-label-bg);
+  color: var(--mesh-label-ink);
+  box-shadow:
+    0 18px 38px -28px rgba(0, 0, 0, 0.72),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  padding: 8px 9px;
+  pointer-events: none;
+  backdrop-filter: blur(12px) saturate(1.08);
+}
+
+.mesh-node-label strong,
+.mesh-node-label span,
+.mesh-node-label small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mesh-node-label strong {
+  font-size: 12px;
+  font-weight: 780;
+  line-height: 1.18;
+  color: var(--mesh-label-ink);
+}
+
+.mesh-node-label span,
+.mesh-node-label small {
+  color: var(--mesh-label-muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.15;
+}
+
+.mesh-link-label {
+  min-width: auto;
+  border-left-color: rgba(159, 184, 179, 0.62);
+}
+
+.mesh-map-label {
+  min-width: 150px;
+  border-left-color: rgba(15, 118, 110, 0.78);
+}
+
+.mesh-empty-text {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  z-index: 3;
+  transform: translate(-50%, -50%);
+  color: var(--muted);
 }
 
 .empty-map-text {
@@ -3996,6 +4234,18 @@ textarea::placeholder {
 
   .map-pane-toolbar {
     gap: 8px;
+  }
+
+  .presentation-toggle {
+    order: 3;
+    flex: 1 1 100%;
+    justify-content: stretch;
+    overflow-x: auto;
+  }
+
+  .presentation-option {
+    flex: 1 0 auto;
+    padding: 0 9px;
   }
 
   .map-breadcrumb {

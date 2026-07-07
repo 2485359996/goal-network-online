@@ -308,13 +308,6 @@ describe("buildGoalsResponse", () => {
           source_goal_id: "db-child",
           target_goal_id: "db-root",
           relation_type: "parent"
-        },
-        {
-          id: "rel-support",
-          workspace_id: "workspace-1",
-          source_goal_id: "db-child",
-          target_goal_id: "db-root",
-          relation_type: "supports"
         }
       ],
       "workspace-1",
@@ -327,8 +320,26 @@ describe("buildGoalsResponse", () => {
     expect(response.goals[0].goalMapId).toBe("map-1");
     expect(response.goals[0].children[0].title).toBe("Skill");
     expect(response.goals[0].sections.actionCandidates).toEqual([]);
-    expect(response.goals[0].children[0].supports).toEqual(["[[Career]]"]);
-    expect(response.graph.edges.map((edge) => edge.type).sort()).toEqual(["parent", "supports"]);
+    expect(response.graph.edges.map((edge) => edge.type)).toEqual(["parent"]);
+  });
+
+  it("ignores malformed cyclic parent relations when building response trees", () => {
+    const response = buildGoalsResponse(
+      [
+        goalRow({ id: "db-parent", legacy_id: "goal-parent", title: "Parent" }),
+        goalRow({ id: "db-child", legacy_id: "goal-child", title: "Child" })
+      ],
+      [
+        { id: "rel-child", workspace_id: "workspace-1", source_goal_id: "db-child", target_goal_id: "db-parent", relation_type: "parent" },
+        { id: "rel-parent", workspace_id: "workspace-1", source_goal_id: "db-parent", target_goal_id: "db-child", relation_type: "parent" }
+      ],
+      "workspace-1",
+      [goalMapRow({ id: "map-1", name: "目标网络" })]
+    );
+
+    expect(() => JSON.stringify(response)).not.toThrow();
+    expect(response.graph.edges).toHaveLength(1);
+    expect(response.goals).toHaveLength(1);
   });
 });
 
@@ -366,8 +377,8 @@ describe("SupabaseGoalStore goal maps", () => {
       ],
       goal_relations: [
         { id: "rel-child", workspace_id: "workspace-1", source_goal_id: "db-child", target_goal_id: "db-parent", relation_type: "parent" },
-        { id: "rel-cross", workspace_id: "workspace-1", source_goal_id: "db-other", target_goal_id: "db-parent", relation_type: "depends_on" },
-        { id: "rel-keep", workspace_id: "workspace-1", source_goal_id: "db-other", target_goal_id: "db-other", relation_type: "depends_on" }
+        { id: "rel-cross", workspace_id: "workspace-1", source_goal_id: "db-other", target_goal_id: "db-parent", relation_type: "parent" },
+        { id: "rel-keep", workspace_id: "workspace-1", source_goal_id: "db-other", target_goal_id: "db-other", relation_type: "parent" }
       ]
     });
     const store = new SupabaseGoalStore(client as any, "workspace-1", "user-1");
@@ -454,6 +465,89 @@ describe("SupabaseGoalStore goal creation", () => {
     });
     expect(client.tables.sync_jobs).toHaveLength(1);
     expect(next.flatGoals.map((goal) => goal.title).sort()).toEqual(["Child A", "Child B", "Parent"]);
+  });
+});
+
+describe("SupabaseGoalStore goal updates", () => {
+  it("rejects self-parent updates without deleting the existing parent", async () => {
+    const client = new FakeSupabaseClient({
+      goals: [
+        goalRow({ id: "db-parent", legacy_id: "goal-parent", title: "Parent", goal_map_id: "map-1" }),
+        goalRow({ id: "db-child", legacy_id: "goal-child", title: "Child", goal_map_id: "map-1" })
+      ],
+      goal_relations: [
+        { id: "rel-child", workspace_id: "workspace-1", source_goal_id: "db-child", target_goal_id: "db-parent", relation_type: "parent" }
+      ]
+    });
+    const store = new SupabaseGoalStore(client as any, "workspace-1", "user-1");
+
+    await expect(store.patchGoal("goal-child", { parent: "Child" })).rejects.toThrow("Goal cannot be its own parent");
+
+    expect(client.tables.goal_relations).toEqual([
+      expect.objectContaining({ id: "rel-child", source_goal_id: "db-child", target_goal_id: "db-parent" })
+    ]);
+  });
+
+  it("rejects descendant-parent updates", async () => {
+    const client = new FakeSupabaseClient({
+      goals: [
+        goalRow({ id: "db-parent", legacy_id: "goal-parent", title: "Parent", goal_map_id: "map-1" }),
+        goalRow({ id: "db-child", legacy_id: "goal-child", title: "Child", goal_map_id: "map-1" })
+      ],
+      goal_relations: [
+        { id: "rel-child", workspace_id: "workspace-1", source_goal_id: "db-child", target_goal_id: "db-parent", relation_type: "parent" }
+      ]
+    });
+    const store = new SupabaseGoalStore(client as any, "workspace-1", "user-1");
+
+    await expect(store.patchGoal("goal-parent", { parent: "Child" })).rejects.toThrow("Goal parent cannot be a descendant");
+
+    expect(client.tables.goal_relations).toEqual([
+      expect.objectContaining({ id: "rel-child", source_goal_id: "db-child", target_goal_id: "db-parent" })
+    ]);
+  });
+
+  it("allows safe reparenting within the same goal map", async () => {
+    const client = new FakeSupabaseClient({
+      goals: [
+        goalRow({ id: "db-old-parent", legacy_id: "goal-old-parent", title: "Old Parent", goal_map_id: "map-1" }),
+        goalRow({ id: "db-new-parent", legacy_id: "goal-new-parent", title: "New Parent", goal_map_id: "map-1" }),
+        goalRow({ id: "db-child", legacy_id: "goal-child", title: "Child", goal_map_id: "map-1" })
+      ],
+      goal_relations: [
+        { id: "rel-child", workspace_id: "workspace-1", source_goal_id: "db-child", target_goal_id: "db-old-parent", relation_type: "parent" }
+      ]
+    });
+    const store = new SupabaseGoalStore(client as any, "workspace-1", "user-1");
+
+    await store.patchGoal("goal-child", { parent: "New Parent" });
+
+    expect(client.tables.goal_relations).toEqual([
+      expect.objectContaining({ source_goal_id: "db-child", target_goal_id: "db-new-parent", relation_type: "parent" })
+    ]);
+    expect(client.tables.audit_events).toContainEqual(expect.objectContaining({ action: "goal.update" }));
+  });
+
+  it("deletes cyclic malformed subtrees with a visited guard", async () => {
+    const client = new FakeSupabaseClient({
+      goals: [
+        goalRow({ id: "db-parent", legacy_id: "goal-parent", title: "Parent", goal_map_id: "map-1" }),
+        goalRow({ id: "db-child", legacy_id: "goal-child", title: "Child", goal_map_id: "map-1" })
+      ],
+      goal_relations: [
+        { id: "rel-child", workspace_id: "workspace-1", source_goal_id: "db-child", target_goal_id: "db-parent", relation_type: "parent" },
+        { id: "rel-parent", workspace_id: "workspace-1", source_goal_id: "db-parent", target_goal_id: "db-child", relation_type: "parent" }
+      ]
+    });
+    const store = new SupabaseGoalStore(client as any, "workspace-1", "user-1");
+
+    await expect(store.deleteGoal("goal-parent")).resolves.toMatchObject({ ok: true });
+
+    expect(client.tables.goals).toHaveLength(0);
+    expect(client.tables.audit_events[0]).toMatchObject({
+      action: "goal.delete",
+      payload: { id: "goal-parent", deletedCount: 2 }
+    });
   });
 });
 

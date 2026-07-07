@@ -128,7 +128,6 @@ describe("AI contracts", () => {
       averageProgress: 25,
       openActionCount: 2,
       completedActionCount: 1,
-      relationCounts: { supports: 0, depends_on: 0, conflicts_with: 0 },
       riskSignals: [],
       recentSignals: [],
       goals: []

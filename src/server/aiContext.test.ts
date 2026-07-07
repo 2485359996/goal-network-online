@@ -23,9 +23,6 @@ function goalNode(patch: Partial<GoalNode> & Pick<GoalNode, "id" | "title">): Go
     clarity: 3,
     progress: 20,
     color: "#2563eb",
-    supports: [],
-    depends_on: [],
-    conflicts_with: [],
     last_reviewed: "",
     last_progress: "",
     tags: ["goal-network"],
@@ -199,6 +196,16 @@ describe("AI server context", () => {
 
     expect(withChildHash).not.toBe(withoutChildHash);
     expect(branchSourceHash([root])).not.toBe(branchSourceHash([{ ...root, sections: { ...root.sections, summary: "Changed" } }]));
+  });
+
+  it("summarizes malformed cyclic branches without overflowing recursion", () => {
+    const root = goalNode({ id: "goal-cycle", title: "Cycle" });
+    root.children = [root];
+
+    const summary = buildBranchContextSummary(root);
+
+    expect(summary.goalCount).toBe(1);
+    expect(summary.goals).toHaveLength(1);
   });
 
   it("returns 404 when the requested goal is not in the authenticated workspace", async () => {

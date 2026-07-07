@@ -77,12 +77,6 @@ export const goalMapPatchSchema = z.object({
   name: z.string().min(1).optional()
 });
 
-export const relationsSchema = z.object({
-  supports: z.array(z.string()),
-  depends_on: z.array(z.string()),
-  conflicts_with: z.array(z.string())
-});
-
 export const actionCreateSchema = z.object({
   description: z.string().min(1),
   goal: z.string().min(1),

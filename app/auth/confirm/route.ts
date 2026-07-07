@@ -2,9 +2,18 @@ import type { EmailOtpType } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerSupabaseClient } from "../../../src/lib/supabase/server";
 
-function safeNextPath(value: string | null) {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) return "/";
-  return value;
+const SAME_ORIGIN_BASE = "https://goal-network.local";
+
+export function safeNextPath(value: string | null) {
+  const nextPath = value?.trim();
+  if (!nextPath || !nextPath.startsWith("/") || nextPath.startsWith("//") || nextPath.includes("\\")) return "/";
+  try {
+    const parsed = new URL(nextPath, SAME_ORIGIN_BASE);
+    if (parsed.origin !== SAME_ORIGIN_BASE) return "/";
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return "/";
+  }
 }
 
 export async function GET(request: NextRequest) {

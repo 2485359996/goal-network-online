@@ -318,23 +318,24 @@ describe("goalscape layout", () => {
   it("reads presentation mode per goal map and falls back to sphere for unknown or damaged storage", () => {
     expect(readGoalPresentationMode("map-1", storageWith())).toBe("sphere");
     expect(readGoalPresentationMode("map-1", storageWith("{broken json"))).toBe("sphere");
-    expect(readGoalPresentationMode("map-3", storageWith(JSON.stringify({ "map-1": "sunburst", "map-2": "sphere" })))).toBe("sphere");
-    expect(readGoalPresentationMode("map-1", storageWith(JSON.stringify({ "map-1": "sunburst", "map-2": "sphere" })))).toBe("sunburst");
+    expect(readGoalPresentationMode("map-4", storageWith(JSON.stringify({ "map-1": "sunburst", "map-2": "sphere", "map-3": "mesh" })))).toBe("sphere");
+    expect(readGoalPresentationMode("map-1", storageWith(JSON.stringify({ "map-1": "sunburst", "map-2": "sphere", "map-3": "mesh" })))).toBe("sunburst");
+    expect(readGoalPresentationMode("map-3", storageWith(JSON.stringify({ "map-1": "sunburst", "map-2": "sphere", "map-3": "mesh" })))).toBe("mesh");
   });
 
   it("writes presentation mode without mixing goal map preferences", () => {
     const storage = storageWith(JSON.stringify({ "map-1": "sunburst" }));
 
     writeGoalPresentationMode("map-2", "sphere", storage);
-    writeGoalPresentationMode("map-3", "sunburst", storage);
+    writeGoalPresentationMode("map-3", "mesh", storage);
 
     expect(storage.setItem).toHaveBeenLastCalledWith(
       GOAL_PRESENTATION_STORAGE_KEY,
-      JSON.stringify({ "map-1": "sunburst", "map-2": "sphere", "map-3": "sunburst" })
+      JSON.stringify({ "map-1": "sunburst", "map-2": "sphere", "map-3": "mesh" })
     );
     expect(readGoalPresentationMode("map-1", storage)).toBe("sunburst");
     expect(readGoalPresentationMode("map-2", storage)).toBe("sphere");
-    expect(readGoalPresentationMode("map-3", storage)).toBe("sunburst");
+    expect(readGoalPresentationMode("map-3", storage)).toBe("mesh");
   });
 
   it("lays out top-level goals evenly around the full orbit from twelve o'clock", () => {

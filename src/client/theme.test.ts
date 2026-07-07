@@ -105,14 +105,16 @@ describe("theme styles", () => {
     expect(darkRoot).toContain("--accent-soft: rgba(107, 211, 193, 0.14);");
     expect(darkRoot).toContain("--dream-bg: #090f1c;");
     expect(darkRoot).toContain("--core-bloom: rgba(107, 211, 193, 0.32);");
+    expect(darkRoot).toContain("--map-pane-background:");
+    expect(darkRoot).toContain("linear-gradient(180deg, #0d1727 0%, #09111f 58%, #070d18 100%);");
   });
 
-  it("turns off decorative goal map background layers in dark mode", () => {
+  it("keeps the dark goal map panel soft and static", () => {
     const styles = clientStyles();
 
-    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.map-pane\s*{[\s\S]*background:\s*var\(--bg\);[\s\S]*box-shadow:\s*0 22px 44px -30px rgba\(0,\s*0,\s*0,\s*0\.72\);[\s\S]*backdrop-filter:\s*none;/);
-    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.map-pane::before\s*{\s*opacity:\s*0;\s*}/);
-    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.map-canvas::after\s*{[\s\S]*opacity:\s*0;/);
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.map-pane\s*{[\s\S]*border-color:\s*rgba\(58,\s*77,\s*104,\s*0\.58\);[\s\S]*background:\s*var\(--map-pane-background\);[\s\S]*box-shadow:\s*[\s\S]*0 24px 52px -34px rgba\(0,\s*0,\s*0,\s*0\.84\),[\s\S]*backdrop-filter:\s*none;/);
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.map-pane::before\s*{\s*opacity:\s*0\.34;\s*}/);
+    expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.map-canvas::after\s*{[\s\S]*mix-blend-mode:\s*soft-light;[\s\S]*opacity:\s*0\.012;/);
     expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.starfield\s*{\s*opacity:\s*0;\s*animation:\s*none;\s*}/);
     expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.starfield::before\s*{\s*animation:\s*none;\s*}/);
     expect(styles).toMatch(/:root\[data-theme="dark"\]\s+\.sunburst-sky-wash,\s*\n:root\[data-theme="dark"\]\s+\.sunburst-background-ring\s*{\s*opacity:\s*0;\s*}/);
@@ -198,6 +200,7 @@ describe("visual motion contracts", () => {
       "--nebula-cyan",
       "--nebula-violet",
       "--nebula-beam",
+      "--map-pane-background",
       "--map-pane-atmosphere",
       "--map-pane-atmosphere-opacity",
       "--starfield-opacity",
