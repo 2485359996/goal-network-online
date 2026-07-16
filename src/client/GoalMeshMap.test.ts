@@ -5,6 +5,8 @@ import {
   applyGoalMeshEntranceFrame,
   applyGoalMeshShellProjection,
   buildGoalMeshGraph,
+  captureGoalMeshPositions,
+  coordinatedSeedsFromGraph,
   diffGoalMeshTopology,
   goalMeshCameraPoseForNode,
   goalMeshEntranceEase,
@@ -24,7 +26,9 @@ import {
   normalizeEngineLinks,
   placeGoalMeshNodesAtSeeds,
   planGoalMeshEntrance,
+  planGoalMeshRebalance,
   prepareGoalMeshEntrance,
+  prepareGoalMeshRebalance,
   projectGoalMeshNodeToShell,
   reconcileEngineGraph,
   releaseGoalMeshEntrancePins,
@@ -806,6 +810,65 @@ describe("goal mesh entrance bloom", () => {
     expect(goalMeshEntranceRevealScale(0)).toBeCloseTo(0.08, 5);
     expect(goalMeshEntranceRevealScale(1)).toBeCloseTo(1, 5);
     expect(lerpGoalMeshVector({ x: 0, y: 0, z: 0 }, { x: 10, y: 20, z: 30 }, 0.5)).toEqual({ x: 5, y: 10, z: 15 });
+  });
+
+  it("exposes flightMs on entrance plans for shared frame interpolation", () => {
+    const graph = buildGoalMeshGraph([goal({ id: "career" })], {}, {}, {}, { id: "map-1", title: "网" });
+    const seeds = coordinatedSeedsFromGraph(graph);
+    const plan = planGoalMeshEntrance(graph.nodes, seeds);
+    expect(plan.flightMs).toBeGreaterThan(0);
+  });
+});
+
+describe("goal mesh coordinated rebalance", () => {
+  it("slides existing nodes from old coordinates to the new coordinated seeds", () => {
+    const before = buildGoalMeshGraph(
+      [goal({ id: "parent", children: [goal({ id: "child-a" })] })],
+      {},
+      {},
+      {},
+      { id: "map-1", title: "网" }
+    );
+    const after = buildGoalMeshGraph(
+      [goal({ id: "parent", children: [goal({ id: "child-a" }), goal({ id: "child-b" })] })],
+      {},
+      {},
+      {},
+      { id: "map-1", title: "网" }
+    );
+
+    const fromById = captureGoalMeshPositions(before.nodes);
+    const toById = coordinatedSeedsFromGraph(after);
+    const plan = planGoalMeshRebalance(after.nodes, fromById, toById, ["child-b"]);
+
+    const childA = plan.items.find((item) => item.id === "child-a");
+    const childB = plan.items.find((item) => item.id === "child-b");
+    expect(childA?.from).toEqual(fromById.get("child-a"));
+    expect(childA?.to).toEqual(toById.get("child-a"));
+    expect(childB?.from).toEqual({ x: 0, y: 0, z: 0 });
+    expect(childB?.to).toEqual(toById.get("child-b"));
+    expect(plan.flightMs).toBeLessThan(planGoalMeshEntrance(after.nodes, toById).flightMs);
+  });
+
+  it("moves sibling seeds when a new child joins so the branch stays evenly spaced", () => {
+    const oneChild = seedGoalMeshTreePositions([goal({ id: "parent", children: [goal({ id: "child-a" })] })]);
+    const twoChildren = seedGoalMeshTreePositions([
+      goal({ id: "parent", children: [goal({ id: "child-a" }), goal({ id: "child-b" })] })
+    ]);
+    const before = oneChild.get("child-a")!;
+    const after = twoChildren.get("child-a")!;
+    expect(Math.hypot(after.x - before.x, after.y - before.y, after.z - before.z)).toBeGreaterThan(1e-6);
+  });
+
+  it("pins nodes at the rebalance start pose before the slide", () => {
+    const graph = buildGoalMeshGraph([goal({ id: "career" })], {}, {}, {}, { id: "map-1", title: "网" });
+    const fromById = new Map([
+      ["career", { x: 10, y: 20, z: 30 }],
+      ["map-1", { x: 0, y: 0, z: 0 }]
+    ]);
+    prepareGoalMeshRebalance(graph.nodes, fromById);
+    const career = graph.nodes.find((node) => node.id === "career");
+    expect(career).toMatchObject({ x: 10, y: 20, z: 30, fx: 10, fy: 20, fz: 30 });
   });
 });
 

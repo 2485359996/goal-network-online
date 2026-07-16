@@ -150,6 +150,12 @@ const goalMeshEntranceCenterLeadMs = 160;
 /** 入场：飞到位后短暂保留固定坐标，再交给力模拟微调。 */
 const goalMeshEntranceSettleHoldMs = 40;
 
+/** 结构变化后的协调重排：比入场更短，整图一起滑到新落点。 */
+const goalMeshRebalanceDepthStaggerMs = 42;
+const goalMeshRebalanceSiblingStaggerMs = 18;
+const goalMeshRebalanceFlightMs = 520;
+const goalMeshRebalanceSettleHoldMs = 36;
+
 const statusLightColors: Record<GoalStatus, string> = {
   active: "#5eead4",
   paused: "#fbbf24",
@@ -782,6 +788,7 @@ export type GoalMeshEntrancePlanItem = {
 export type GoalMeshEntrancePlan = {
   items: GoalMeshEntrancePlanItem[];
   totalMs: number;
+  flightMs: number;
 };
 
 /** 天体绽放缓动：前段快冲出中心，尾段柔和落位。 */
@@ -858,7 +865,101 @@ export function planGoalMeshEntrance(nodes: GoalMeshNode[], seeds?: Map<string, 
 
   const totalMs =
     items.reduce((max, item) => Math.max(max, item.delayMs + goalMeshEntranceFlightMs), 0) + goalMeshEntranceSettleHoldMs;
-  return { items, totalMs };
+  return { items, totalMs, flightMs: goalMeshEntranceFlightMs };
+}
+
+/** 从当前引擎节点快照坐标。 */
+export function captureGoalMeshPositions(nodes: Iterable<Pick<GoalMeshNode, "id" | "x" | "y" | "z">>): Map<string, GoalMeshVector> {
+  const positions = new Map<string, GoalMeshVector>();
+  for (const node of nodes) {
+    positions.set(node.id, {
+      x: finiteCoordinate(node.x) ? node.x : 0,
+      y: finiteCoordinate(node.y) ? node.y : 0,
+      z: finiteCoordinate(node.z) ? node.z : 0
+    });
+  }
+  return positions;
+}
+
+/** 读取建图时写入的协调种子坐标（同心壳 + 分地）。 */
+export function coordinatedSeedsFromGraph(graph: Pick<GoalMeshGraph, "nodes">): Map<string, GoalMeshVector> {
+  return captureGoalMeshPositions(graph.nodes);
+}
+
+/**
+ * 结构变化后的全量协调重排时间表：
+ * 已有节点从旧坐标滑到新种子；新增节点从中心飞入所属壳位。
+ */
+export function planGoalMeshRebalance(
+  nodes: GoalMeshNode[],
+  fromById: Map<string, GoalMeshVector>,
+  toById: Map<string, GoalMeshVector>,
+  addedNodeIds: Iterable<string> = []
+): GoalMeshEntrancePlan {
+  const added = new Set(addedNodeIds);
+  const center = nodes.find((node) => node.kind === "map");
+  const goals = nodes
+    .filter((node) => node.kind !== "map")
+    .slice()
+    .sort((a, b) => {
+      const seedA = toById.get(a.id) ?? goalMeshEntranceSeed(a);
+      const seedB = toById.get(b.id) ?? goalMeshEntranceSeed(b);
+      if (a.depth !== b.depth) return a.depth - b.depth;
+      const angleA = Math.atan2(seedA.z, seedA.x);
+      const angleB = Math.atan2(seedB.z, seedB.x);
+      if (angleA !== angleB) return angleA - angleB;
+      return a.id.localeCompare(b.id);
+    });
+
+  const items: GoalMeshEntrancePlanItem[] = [];
+  if (center) {
+    items.push({
+      id: center.id,
+      depth: 0,
+      delayMs: 0,
+      from: { x: 0, y: 0, z: 0 },
+      to: { x: 0, y: 0, z: 0 }
+    });
+  }
+
+  let siblingIndexInDepth = 0;
+  let lastDepth = -1;
+  for (const node of goals) {
+    if (node.depth !== lastDepth) {
+      siblingIndexInDepth = 0;
+      lastDepth = node.depth;
+    }
+    const to = toById.get(node.id) ?? goalMeshEntranceSeed(node);
+    const from = added.has(node.id) ? { x: 0, y: 0, z: 0 } : (fromById.get(node.id) ?? to);
+    items.push({
+      id: node.id,
+      depth: node.depth,
+      delayMs: Math.max(0, node.depth - 1) * goalMeshRebalanceDepthStaggerMs + siblingIndexInDepth * goalMeshRebalanceSiblingStaggerMs,
+      from,
+      to
+    });
+    siblingIndexInDepth += 1;
+  }
+
+  const totalMs =
+    items.reduce((max, item) => Math.max(max, item.delayMs + goalMeshRebalanceFlightMs), 0) + goalMeshRebalanceSettleHoldMs;
+  return { items, totalMs, flightMs: goalMeshRebalanceFlightMs };
+}
+
+/** 把节点放到重排起点并钉住，供滑向协调种子。 */
+export function prepareGoalMeshRebalance(nodes: GoalMeshNode[], fromById: Map<string, GoalMeshVector>) {
+  for (const node of nodes) {
+    const from = fromById.get(node.id) ?? { x: 0, y: 0, z: 0 };
+    node.x = from.x;
+    node.y = from.y;
+    node.z = from.z;
+    node.vx = 0;
+    node.vy = 0;
+    node.vz = 0;
+    node.fx = from.x;
+    node.fy = from.y;
+    node.fz = from.z;
+  }
 }
 
 /** 把节点钉在中心，供入场动画从原点展开；返回各节点目标种子坐标。 */
@@ -928,6 +1029,7 @@ export function applyGoalMeshEntranceFrame(
   elapsedMs: number
 ): { progressById: Map<string, number>; done: boolean } {
   const progressById = new Map<string, number>();
+  const flightMs = plan.flightMs > 0 ? plan.flightMs : goalMeshEntranceFlightMs;
   let done = true;
   for (const item of plan.items) {
     const node = nodesById.get(item.id);
@@ -944,7 +1046,7 @@ export function applyGoalMeshEntranceFrame(
       done = false;
       continue;
     }
-    const raw = local / goalMeshEntranceFlightMs;
+    const raw = local / flightMs;
     const eased = goalMeshEntranceEase(raw);
     progressById.set(item.id, clamp(eased, 0, 1));
     if (raw < 1) done = false;
@@ -1513,6 +1615,92 @@ export function GoalMeshMap({
     [applyEntranceRevealScales, cancelEntranceAnimation]
   );
 
+  /** 结构变化后全量协调重排：已有节点滑到新种子，新增节点从中心飞入。 */
+  const playRebalanceAnimation = useCallback(
+    (
+      instance: ForceGraph3DInstance<GoalMeshNode, GoalMeshLink>,
+      engineNodes: GoalMeshNode[],
+      fromById: Map<string, GoalMeshVector>,
+      toById: Map<string, GoalMeshVector>,
+      addedNodeIds: string[]
+    ) => {
+      cancelEntranceAnimation();
+
+      const targets = new Map<string, GoalMeshVector>();
+      for (const node of engineNodes) {
+        if (node.kind === "map") {
+          targets.set(node.id, { x: 0, y: 0, z: 0 });
+          continue;
+        }
+        const seed = toById.get(node.id) ?? { x: 0, y: 0, z: 0 };
+        targets.set(node.id, projectGoalMeshNodeToShell({ ...node, x: seed.x, y: seed.y, z: seed.z }));
+      }
+
+      const fromForAnim = new Map(fromById);
+      for (const node of engineNodes) {
+        if (node.kind === "map") fromForAnim.set(node.id, { x: 0, y: 0, z: 0 });
+      }
+      for (const id of addedNodeIds) {
+        fromForAnim.set(id, { x: 0, y: 0, z: 0 });
+      }
+
+      if (reducedMotionRef.current || engineNodes.length === 0) {
+        placeGoalMeshNodesAtSeeds(engineNodes, targets);
+        for (const node of engineNodes) {
+          node.fx = finiteCoordinate(node.x) ? node.x : 0;
+          node.fy = finiteCoordinate(node.y) ? node.y : 0;
+          node.fz = finiteCoordinate(node.z) ? node.z : 0;
+          node.vx = 0;
+          node.vy = 0;
+          node.vz = 0;
+        }
+        instance.warmupTicks(0).cooldownTicks(0);
+        window.setTimeout(() => safeZoomToFit(instance, graphDataRef.current, 0, 68), 40);
+        return;
+      }
+
+      prepareGoalMeshRebalance(engineNodes, fromForAnim);
+      const plan = planGoalMeshRebalance(engineNodes, fromForAnim, targets, addedNodeIds);
+      entranceActiveRef.current = true;
+      instance.warmupTicks(0).cooldownTicks(Number.POSITIVE_INFINITY);
+      for (const handle of nodeHandleByIdRef.current.values()) handle.group.scale.setScalar(1);
+
+      try {
+        const overview = goalMeshOverviewCameraPose(targets.values());
+        instance.cameraPosition(overview.position, overview.lookAt, 420);
+      } catch {
+        // camera may not be ready yet
+      }
+
+      const startedAt = performance.now();
+      const tick = (now: number) => {
+        if (!entranceActiveRef.current || graphRef.current !== instance) return;
+        const elapsed = now - startedAt;
+        const { done } = applyGoalMeshEntranceFrame(engineNodeByIdRef.current, plan, elapsed);
+        if (!done) {
+          entranceFrameRef.current = window.requestAnimationFrame(tick);
+          return;
+        }
+
+        entranceFrameRef.current = null;
+        entranceActiveRef.current = false;
+        applyGoalMeshShellProjection(engineNodes);
+        for (const node of engineNodes) {
+          node.fx = finiteCoordinate(node.x) ? node.x : 0;
+          node.fy = finiteCoordinate(node.y) ? node.y : 0;
+          node.fz = finiteCoordinate(node.z) ? node.z : 0;
+          node.vx = 0;
+          node.vy = 0;
+          node.vz = 0;
+        }
+        instance.warmupTicks(0).cooldownTicks(0);
+        safeZoomToFit(instance, graphDataRef.current, 560, 72);
+      };
+      entranceFrameRef.current = window.requestAnimationFrame(tick);
+    },
+    [cancelEntranceAnimation]
+  );
+
   const focusSelectedMeshNode = useCallback(() => {
     if (entranceActiveRef.current) return;
     const instance = graphRef.current;
@@ -1753,18 +1941,13 @@ export function GoalMeshMap({
     const diff = diffGoalMeshTopology(engineGraphRef.current, graphData);
 
     if (diff.changed) {
-      // 拓扑变化:复用既有节点对象(保留演化坐标与 Object3D),只有新节点从种子位置进入。
-      // 增量变化用 warmupTicks(0) 让既有节点从当前位置平滑演化;整图替换(如切换目标地图)
-      // 没有可保留的位置,重新播放从中心向外绽放的入场。
+      // 拓扑变化：复用节点对象身份；坐标按「同心壳 + 分地」全量协调重排。
+      // 整图替换走中心绽放入场；增删/改父子走从旧位滑到新位的重排动画。
       const fullReplacement = diff.addedNodeIds.length === graphData.nodes.length;
       cancelEntranceAnimation();
+      const previousPositions = captureGoalMeshPositions(engineNodeByIdRef.current.values());
       const { engineGraph, nodeById } = reconcileEngineGraph(engineNodeByIdRef.current, graphData);
-      const entranceSeeds = fullReplacement ? prepareGoalMeshEntrance(engineGraph.nodes) : null;
-      if (!fullReplacement) {
-        // 入场结束会钉住坐标；增量增删时先松钉，让力模拟微调层级。
-        releaseGoalMeshEntrancePins(engineGraph.nodes);
-        instance.warmupTicks(0).cooldownTicks(120);
-      }
+      const coordinatedSeeds = coordinatedSeedsFromGraph(graphData);
       engineNodeByIdRef.current = nodeById;
       instance.graphData(engineGraph);
       for (const id of Array.from(nodeHandleByIdRef.current.keys())) {
@@ -1772,20 +1955,17 @@ export function GoalMeshMap({
       }
       applyLinkStyles(instance);
       applyAllNodeVisuals(instance);
-      if (fullReplacement && entranceSeeds) {
+      if (fullReplacement) {
+        const entranceSeeds = prepareGoalMeshEntrance(engineGraph.nodes);
         window.setTimeout(() => {
           if (graphRef.current !== instance) return;
           playEntranceAnimation(instance, engineGraph.nodes, entranceSeeds);
         }, 32);
-      } else if (diff.nodeIdsChanged) {
+      } else {
         window.setTimeout(() => {
-          if (entranceActiveRef.current) return;
-          const selectedNode =
-            engineNodeByIdRef.current.get(selectedIdRef.current) ??
-            graphDataRef.current.nodes.find((node) => node.id === selectedIdRef.current);
-          if (selectedNode) safeFocusNode(instance, selectedNode, graphDataRef.current, reducedMotionRef.current);
-          else safeZoomToFit(instance, graphDataRef.current, reducedMotionRef.current ? 0 : 520, 68);
-        }, 80);
+          if (graphRef.current !== instance) return;
+          playRebalanceAnimation(instance, engineGraph.nodes, previousPositions, coordinatedSeeds, diff.addedNodeIds);
+        }, 32);
       }
     } else {
       // 仅属性变化(编辑、预览滑块、reload 回流):就地同步数据字段并刷新视觉,不重置力模拟、不移动相机。
@@ -1798,7 +1978,15 @@ export function GoalMeshMap({
     }
 
     engineGraphRef.current = graphData;
-  }, [graphData, applyAllNodeVisuals, applyLinkColorsOnly, applyLinkStyles, cancelEntranceAnimation, playEntranceAnimation]);
+  }, [
+    graphData,
+    applyAllNodeVisuals,
+    applyLinkColorsOnly,
+    applyLinkStyles,
+    cancelEntranceAnimation,
+    playEntranceAnimation,
+    playRebalanceAnimation
+  ]);
 
   useEffect(() => {
     applyAllNodeVisuals();
