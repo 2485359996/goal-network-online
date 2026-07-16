@@ -683,6 +683,8 @@ export function GoalApp() {
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftCacheRef = useRef<DraftCache>({});
   const goalsRequestIdRef = useRef(0);
+  // 乐观写之后短暂忽略自身触发的 Realtime 事件(写后 refetch 已是权威数据),避免双重全量拉取。
+  const suppressRealtimeUntilRef = useRef(0);
   const noticeTimeoutRef = useRef<number | null>(null);
   const bannerMotion = useBannerMotion();
 
@@ -815,9 +817,12 @@ export function GoalApp() {
     const supabase = createBrowserSupabaseClient();
     if (!supabase) return;
 
-    // 批量写入（如 AI 生成子目标）会在 5 张表上连发十余条事件；合并成一次全量拉取。
+    // 批量写入（如 AI 生成子目标）会在多张表上连发十余条事件；合并成一次全量拉取。
+    // 本会话乐观写成功后 runOptimisticWrite 已发起权威 refetch，短窗口内跳过自身触发的
+    // Realtime 回环，避免同一次编辑拉两遍全量 goals。
     let reloadTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleReload = () => {
+      if (Date.now() < suppressRealtimeUntilRef.current) return;
       if (reloadTimer !== null) clearTimeout(reloadTimer);
       reloadTimer = setTimeout(() => {
         reloadTimer = null;
@@ -830,8 +835,6 @@ export function GoalApp() {
       .on("postgres_changes", { event: "*", schema: "public", table: "goal_maps", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
       .on("postgres_changes", { event: "*", schema: "public", table: "goals", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
       .on("postgres_changes", { event: "*", schema: "public", table: "goal_relations", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
-      .on("postgres_changes", { event: "*", schema: "public", table: "weekly_actions", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
-      .on("postgres_changes", { event: "*", schema: "public", table: "records", filter: `workspace_id=eq.${workspaceId}` }, scheduleReload)
       .subscribe((status) => {
         if (status === "SUBSCRIBED") setError((current) => (current === "Realtime disconnected" ? "" : current));
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setError("Realtime disconnected");
@@ -1077,6 +1080,7 @@ export function GoalApp() {
     setError("");
     try {
       await work();
+      suppressRealtimeUntilRef.current = Date.now() + 2000;
       refreshGoalsInBackground();
       if (!options.silent) showNotice(message);
       return true;
@@ -1087,6 +1091,7 @@ export function GoalApp() {
         enterAuthRequiredState();
       } else {
         rollback();
+        suppressRealtimeUntilRef.current = Date.now() + 2000;
         refreshGoalsInBackground();
         setError(nextError instanceof Error ? nextError.message : "保存失败");
       }
@@ -1876,6 +1881,7 @@ export function GoalApp() {
                 selectedId={selectedId}
                 centerId={activeGoalMap.id}
                 centerTitle={goalMapCenterTitle(activeGoalMap)}
+                theme={appliedTheme}
                 importanceOverrides={importancePreview}
                 progressOverrides={progressPreview}
                 colorOverrides={colorPreview}
@@ -3789,27 +3795,6 @@ const GoalMap = React.memo(function GoalMap({
           <stop offset="52%" stopColor="rgba(255, 255, 255, 0.34)" />
           <stop offset="100%" stopColor="rgba(255, 255, 255, 0)" />
         </linearGradient>
-        <filter id="goalscape-hub-glow" x="-80%" y="-80%" width="260%" height="260%">
-          <feGaussianBlur stdDeviation="16" result="blurOuter" />
-          <feGaussianBlur stdDeviation="6" result="blurInner" />
-          <feColorMatrix
-            in="blurOuter"
-            type="matrix"
-            values="0 0 0 0 0.96  0 0 0 0 0.62  0 0 0 0 0.15  0 0 0 0.36 0"
-            result="glowDeep"
-          />
-          <feColorMatrix
-            in="blurInner"
-            type="matrix"
-            values="0 0 0 0 0.98  0 0 0 0 0.68  0 0 0 0 0.12  0 0 0 0.72 0"
-            result="glowIntense"
-          />
-          <feMerge>
-            <feMergeNode in="glowDeep" />
-            <feMergeNode in="glowIntense" />
-            <feMergeNode in="SourceGraphic" />
-          </feMerge>
-        </filter>
         <linearGradient id="goalscape-hub-glass" x1="0%" y1="0%" x2="100%" y2="100%">
           <stop offset="0%" stopColor="rgba(250, 250, 249, 0.94)" />
           <stop offset="35%" stopColor="rgba(241, 245, 249, 0.90)" />
@@ -4012,27 +3997,9 @@ const GoalMap = React.memo(function GoalMap({
 
             <g className="goalscape-center-visual">
               <path
-                className="goalscape-center-glow"
-                d={goalscapeBlobPath(
-                  goalscapeCenter.x,
-                  goalscapeCenter.y,
-                  goalscapeCenterPearlSize.width + 18,
-                  goalscapeCenterPearlSize.height + 14,
-                  goalscapeCenterPearlSize.variant
-                )}
-                fill="none"
-                stroke="var(--center-glow, #fff7ed)"
-                strokeWidth="5"
-                filter="url(#goalscape-hub-glow)"
-                opacity="0.82"
-              />
-
-              <path
                 className="goalscape-center-glass"
                 d={centerPearlPath}
                 fill="url(#goalscape-center-pearl-fill)"
-                stroke="rgba(255, 255, 255, 0.58)"
-                strokeWidth="1.6"
               />
 
               <path
@@ -4050,38 +4017,6 @@ const GoalMap = React.memo(function GoalMap({
                 ry="18"
                 fill="rgba(255, 255, 255, 0.52)"
                 transform={`rotate(-18 ${goalscapeCenter.x - 22} ${goalscapeCenter.y - 28})`}
-                pointerEvents="none"
-              />
-              <path
-                className="goalscape-center-shine-edge"
-                d={`M ${goalscapeCenter.x - 48} ${goalscapeCenter.y + 34} A 52 52 0 0 0 ${goalscapeCenter.x + 48} ${goalscapeCenter.y + 34} A 44 44 0 0 1 ${goalscapeCenter.x - 48} ${goalscapeCenter.y + 34} Z`}
-                fill="rgba(255, 255, 255, 0.12)"
-                pointerEvents="none"
-              />
-              <ellipse
-                className="goalscape-center-shine-env"
-                cx={goalscapeCenter.x + 24}
-                cy={goalscapeCenter.y + 18}
-                rx="16"
-                ry="10"
-                fill={centerPearlTint.tertiary}
-                opacity="0.22"
-                transform={`rotate(24 ${goalscapeCenter.x + 24} ${goalscapeCenter.y + 18})`}
-                pointerEvents="none"
-              />
-
-              <path
-                className="goalscape-center-rim"
-                d={goalscapeBlobPath(
-                  goalscapeCenter.x,
-                  goalscapeCenter.y,
-                  goalscapeCenterPearlSize.width - 14,
-                  goalscapeCenterPearlSize.height - 12,
-                  goalscapeCenterPearlSize.variant + 2
-                )}
-                fill="none"
-                stroke="rgba(255, 255, 255, 0.52)"
-                strokeWidth="1.2"
                 pointerEvents="none"
               />
 
