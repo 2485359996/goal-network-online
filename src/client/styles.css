@@ -1661,6 +1661,7 @@ h3 {
 
 .goal-mesh-map {
   --mesh-bg: #edf5f0;
+  --mesh-sheen: rgba(255, 255, 255, 0.16);
   --mesh-halo-primary: rgba(20, 116, 111, 0.16);
   --mesh-halo-secondary: rgba(47, 111, 136, 0.12);
   --mesh-halo-warm: rgba(198, 129, 45, 0.08);
@@ -1688,23 +1689,24 @@ h3 {
     radial-gradient(circle at 50% 45%, var(--mesh-halo-primary), transparent 28%),
     radial-gradient(circle at 19% 22%, var(--mesh-halo-secondary), transparent 30%),
     radial-gradient(circle at 82% 76%, var(--mesh-halo-warm), transparent 34%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.16), transparent 19%, var(--mesh-vignette) 100%),
+    linear-gradient(180deg, var(--mesh-sheen), transparent 19%, var(--mesh-vignette) 100%),
     var(--mesh-bg);
 }
 
 :root[data-theme="dark"] .goal-mesh-map {
-  --mesh-bg: #071018;
-  --mesh-halo-primary: rgba(94, 234, 212, 0.12);
-  --mesh-halo-secondary: rgba(130, 204, 235, 0.11);
-  --mesh-halo-warm: rgba(231, 181, 103, 0.075);
-  --mesh-grid-strong: rgba(159, 184, 179, 0.08);
-  --mesh-grid-soft: rgba(159, 184, 179, 0.035);
+  --mesh-bg: #0f2040;
+  --mesh-sheen: rgba(94, 234, 212, 0.05);
+  --mesh-halo-primary: rgba(64, 210, 190, 0.2);
+  --mesh-halo-secondary: rgba(96, 165, 250, 0.16);
+  --mesh-halo-warm: rgba(231, 181, 103, 0.08);
+  --mesh-grid-strong: rgba(125, 176, 230, 0.14);
+  --mesh-grid-soft: rgba(125, 176, 230, 0.06);
   --mesh-scanline: rgba(94, 234, 212, 0.028);
-  --mesh-vignette: rgba(0, 0, 0, 0.2);
-  --mesh-control-bg: rgba(7, 16, 24, 0.68);
+  --mesh-vignette: rgba(2, 8, 26, 0.3);
+  --mesh-control-bg: rgba(12, 24, 46, 0.7);
   --mesh-control-color: rgba(231, 255, 250, 0.86);
   --mesh-control-hover-bg: rgba(94, 234, 212, 0.14);
-  --mesh-label-bg: rgba(8, 17, 22, 0.84);
+  --mesh-label-bg: rgba(11, 22, 43, 0.86);
   --mesh-label-ink: #f7fffd;
   --mesh-label-muted: rgba(206, 223, 220, 0.72);
 }
@@ -1877,6 +1879,45 @@ h3 {
   z-index: 3;
   transform: translate(-50%, -50%);
   color: var(--muted);
+}
+
+.goal-mesh-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  pointer-events: none;
+}
+
+.goal-mesh-loading-orb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 34%, rgba(94, 234, 212, 0.95), rgba(94, 234, 212, 0.28) 62%, transparent 78%);
+  box-shadow: 0 0 22px 6px rgba(94, 234, 212, 0.22);
+  animation: goal-mesh-loading-breathe 4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.goal-mesh-loading-text {
+  color: var(--mesh-label-muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+@keyframes goal-mesh-loading-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 1;
+  }
 }
 
 .empty-map-text {
@@ -4439,6 +4480,7 @@ textarea::placeholder {
   .ai-thinking-message::after,
   .ai-thinking-orbit,
   .ai-thinking-orbit i,
+  .goal-mesh-loading-orb,
   .sunburst-segment,
   .sunburst-center-aura {
     animation: none !important;
@@ -4814,17 +4856,8 @@ textarea::placeholder {
   outline: none;
 }
 
-.goalscape-center-glow {
-  transition: opacity 220ms ease, transform 220ms ease;
-}
-
 .goalscape-center-glass {
-  transition: stroke-width 220ms ease, filter 220ms ease;
-  filter: drop-shadow(0 10px 18px rgba(58, 70, 128, 0.16));
-}
-
-.goalscape-center-rim {
-  pointer-events: none;
+  transition: filter 220ms ease;
 }
 
 .goalscape-center-shine-primary {
@@ -4832,37 +4865,15 @@ textarea::placeholder {
   pointer-events: none;
 }
 
-.goalscape-center-shine-edge,
-.goalscape-center-shine-env {
-  pointer-events: none;
-}
-
 /* Hover effects */
 .goalscape-center:hover .goalscape-center-glass,
 .goalscape-center:focus-visible .goalscape-center-glass {
-  stroke: rgba(255, 255, 255, 0.82);
-  stroke-width: 2.2;
-  filter:
-    drop-shadow(0 10px 18px rgba(58, 70, 128, 0.16))
-    drop-shadow(0 4px 14px rgba(255, 247, 237, 0.35));
-}
-
-.goalscape-center:hover .goalscape-center-glow,
-.goalscape-center:focus-visible .goalscape-center-glow {
-  opacity: 1;
+  filter: drop-shadow(0 0 14px rgba(255, 247, 237, 0.35));
 }
 
 /* Selected/Active states */
 .goalscape-center.active .goalscape-center-glass {
-  stroke: rgba(255, 255, 255, 0.94);
-  stroke-width: 2.6;
-  filter:
-    drop-shadow(0 12px 22px rgba(58, 70, 128, 0.2))
-    drop-shadow(0 8px 24px color-mix(in srgb, var(--center-glow, #fff7ed) 55%, transparent));
-}
-
-.goalscape-center.active .goalscape-center-glow {
-  opacity: 1;
+  filter: drop-shadow(0 0 18px color-mix(in srgb, var(--center-glow, #fff7ed) 55%, transparent));
 }
 
 .goalscape-center-title {
