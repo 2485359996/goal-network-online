@@ -150,6 +150,12 @@ const goalMeshEntranceCenterLeadMs = 160;
 /** 入场：飞到位后短暂保留固定坐标，再交给力模拟微调。 */
 const goalMeshEntranceSettleHoldMs = 40;
 
+/** 结构变化后的协调重排：比入场更短，整图一起滑到新落点。 */
+const goalMeshRebalanceDepthStaggerMs = 42;
+const goalMeshRebalanceSiblingStaggerMs = 18;
+const goalMeshRebalanceFlightMs = 520;
+const goalMeshRebalanceSettleHoldMs = 36;
+
 const statusLightColors: Record<GoalStatus, string> = {
   active: "#5eead4",
   paused: "#fbbf24",
@@ -285,12 +291,17 @@ function graphNodeBranches(goals: GoalNode[]) {
   return branches;
 }
 
-const goalMeshTopLevelSeedRadius = 112;
-const goalMeshChildOrbitBaseRadius = 58;
-const goalMeshChildOrbitRadiusPerSibling = 4.5;
+/** 一级目标球壳半径（地图中心为球心）。 */
+const goalMeshShellRadiusDepth1 = 112;
+/** 相邻层级球壳间距；需大于典型星体直径，避免壳粘连。 */
+export const goalMeshShellGap = 72;
 
 function goalIdHash(goalId: string) {
   return Array.from(goalId).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+}
+
+function compareGoalId(a: string, b: string) {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function outwardUnitFromParent(parent: GoalMeshVector): GoalMeshVector {
@@ -317,6 +328,91 @@ function orthonormalFrame(outward: GoalMeshVector): { tangent: GoalMeshVector; b
   return { tangent, binormal };
 }
 
+/** depth → 同心球壳半径；地图中心 depth 0 为 0。 */
+export function goalMeshShellRadiusForDepth(depth: number): number {
+  const safe = Math.max(0, Math.round(depth));
+  if (safe <= 0) return 0;
+  return goalMeshShellRadiusDepth1 + (safe - 1) * goalMeshShellGap;
+}
+
+/** 将坐标投影到节点 depth 对应的球壳上（保持方向，纠正半径）。 */
+export function projectGoalMeshNodeToShell(node: Pick<GoalMeshNode, "x" | "y" | "z" | "depth" | "kind" | "id">): GoalMeshVector {
+  if (node.kind === "map" || node.depth <= 0) return { x: 0, y: 0, z: 0 };
+  const targetR = goalMeshShellRadiusForDepth(node.depth);
+  const unit = normalizedVector({ x: node.x ?? 0, y: node.y ?? 0, z: node.z ?? 0 });
+  if (!unit) {
+    const fallback = goalMeshFibonacciSpherePoint(goalIdHash(node.id) % 17, 17);
+    return { x: fallback.x * targetR, y: fallback.y * targetR, z: fallback.z * targetR };
+  }
+  return { x: unit.x * targetR, y: unit.y * targetR, z: unit.z * targetR };
+}
+
+/** 就地把节点钉回各自球壳，并去掉径向速度（只保留切向避碰分量）。 */
+export function applyGoalMeshShellProjection(nodes: Iterable<GoalMeshNode>) {
+  for (const node of nodes) {
+    const projected = projectGoalMeshNodeToShell(node);
+    node.x = projected.x;
+    node.y = projected.y;
+    node.z = projected.z;
+    if (node.kind === "map" || node.depth <= 0) {
+      node.vx = 0;
+      node.vy = 0;
+      node.vz = 0;
+      continue;
+    }
+    const unit = normalizedVector(projected);
+    if (!unit || !finiteCoordinate(node.vx) || !finiteCoordinate(node.vy) || !finiteCoordinate(node.vz)) continue;
+    const radialSpeed = node.vx * unit.x + node.vy * unit.y + node.vz * unit.z;
+    node.vx -= radialSpeed * unit.x;
+    node.vy -= radialSpeed * unit.y;
+    node.vz -= radialSpeed * unit.z;
+  }
+}
+
+type ShellForce = {
+  (alpha: number): void;
+  initialize?: (nodes: GoalMeshNode[]) => void;
+};
+
+/** 径向弹簧：把未钉住的节点拉回 depth 对应球壳，允许切向滑动避碰。 */
+export function createGoalMeshShellForce(): ShellForce {
+  let nodes: GoalMeshNode[] = [];
+  const force = ((alpha: number) => {
+    for (const node of nodes) {
+      if (node.kind === "map" || node.depth <= 0) continue;
+      if (finiteCoordinate(node.fx) && finiteCoordinate(node.fy) && finiteCoordinate(node.fz)) continue;
+
+      const targetR = goalMeshShellRadiusForDepth(node.depth);
+      const x = node.x ?? 0;
+      const y = node.y ?? 0;
+      const z = node.z ?? 0;
+      const r = Math.hypot(x, y, z);
+      if (r < 0.001) {
+        const fallback = goalMeshFibonacciSpherePoint(goalIdHash(node.id) % 17, 17);
+        node.x = fallback.x * targetR;
+        node.y = fallback.y * targetR;
+        node.z = fallback.z * targetR;
+        continue;
+      }
+      const k = 1.35;
+      const factor = ((targetR - r) / r) * k * alpha;
+      node.vx = (node.vx ?? 0) + x * factor;
+      node.vy = (node.vy ?? 0) + y * factor;
+      node.vz = (node.vz ?? 0) + z * factor;
+    }
+  }) as ShellForce;
+  force.initialize = (initNodes) => {
+    nodes = initNodes;
+  };
+  return force;
+}
+
+/** 一块「天」：方向是地块中心，halfAngle 是独占圆锥半角（弧度）。 */
+export type GoalMeshAngularPlot = {
+  direction: GoalMeshVector;
+  halfAngle: number;
+};
+
 /** 斐波那契球面采样：在单位球上近似均匀取点。 */
 export function goalMeshFibonacciSpherePoint(index: number, count: number, jitter = 0): GoalMeshVector {
   const n = Math.max(1, count);
@@ -332,58 +428,153 @@ export function goalMeshFibonacciSpherePoint(index: number, count: number, jitte
   };
 }
 
+function unitDirection(value: GoalMeshVector): GoalMeshVector {
+  return normalizedVector(value) ?? { x: 1, y: 0, z: 0 };
+}
+
+function angularDistanceBetweenUnits(a: GoalMeshVector, b: GoalMeshVector) {
+  return Math.acos(clamp(a.x * b.x + a.y * b.y + a.z * b.z, -1, 1));
+}
+
+/** 整球均分立体角时，每块地对应的球冠半角。 */
+export function goalMeshEqualSphereCapHalfAngle(count: number) {
+  const n = Math.max(1, count);
+  if (n === 1) return Math.PI;
+  return Math.acos(clamp(1 - 2 / n, -1, 1));
+}
+
+/** 父地块立体角均分给 n 个孩子后的球冠半角。 */
+export function goalMeshEqualChildCapHalfAngle(parentHalfAngle: number, childCount: number) {
+  const n = Math.max(1, childCount);
+  const alpha = clamp(parentHalfAngle, 0, Math.PI);
+  if (n === 1) return alpha;
+  const parentCos = Math.cos(alpha);
+  return Math.acos(clamp(1 - (1 - parentCos) / n, -1, 1));
+}
+
+/** 单位圆盘上的向日葵采样（近似均匀面积）。 */
+function goalMeshUnitDiscSample(index: number, count: number, jitter = 0) {
+  if (count <= 1) return { u: 0, v: 0 };
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const r = Math.sqrt((index + 0.5) / count);
+  const theta = index * golden + jitter;
+  return { u: Math.cos(theta) * r, v: Math.sin(theta) * r };
+}
+
+/** 把圆盘点等面积映射进以 axis 为轴、半角 halfAngle 的球冠。 */
+export function goalMeshDirectionInSphericalCap(axis: GoalMeshVector, halfAngle: number, u: number, v: number): GoalMeshVector {
+  const outward = unitDirection(axis);
+  const { tangent, binormal } = orthonormalFrame(outward);
+  const r2 = Math.min(1, u * u + v * v);
+  const cosAlpha = Math.cos(clamp(halfAngle, 0, Math.PI));
+  const cosTheta = 1 - (1 - cosAlpha) * r2;
+  const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta));
+  const r = Math.sqrt(r2);
+  const cosPhi = r > 1e-8 ? u / r : 1;
+  const sinPhi = r > 1e-8 ? v / r : 0;
+  return unitDirection({
+    x: outward.x * cosTheta + (tangent.x * cosPhi + binormal.x * sinPhi) * sinTheta,
+    y: outward.y * cosTheta + (tangent.y * cosPhi + binormal.y * sinPhi) * sinTheta,
+    z: outward.z * cosTheta + (tangent.z * cosPhi + binormal.z * sinPhi) * sinTheta
+  });
+}
+
 /**
- * 球体感成簇种子：
- * - 一级目标铺满以地图中心为球心的球面（斐波那契球）
- * - 子目标绕父节点形成局部球面壳（外半球偏置，保持树向外生长）
+ * 先分地：把父地块（或整球）切成互不重叠的独占圆锥。
+ * - parentPlot == null：在整球上分一级地块
+ * - 否则：只在父地块内再分给孩子
+ */
+export function allocateGoalMeshAngularPlots(
+  count: number,
+  parentPlot: GoalMeshAngularPlot | null,
+  idHashes: number[] = []
+): GoalMeshAngularPlot[] {
+  const n = Math.max(1, count);
+
+  if (!parentPlot) {
+    const directions = Array.from({ length: n }, (_, index) => {
+      const jitter = (((idHashes[index] ?? index) % 41) - 20) * 0.012;
+      return unitDirection(goalMeshFibonacciSpherePoint(index, n, jitter));
+    });
+    const equalHalf = goalMeshEqualSphereCapHalfAngle(n);
+    return directions.map((direction, index) => {
+      let nearest = Math.PI;
+      for (let other = 0; other < n; other += 1) {
+        if (other === index) continue;
+        nearest = Math.min(nearest, angularDistanceBetweenUnits(direction, directions[other]));
+      }
+      const halfFromNeighbors = n === 1 ? Math.PI : nearest * 0.5 * 0.9;
+      return { direction, halfAngle: Math.min(equalHalf, halfFromNeighbors) };
+    });
+  }
+
+  const parentDir = unitDirection(parentPlot.direction);
+  const parentHalf = clamp(parentPlot.halfAngle, 0, Math.PI);
+  if (n === 1) return [{ direction: parentDir, halfAngle: parentHalf }];
+
+  const childHalfFromSolid = goalMeshEqualChildCapHalfAngle(parentHalf, n);
+  // 孩子中心落在略收缩的父冠内，给各自地块边界留余量。
+  const placementHalf = Math.max(0.05, parentHalf * 0.82);
+  const directions = Array.from({ length: n }, (_, index) => {
+    const jitter = (((idHashes[index] ?? index) % 29) - 14) * 0.03;
+    const { u, v } = goalMeshUnitDiscSample(index, n, jitter);
+    return goalMeshDirectionInSphericalCap(parentDir, placementHalf, u, v);
+  });
+
+  return directions.map((direction, index) => {
+    let nearest = Math.PI;
+    for (let other = 0; other < n; other += 1) {
+      if (other === index) continue;
+      nearest = Math.min(nearest, angularDistanceBetweenUnits(direction, directions[other]));
+    }
+    const halfFromNeighbors = nearest * 0.5 * 0.9;
+    const fromParent = angularDistanceBetweenUnits(parentDir, direction);
+    const halfToParentEdge = Math.max(0.02, parentHalf - fromParent);
+    return {
+      direction,
+      halfAngle: Math.min(childHalfFromSolid, halfFromNeighbors, halfToParentEdge)
+    };
+  });
+}
+
+/**
+ * 同心球壳种子（先分地再盖房）：
+ * - 先按层级把球面立体角切成互不重叠的地块
+ * - 再把节点盖在地块中心 × 该层壳半径上
  */
 export function seedGoalMeshTreePositions(goals: GoalNode[]): Map<string, GoalMeshVector> {
   const positions = new Map<string, GoalMeshVector>();
-  const topCount = Math.max(1, goals.length);
+  const tops = [...goals].sort((a, b) => compareGoalId(a.id, b.id));
 
-  const placeChildren = (parent: GoalNode, parentPos: GoalMeshVector, depth: number) => {
-    const children = parent.children || [];
+  const placeWithPlot = (goal: GoalNode, plot: GoalMeshAngularPlot, depth: number) => {
+    const radius = goalMeshShellRadiusForDepth(depth);
+    const direction = unitDirection(plot.direction);
+    positions.set(goal.id, {
+      x: direction.x * radius,
+      y: direction.y * radius,
+      z: direction.z * radius
+    });
+
+    const children = [...(goal.children || [])].sort((a, b) => compareGoalId(a.id, b.id));
     if (children.length === 0) return;
 
-    const outward = outwardUnitFromParent(parentPos);
-    const { tangent, binormal } = orthonormalFrame(outward);
-    const siblingCount = children.length;
-    const orbitRadius = goalMeshChildOrbitBaseRadius + siblingCount * goalMeshChildOrbitRadiusPerSibling + (depth - 1) * 6;
-
-    children.forEach((child, siblingIndex) => {
-      const hash = goalIdHash(child.id);
-      const jitter = ((hash % 29) - 14) * 0.04;
-      // 在父节点局部球面上采样；外半球偏置（|y|→outward）保持径向向外的球体层次。
-      const sample = goalMeshFibonacciSpherePoint(siblingIndex, siblingCount, jitter);
-      const local: GoalMeshVector = {
-        x: tangent.x * sample.x + outward.x * Math.abs(sample.y) + binormal.x * sample.z,
-        y: tangent.y * sample.x + outward.y * Math.abs(sample.y) + binormal.y * sample.z,
-        z: tangent.z * sample.x + outward.z * Math.abs(sample.y) + binormal.z * sample.z
-      };
-      const unit = normalizedVector(local) ?? outward;
-      // 轻微径向起伏，让球壳有厚度而不像薄皮。
-      const shell = orbitRadius * (0.88 + ((hash % 9) / 9) * 0.28);
-      const pos: GoalMeshVector = {
-        x: parentPos.x + unit.x * shell,
-        y: parentPos.y + unit.y * shell,
-        z: parentPos.z + unit.z * shell
-      };
-      positions.set(child.id, pos);
-      placeChildren(child, pos, depth + 1);
+    const childPlots = allocateGoalMeshAngularPlots(
+      children.length,
+      plot,
+      children.map((child) => goalIdHash(child.id))
+    );
+    children.forEach((child, index) => {
+      placeWithPlot(child, childPlots[index] ?? plot, depth + 1);
     });
   };
 
-  goals.forEach((goal, index) => {
-    const hash = goalIdHash(goal.id);
-    const sample = goalMeshFibonacciSpherePoint(index, topCount, ((hash % 41) - 20) * 0.012);
-    const radius = goalMeshTopLevelSeedRadius * (0.92 + ((hash % 7) / 7) * 0.16);
-    const pos: GoalMeshVector = {
-      x: sample.x * radius,
-      y: sample.y * radius,
-      z: sample.z * radius
-    };
-    positions.set(goal.id, pos);
-    placeChildren(goal, pos, 1);
+  const topPlots = allocateGoalMeshAngularPlots(
+    tops.length,
+    null,
+    tops.map((goal) => goalIdHash(goal.id))
+  );
+  tops.forEach((goal, index) => {
+    placeWithPlot(goal, topPlots[index] ?? { direction: { x: 1, y: 0, z: 0 }, halfAngle: Math.PI }, 1);
   });
 
   return positions;
@@ -597,6 +788,7 @@ export type GoalMeshEntrancePlanItem = {
 export type GoalMeshEntrancePlan = {
   items: GoalMeshEntrancePlanItem[];
   totalMs: number;
+  flightMs: number;
 };
 
 /** 天体绽放缓动：前段快冲出中心，尾段柔和落位。 */
@@ -673,7 +865,101 @@ export function planGoalMeshEntrance(nodes: GoalMeshNode[], seeds?: Map<string, 
 
   const totalMs =
     items.reduce((max, item) => Math.max(max, item.delayMs + goalMeshEntranceFlightMs), 0) + goalMeshEntranceSettleHoldMs;
-  return { items, totalMs };
+  return { items, totalMs, flightMs: goalMeshEntranceFlightMs };
+}
+
+/** 从当前引擎节点快照坐标。 */
+export function captureGoalMeshPositions(nodes: Iterable<Pick<GoalMeshNode, "id" | "x" | "y" | "z">>): Map<string, GoalMeshVector> {
+  const positions = new Map<string, GoalMeshVector>();
+  for (const node of nodes) {
+    positions.set(node.id, {
+      x: finiteCoordinate(node.x) ? node.x : 0,
+      y: finiteCoordinate(node.y) ? node.y : 0,
+      z: finiteCoordinate(node.z) ? node.z : 0
+    });
+  }
+  return positions;
+}
+
+/** 读取建图时写入的协调种子坐标（同心壳 + 分地）。 */
+export function coordinatedSeedsFromGraph(graph: Pick<GoalMeshGraph, "nodes">): Map<string, GoalMeshVector> {
+  return captureGoalMeshPositions(graph.nodes);
+}
+
+/**
+ * 结构变化后的全量协调重排时间表：
+ * 已有节点从旧坐标滑到新种子；新增节点从中心飞入所属壳位。
+ */
+export function planGoalMeshRebalance(
+  nodes: GoalMeshNode[],
+  fromById: Map<string, GoalMeshVector>,
+  toById: Map<string, GoalMeshVector>,
+  addedNodeIds: Iterable<string> = []
+): GoalMeshEntrancePlan {
+  const added = new Set(addedNodeIds);
+  const center = nodes.find((node) => node.kind === "map");
+  const goals = nodes
+    .filter((node) => node.kind !== "map")
+    .slice()
+    .sort((a, b) => {
+      const seedA = toById.get(a.id) ?? goalMeshEntranceSeed(a);
+      const seedB = toById.get(b.id) ?? goalMeshEntranceSeed(b);
+      if (a.depth !== b.depth) return a.depth - b.depth;
+      const angleA = Math.atan2(seedA.z, seedA.x);
+      const angleB = Math.atan2(seedB.z, seedB.x);
+      if (angleA !== angleB) return angleA - angleB;
+      return a.id.localeCompare(b.id);
+    });
+
+  const items: GoalMeshEntrancePlanItem[] = [];
+  if (center) {
+    items.push({
+      id: center.id,
+      depth: 0,
+      delayMs: 0,
+      from: { x: 0, y: 0, z: 0 },
+      to: { x: 0, y: 0, z: 0 }
+    });
+  }
+
+  let siblingIndexInDepth = 0;
+  let lastDepth = -1;
+  for (const node of goals) {
+    if (node.depth !== lastDepth) {
+      siblingIndexInDepth = 0;
+      lastDepth = node.depth;
+    }
+    const to = toById.get(node.id) ?? goalMeshEntranceSeed(node);
+    const from = added.has(node.id) ? { x: 0, y: 0, z: 0 } : (fromById.get(node.id) ?? to);
+    items.push({
+      id: node.id,
+      depth: node.depth,
+      delayMs: Math.max(0, node.depth - 1) * goalMeshRebalanceDepthStaggerMs + siblingIndexInDepth * goalMeshRebalanceSiblingStaggerMs,
+      from,
+      to
+    });
+    siblingIndexInDepth += 1;
+  }
+
+  const totalMs =
+    items.reduce((max, item) => Math.max(max, item.delayMs + goalMeshRebalanceFlightMs), 0) + goalMeshRebalanceSettleHoldMs;
+  return { items, totalMs, flightMs: goalMeshRebalanceFlightMs };
+}
+
+/** 把节点放到重排起点并钉住，供滑向协调种子。 */
+export function prepareGoalMeshRebalance(nodes: GoalMeshNode[], fromById: Map<string, GoalMeshVector>) {
+  for (const node of nodes) {
+    const from = fromById.get(node.id) ?? { x: 0, y: 0, z: 0 };
+    node.x = from.x;
+    node.y = from.y;
+    node.z = from.z;
+    node.vx = 0;
+    node.vy = 0;
+    node.vz = 0;
+    node.fx = from.x;
+    node.fy = from.y;
+    node.fz = from.z;
+  }
 }
 
 /** 把节点钉在中心，供入场动画从原点展开；返回各节点目标种子坐标。 */
@@ -743,6 +1029,7 @@ export function applyGoalMeshEntranceFrame(
   elapsedMs: number
 ): { progressById: Map<string, number>; done: boolean } {
   const progressById = new Map<string, number>();
+  const flightMs = plan.flightMs > 0 ? plan.flightMs : goalMeshEntranceFlightMs;
   let done = true;
   for (const item of plan.items) {
     const node = nodesById.get(item.id);
@@ -759,7 +1046,7 @@ export function applyGoalMeshEntranceFrame(
       done = false;
       continue;
     }
-    const raw = local / goalMeshEntranceFlightMs;
+    const raw = local / flightMs;
     const eased = goalMeshEntranceEase(raw);
     progressById.set(item.id, clamp(eased, 0, 1));
     if (raw < 1) done = false;
@@ -944,14 +1231,24 @@ export function goalMeshNodeNeutralRadius(node: GoalMeshNode) {
   return goalMeshNodeRadius(node, goalMeshNodeVisualStyle(node, [], goalMeshNeutralFocus));
 }
 
-// 连线静息长度随两端星体半径缩放:大节点之间连线更长、叶子节点之间更短,
-// 表面呼吸间距始终 ≥ 12,保证节点醒目(整图更紧凑)但不相互拥挤。
+// 连线静息长度以球壳间距为主（跨层边 ≈ |R(a)-R(b)|），再加少量星体表面余量，
+// 避免 link force 把子节点拉离所属球壳；无 depth 信息时回退到半径启发式。
 export function goalMeshLinkRestLength(link: GoalMeshLink) {
-  const sourceRadius = typeof link.source === "object" ? goalMeshNodeNeutralRadius(link.source) : goalMeshFallbackEndpointRadius;
-  const targetRadius = typeof link.target === "object" ? goalMeshNodeNeutralRadius(link.target) : goalMeshFallbackEndpointRadius;
-  const span = sourceRadius + targetRadius;
+  const source = typeof link.source === "object" ? link.source : null;
+  const target = typeof link.target === "object" ? link.target : null;
+  const sourceRadius = source ? goalMeshNodeNeutralRadius(source) : goalMeshFallbackEndpointRadius;
+  const targetRadius = target ? goalMeshNodeNeutralRadius(target) : goalMeshFallbackEndpointRadius;
+  const surfacePad = sourceRadius + targetRadius;
   const jitter = link.id.length % 9;
-  return link.type === "center" ? clamp(span * 1.3 + 24, 52, 104) + jitter : clamp(span * 1.4 + 20, 34, 84) + jitter;
+
+  if (source && target) {
+    const shellSpan = Math.abs(goalMeshShellRadiusForDepth(source.depth) - goalMeshShellRadiusForDepth(target.depth));
+    if (shellSpan > 1) {
+      return shellSpan + surfacePad * 0.18 + jitter * 0.1;
+    }
+  }
+
+  return link.type === "center" ? clamp(surfacePad * 1.3 + 24, 52, 104) + jitter : clamp(surfacePad * 1.4 + 20, 34, 84) + jitter;
 }
 
 export type GoalMeshNodeLayerSpec = {
@@ -1251,7 +1548,7 @@ export function GoalMeshMap({
         seeds ??
         new Map(engineNodes.map((node) => [node.id, goalMeshEntranceSeed(node)] as const));
 
-      // 先藏住节点，用短 warmup 避碰微调（树形成簇种子已表达层级），再作为绽放终点。
+      // 先藏住节点，用短 warmup 做壳内切向避碰，再投影回球壳作为绽放终点。
       applyEntranceRevealScales(new Map(engineNodes.map((node) => [node.id, 0])));
       placeGoalMeshNodesAtSeeds(engineNodes, radialSeeds);
       try {
@@ -1261,8 +1558,9 @@ export function GoalMeshMap({
           links: normalizeEngineLinks(graphDataRef.current, new Set(engineNodes.map((node) => node.id)))
         });
       } catch {
-        // settle is best-effort; fall back to radial seeds
+        // settle is best-effort; fall back to shell seeds
       }
+      applyGoalMeshShellProjection(engineNodes);
       const flightTargets = prepareGoalMeshEntrance(engineNodes);
 
       if (reducedMotionRef.current || engineNodes.length === 0) {
@@ -1315,6 +1613,92 @@ export function GoalMeshMap({
       entranceFrameRef.current = window.requestAnimationFrame(tick);
     },
     [applyEntranceRevealScales, cancelEntranceAnimation]
+  );
+
+  /** 结构变化后全量协调重排：已有节点滑到新种子，新增节点从中心飞入。 */
+  const playRebalanceAnimation = useCallback(
+    (
+      instance: ForceGraph3DInstance<GoalMeshNode, GoalMeshLink>,
+      engineNodes: GoalMeshNode[],
+      fromById: Map<string, GoalMeshVector>,
+      toById: Map<string, GoalMeshVector>,
+      addedNodeIds: string[]
+    ) => {
+      cancelEntranceAnimation();
+
+      const targets = new Map<string, GoalMeshVector>();
+      for (const node of engineNodes) {
+        if (node.kind === "map") {
+          targets.set(node.id, { x: 0, y: 0, z: 0 });
+          continue;
+        }
+        const seed = toById.get(node.id) ?? { x: 0, y: 0, z: 0 };
+        targets.set(node.id, projectGoalMeshNodeToShell({ ...node, x: seed.x, y: seed.y, z: seed.z }));
+      }
+
+      const fromForAnim = new Map(fromById);
+      for (const node of engineNodes) {
+        if (node.kind === "map") fromForAnim.set(node.id, { x: 0, y: 0, z: 0 });
+      }
+      for (const id of addedNodeIds) {
+        fromForAnim.set(id, { x: 0, y: 0, z: 0 });
+      }
+
+      if (reducedMotionRef.current || engineNodes.length === 0) {
+        placeGoalMeshNodesAtSeeds(engineNodes, targets);
+        for (const node of engineNodes) {
+          node.fx = finiteCoordinate(node.x) ? node.x : 0;
+          node.fy = finiteCoordinate(node.y) ? node.y : 0;
+          node.fz = finiteCoordinate(node.z) ? node.z : 0;
+          node.vx = 0;
+          node.vy = 0;
+          node.vz = 0;
+        }
+        instance.warmupTicks(0).cooldownTicks(0);
+        window.setTimeout(() => safeZoomToFit(instance, graphDataRef.current, 0, 68), 40);
+        return;
+      }
+
+      prepareGoalMeshRebalance(engineNodes, fromForAnim);
+      const plan = planGoalMeshRebalance(engineNodes, fromForAnim, targets, addedNodeIds);
+      entranceActiveRef.current = true;
+      instance.warmupTicks(0).cooldownTicks(Number.POSITIVE_INFINITY);
+      for (const handle of nodeHandleByIdRef.current.values()) handle.group.scale.setScalar(1);
+
+      try {
+        const overview = goalMeshOverviewCameraPose(targets.values());
+        instance.cameraPosition(overview.position, overview.lookAt, 420);
+      } catch {
+        // camera may not be ready yet
+      }
+
+      const startedAt = performance.now();
+      const tick = (now: number) => {
+        if (!entranceActiveRef.current || graphRef.current !== instance) return;
+        const elapsed = now - startedAt;
+        const { done } = applyGoalMeshEntranceFrame(engineNodeByIdRef.current, plan, elapsed);
+        if (!done) {
+          entranceFrameRef.current = window.requestAnimationFrame(tick);
+          return;
+        }
+
+        entranceFrameRef.current = null;
+        entranceActiveRef.current = false;
+        applyGoalMeshShellProjection(engineNodes);
+        for (const node of engineNodes) {
+          node.fx = finiteCoordinate(node.x) ? node.x : 0;
+          node.fy = finiteCoordinate(node.y) ? node.y : 0;
+          node.fz = finiteCoordinate(node.z) ? node.z : 0;
+          node.vx = 0;
+          node.vy = 0;
+          node.vz = 0;
+        }
+        instance.warmupTicks(0).cooldownTicks(0);
+        safeZoomToFit(instance, graphDataRef.current, 560, 72);
+      };
+      entranceFrameRef.current = window.requestAnimationFrame(tick);
+    },
+    [cancelEntranceAnimation]
   );
 
   const focusSelectedMeshNode = useCallback(() => {
@@ -1511,11 +1895,12 @@ export function GoalMeshMap({
       ]);
 
       const linkForce = instance.d3Force("link") as Partial<LinkForce> | undefined;
-      // 静息长度由两端星体半径推导(goalMeshLinkRestLength),连线长短与节点大小保持协调。
+      // 静息长度对齐球壳间距(goalMeshLinkRestLength)，避免跨层边把节点拉离所属壳。
       linkForce?.distance?.(goalMeshLinkRestLength);
-      linkForce?.strength?.((link) => (link.type === "center" ? 0.7 : 0.88));
+      linkForce?.strength?.((link) => (link.type === "center" ? 0.55 : 0.42));
       const chargeForce = instance.d3Force("charge") as Partial<ChargeForce> | undefined;
       chargeForce?.strength?.(-76);
+      instance.d3Force("shell", createGoalMeshShellForce());
       instance.d3VelocityDecay(0.34).warmupTicks(0).cooldownTicks(Number.POSITIVE_INFINITY);
 
       const sizeGraph = () => {
@@ -1556,18 +1941,13 @@ export function GoalMeshMap({
     const diff = diffGoalMeshTopology(engineGraphRef.current, graphData);
 
     if (diff.changed) {
-      // 拓扑变化:复用既有节点对象(保留演化坐标与 Object3D),只有新节点从种子位置进入。
-      // 增量变化用 warmupTicks(0) 让既有节点从当前位置平滑演化;整图替换(如切换目标地图)
-      // 没有可保留的位置,重新播放从中心向外绽放的入场。
+      // 拓扑变化：复用节点对象身份；坐标按「同心壳 + 分地」全量协调重排。
+      // 整图替换走中心绽放入场；增删/改父子走从旧位滑到新位的重排动画。
       const fullReplacement = diff.addedNodeIds.length === graphData.nodes.length;
       cancelEntranceAnimation();
+      const previousPositions = captureGoalMeshPositions(engineNodeByIdRef.current.values());
       const { engineGraph, nodeById } = reconcileEngineGraph(engineNodeByIdRef.current, graphData);
-      const entranceSeeds = fullReplacement ? prepareGoalMeshEntrance(engineGraph.nodes) : null;
-      if (!fullReplacement) {
-        // 入场结束会钉住坐标；增量增删时先松钉，让力模拟微调层级。
-        releaseGoalMeshEntrancePins(engineGraph.nodes);
-        instance.warmupTicks(0).cooldownTicks(120);
-      }
+      const coordinatedSeeds = coordinatedSeedsFromGraph(graphData);
       engineNodeByIdRef.current = nodeById;
       instance.graphData(engineGraph);
       for (const id of Array.from(nodeHandleByIdRef.current.keys())) {
@@ -1575,20 +1955,17 @@ export function GoalMeshMap({
       }
       applyLinkStyles(instance);
       applyAllNodeVisuals(instance);
-      if (fullReplacement && entranceSeeds) {
+      if (fullReplacement) {
+        const entranceSeeds = prepareGoalMeshEntrance(engineGraph.nodes);
         window.setTimeout(() => {
           if (graphRef.current !== instance) return;
           playEntranceAnimation(instance, engineGraph.nodes, entranceSeeds);
         }, 32);
-      } else if (diff.nodeIdsChanged) {
+      } else {
         window.setTimeout(() => {
-          if (entranceActiveRef.current) return;
-          const selectedNode =
-            engineNodeByIdRef.current.get(selectedIdRef.current) ??
-            graphDataRef.current.nodes.find((node) => node.id === selectedIdRef.current);
-          if (selectedNode) safeFocusNode(instance, selectedNode, graphDataRef.current, reducedMotionRef.current);
-          else safeZoomToFit(instance, graphDataRef.current, reducedMotionRef.current ? 0 : 520, 68);
-        }, 80);
+          if (graphRef.current !== instance) return;
+          playRebalanceAnimation(instance, engineGraph.nodes, previousPositions, coordinatedSeeds, diff.addedNodeIds);
+        }, 32);
       }
     } else {
       // 仅属性变化(编辑、预览滑块、reload 回流):就地同步数据字段并刷新视觉,不重置力模拟、不移动相机。
@@ -1601,7 +1978,15 @@ export function GoalMeshMap({
     }
 
     engineGraphRef.current = graphData;
-  }, [graphData, applyAllNodeVisuals, applyLinkColorsOnly, applyLinkStyles, cancelEntranceAnimation, playEntranceAnimation]);
+  }, [
+    graphData,
+    applyAllNodeVisuals,
+    applyLinkColorsOnly,
+    applyLinkStyles,
+    cancelEntranceAnimation,
+    playEntranceAnimation,
+    playRebalanceAnimation
+  ]);
 
   useEffect(() => {
     applyAllNodeVisuals();
