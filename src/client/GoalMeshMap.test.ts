@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { GoalNode } from "../shared/types";
 import {
+  allocateGoalMeshAngularPlots,
   applyGoalMeshEntranceFrame,
+  applyGoalMeshShellProjection,
   buildGoalMeshGraph,
   diffGoalMeshTopology,
   goalMeshCameraPoseForNode,
@@ -14,6 +16,8 @@ import {
   goalMeshNodeRadius,
   goalMeshNodeVisualStyle,
   goalMeshOverviewCameraPose,
+  goalMeshShellGap,
+  goalMeshShellRadiusForDepth,
   graphDataForEngine,
   lerpGoalMeshVector,
   mergeGoalMeshNodeData,
@@ -21,6 +25,7 @@ import {
   placeGoalMeshNodesAtSeeds,
   planGoalMeshEntrance,
   prepareGoalMeshEntrance,
+  projectGoalMeshNodeToShell,
   reconcileEngineGraph,
   releaseGoalMeshEntrancePins,
   seedGoalMeshTreePositions
@@ -387,12 +392,16 @@ describe("goalMeshLinkRestLength", () => {
     expect(goalMeshLinkRestLength(big)).toBeGreaterThan(goalMeshLinkRestLength(small));
   });
 
-  it("keeps center links longer than parent links between the same endpoints", () => {
-    const { center, parent } = meshNodes();
-    const asCenter = { id: "career->map-1:x", source: parent, target: center, type: "center" as const };
-    const asParent = { id: "career->map-1:x", source: parent, target: center, type: "parent" as const };
+  it("keeps center spokes longer than inter-shell parent links", () => {
+    const { center, parent, leaf } = meshNodes();
+    const centerLink = { id: "career->map-1:center", source: parent, target: center, type: "center" as const };
+    const parentLink = { id: "career-child->career:parent", source: leaf, target: parent, type: "parent" as const };
 
-    expect(goalMeshLinkRestLength(asCenter)).toBeGreaterThan(goalMeshLinkRestLength(asParent));
+    expect(goalMeshLinkRestLength(centerLink)).toBeGreaterThan(goalMeshLinkRestLength(parentLink));
+    expect(goalMeshLinkRestLength(centerLink)).toBeGreaterThan(goalMeshShellRadiusForDepth(1) - 1);
+    expect(goalMeshLinkRestLength(centerLink)).toBeLessThan(goalMeshShellRadiusForDepth(1) + 24);
+    expect(goalMeshLinkRestLength(parentLink)).toBeGreaterThan(goalMeshShellGap - 1);
+    expect(goalMeshLinkRestLength(parentLink)).toBeLessThan(goalMeshShellGap + 24);
   });
 
   it("falls back to a finite rest length for unresolved string endpoints", () => {
@@ -800,6 +809,106 @@ describe("goal mesh entrance bloom", () => {
   });
 });
 
+describe("goalMeshShellRadiusForDepth", () => {
+  it("maps depth to concentric shell radii with a stable gap", () => {
+    expect(goalMeshShellRadiusForDepth(0)).toBe(0);
+    expect(goalMeshShellRadiusForDepth(1)).toBeGreaterThan(100);
+    expect(goalMeshShellRadiusForDepth(2) - goalMeshShellRadiusForDepth(1)).toBe(goalMeshShellGap);
+    expect(goalMeshShellRadiusForDepth(3) - goalMeshShellRadiusForDepth(2)).toBe(goalMeshShellGap);
+    expect(goalMeshShellGap).toBeGreaterThan(40);
+  });
+});
+
+describe("projectGoalMeshNodeToShell", () => {
+  it("pins map/center nodes at the origin and goals onto their depth shell", () => {
+    const mapProjected = projectGoalMeshNodeToShell({
+      id: "map",
+      kind: "map",
+      depth: 0,
+      x: 12,
+      y: -4,
+      z: 9
+    });
+    expect(mapProjected).toEqual({ x: 0, y: 0, z: 0 });
+
+    const goalProjected = projectGoalMeshNodeToShell({
+      id: "g",
+      kind: "goal",
+      depth: 2,
+      x: 3,
+      y: 0,
+      z: 4
+    });
+    expect(Math.hypot(goalProjected.x, goalProjected.y, goalProjected.z)).toBeCloseTo(goalMeshShellRadiusForDepth(2), 8);
+  });
+
+  it("strips radial velocity when projecting a live node set", () => {
+    const node = {
+      id: "drift",
+      title: "drift",
+      domain: "",
+      status: "active" as const,
+      progress: 0,
+      priority: 1,
+      depth: 1,
+      childCount: 0,
+      branchId: "drift",
+      branchTitle: "drift",
+      color: "#fff",
+      val: 10,
+      kind: "goal" as const,
+      x: 50,
+      y: 0,
+      z: 0,
+      vx: 10,
+      vy: 2,
+      vz: 0
+    };
+    applyGoalMeshShellProjection([node]);
+    expect(Math.hypot(node.x!, node.y!, node.z!)).toBeCloseTo(goalMeshShellRadiusForDepth(1), 8);
+    expect(node.vx).toBeCloseTo(0, 8);
+    expect(node.vy).toBeCloseTo(2, 8);
+  });
+});
+
+describe("allocateGoalMeshAngularPlots", () => {
+  function clampCos(value: number) {
+    return Math.min(1, Math.max(-1, value));
+  }
+
+  function angularDistance(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) {
+    const cos = a.x * b.x + a.y * b.y + a.z * b.z;
+    return Math.acos(clampCos(cos));
+  }
+
+  it("splits the full sphere into non-overlapping top-level plots", () => {
+    const plots = allocateGoalMeshAngularPlots(8, null, [1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(plots).toHaveLength(8);
+    for (let i = 0; i < plots.length; i += 1) {
+      for (let j = i + 1; j < plots.length; j += 1) {
+        const gap = angularDistance(plots[i].direction, plots[j].direction);
+        expect(plots[i].halfAngle + plots[j].halfAngle).toBeLessThanOrEqual(gap + 1e-6);
+      }
+    }
+  });
+
+  it("subdivides a parent plot into child plots that stay inside the parent land", () => {
+    const parent = { direction: { x: 0, y: 1, z: 0 }, halfAngle: 0.9 };
+    const plots = allocateGoalMeshAngularPlots(5, parent, [10, 11, 12, 13, 14]);
+    expect(plots).toHaveLength(5);
+    for (const plot of plots) {
+      expect(angularDistance(plot.direction, parent.direction)).toBeLessThanOrEqual(parent.halfAngle + 1e-6);
+      expect(angularDistance(plot.direction, parent.direction) + plot.halfAngle).toBeLessThanOrEqual(parent.halfAngle + 1e-5);
+    }
+    for (let i = 0; i < plots.length; i += 1) {
+      for (let j = i + 1; j < plots.length; j += 1) {
+        const gap = angularDistance(plots[i].direction, plots[j].direction);
+        expect(plots[i].halfAngle + plots[j].halfAngle).toBeLessThanOrEqual(gap + 1e-6);
+      }
+    }
+  });
+});
+
 describe("seedGoalMeshTreePositions", () => {
   function dist(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) {
     return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
@@ -813,7 +922,14 @@ describe("seedGoalMeshTreePositions", () => {
     return Math.min(1, Math.max(-1, value));
   }
 
-  it("keeps children closer to their parent than to an unrelated top-level goal", () => {
+  function angularDistance(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) {
+    const aLen = radial(a);
+    const bLen = radial(b);
+    const cos = (a.x * b.x + a.y * b.y + a.z * b.z) / (aLen * bLen);
+    return Math.acos(clampCos(cos));
+  }
+
+  it("keeps children angularly closer to their parent than to an unrelated top-level goal", () => {
     const childA = goal({ id: "child-a" });
     const childB = goal({ id: "child-b" });
     const parent = goal({ id: "parent", children: [childA, childB] });
@@ -823,7 +939,7 @@ describe("seedGoalMeshTreePositions", () => {
     const childPos = positions.get("child-a")!;
     const otherPos = positions.get("other")!;
 
-    expect(dist(childPos, parentPos)).toBeLessThan(dist(childPos, otherPos));
+    expect(angularDistance(childPos, parentPos)).toBeLessThan(angularDistance(childPos, otherPos));
   });
 
   it("spreads siblings around the parent with a meaningful fan angle", () => {
@@ -842,7 +958,7 @@ describe("seedGoalMeshTreePositions", () => {
     const cos = (toLeft.x * toRight.x + toLeft.y * toRight.y + toLeft.z * toRight.z) / (leftLen * rightLen);
     const angle = Math.acos(clampCos(cos));
 
-    expect(angle).toBeGreaterThan(0.4);
+    expect(angle).toBeGreaterThan(0.35);
     expect(dist(leftPos, rightPos)).toBeGreaterThan(20);
   });
 
@@ -852,8 +968,52 @@ describe("seedGoalMeshTreePositions", () => {
     const parent = goal({ id: "p", children: [child] });
     const positions = seedGoalMeshTreePositions([parent]);
 
+    expect(radial(positions.get("c")!)).toBeCloseTo(goalMeshShellRadiusForDepth(2), 8);
+    expect(radial(positions.get("p")!)).toBeCloseTo(goalMeshShellRadiusForDepth(1), 8);
+    expect(radial(positions.get("gc")!)).toBeCloseTo(goalMeshShellRadiusForDepth(3), 8);
     expect(radial(positions.get("c")!)).toBeGreaterThan(radial(positions.get("p")!));
     expect(radial(positions.get("gc")!)).toBeGreaterThan(radial(positions.get("c")!));
+  });
+
+  it("keeps same-depth goals on one concentric shell", () => {
+    const tops = Array.from({ length: 12 }, (_, i) =>
+      goal({
+        id: `top-${i}`,
+        children: Array.from({ length: 5 }, (_, j) => goal({ id: `top-${i}-child-${j}` }))
+      })
+    );
+    const positions = seedGoalMeshTreePositions(tops);
+    const depth1 = tops.map((item) => radial(positions.get(item.id)!));
+    const depth2 = tops.flatMap((item) => (item.children || []).map((child) => radial(positions.get(child.id)!)));
+    const mean1 = depth1.reduce((sum, value) => sum + value, 0) / depth1.length;
+    const mean2 = depth2.reduce((sum, value) => sum + value, 0) / depth2.length;
+
+    for (const value of depth1) {
+      expect(Math.abs(value - mean1) / mean1).toBeLessThan(0.08);
+    }
+    for (const value of depth2) {
+      expect(Math.abs(value - mean2) / mean2).toBeLessThan(0.08);
+    }
+    expect(mean2 - mean1).toBeGreaterThan(goalMeshShellGap * 0.9);
+  });
+
+  it("keeps sibling branches on their own land after plot allocation", () => {
+    const aKids = [goal({ id: "a1" }), goal({ id: "a2" }), goal({ id: "a3" })];
+    const bKids = [goal({ id: "b1" }), goal({ id: "b2" }), goal({ id: "b3" })];
+    const branchA = goal({ id: "branch-a", children: aKids });
+    const branchB = goal({ id: "branch-b", children: bKids });
+    const positions = seedGoalMeshTreePositions([branchA, branchB]);
+    const aPos = positions.get("branch-a")!;
+    const bPos = positions.get("branch-b")!;
+
+    for (const kid of aKids) {
+      const pos = positions.get(kid.id)!;
+      expect(angularDistance(pos, aPos)).toBeLessThan(angularDistance(pos, bPos));
+    }
+    for (const kid of bKids) {
+      const pos = positions.get(kid.id)!;
+      expect(angularDistance(pos, bPos)).toBeLessThan(angularDistance(pos, aPos));
+    }
   });
 
   it("wires tree seeds into buildGoalMeshGraph node coordinates", () => {
@@ -912,9 +1072,35 @@ describe("seedGoalMeshTreePositions", () => {
     const radii = tops.map((item) => radial(positions.get(item.id)!));
     const mean = radii.reduce((sum, value) => sum + value, 0) / radii.length;
     for (const value of radii) {
-      expect(Math.abs(value - mean) / mean).toBeLessThan(0.22);
+      expect(Math.abs(value - mean) / mean).toBeLessThan(0.08);
     }
+    expect(mean).toBeCloseTo(goalMeshShellRadiusForDepth(1), 8);
     const zs = tops.map((item) => positions.get(item.id)!.z);
     expect(Math.max(...zs) - Math.min(...zs)).toBeGreaterThan(mean * 0.9);
+  });
+
+  it("supports multi-level trees without collapsing shells or producing NaN", () => {
+    const deep = goal({
+      id: "d1",
+      children: [
+        goal({
+          id: "d2",
+          children: [
+            goal({
+              id: "d3",
+              children: [goal({ id: "d4a" }), goal({ id: "d4b" }), goal({ id: "d4c" })]
+            })
+          ]
+        })
+      ]
+    });
+    const positions = seedGoalMeshTreePositions([deep]);
+    for (const pos of positions.values()) {
+      expect(Number.isFinite(pos.x)).toBe(true);
+      expect(Number.isFinite(pos.y)).toBe(true);
+      expect(Number.isFinite(pos.z)).toBe(true);
+    }
+    expect(radial(positions.get("d4a")!) - radial(positions.get("d3")!)).toBeGreaterThan(goalMeshShellGap * 0.9);
+    expect(radial(positions.get("d3")!) - radial(positions.get("d2")!)).toBeGreaterThan(goalMeshShellGap * 0.9);
   });
 });
